@@ -31,9 +31,19 @@ param([switch]$Remove, [switch]$Internet)
 $ErrorActionPreference = 'Stop'
 $prefix = 'isthislegit'
 
+# LocalOnly rules stay scoped to LocalSubnet even under -Internet. Caddy
+# terminates TLS on 443 and reaches the chat server and LiveKit's signalling
+# over loopback, so neither has any reason to be reachable from outside -- and
+# both would be reachable in plaintext if they were. They stay open on the LAN
+# because that is still the quickest way to test from another machine here.
+#
+# The media ports are not LocalOnly and cannot be: WebRTC media goes straight
+# to this box rather than through Caddy. It is already DTLS-SRTP encrypted, so
+# there is nothing to terminate and nothing gained by proxying it.
 $rules = @(
-    @{ Name = 'chat server';       Protocol = 'TCP'; Port = '3000' }
-    @{ Name = 'livekit signal';    Protocol = 'TCP'; Port = '7880' }
+    @{ Name = 'caddy tls';         Protocol = 'TCP'; Port = '443' }
+    @{ Name = 'chat server';       Protocol = 'TCP'; Port = '3000'; LocalOnly = $true }
+    @{ Name = 'livekit signal';    Protocol = 'TCP'; Port = '7880'; LocalOnly = $true }
     @{ Name = 'livekit webrtc';    Protocol = 'TCP'; Port = '7881' }
     @{ Name = 'livekit turn';      Protocol = 'UDP'; Port = '3478' }
     @{ Name = 'livekit media';     Protocol = 'UDP'; Port = '50000-50100' }
@@ -65,12 +75,16 @@ foreach ($r in $rules) {
         continue
     }
 
+    # A LocalOnly rule never widens, whatever mode the script was run in.
+    $ruleScope = if ($r.LocalOnly) { 'LocalSubnet' } else { $scope }
+    $ruleLabel = if ($r.LocalOnly) { 'local subnet only' } else { $scopeLabel }
+
     New-NetFirewallRule -DisplayName $display `
         -Direction Inbound -Action Allow `
         -Protocol $r.Protocol -LocalPort $r.Port `
-        -RemoteAddress $scope -Profile Any | Out-Null
+        -RemoteAddress $ruleScope -Profile Any | Out-Null
 
-    Write-Host "allowed  $display  ($scopeLabel)" -ForegroundColor Green
+    Write-Host "allowed  $display  ($ruleLabel)" -ForegroundColor Green
 }
 
 if ($Remove) { return }
@@ -97,21 +111,25 @@ try {
 
 Write-Host "The firewall is now open to the internet on those ports." -ForegroundColor Yellow
 Write-Host ""
-Write-Host "Two things this script cannot do for you, and nothing works without both:"
-Write-Host "  1. Forward those same ports on the router to 192.168.1.230. Same"
-Write-Host "     numbers on both sides - LiveKit advertises the port it believes"
-Write-Host "     it is on, so translating them breaks voice and nothing else."
-Write-Host "  2. Check LIVEKIT_URL in apps/server/.env reads ws://$($public):7880"
-Write-Host "     and livekit.yaml has use_external_ip: true."
+Write-Host "Three things this script cannot do for you, and nothing works without all:"
+Write-Host "  1. Forward 443, 7881 (TCP), 3478 and 50000-50100 (UDP) on the router"
+Write-Host "     to 192.168.1.230. Same numbers on both sides - LiveKit advertises"
+Write-Host "     the port it believes it is on, so translating them breaks voice"
+Write-Host "     and nothing else. Do NOT forward 3000 or 7880 any more: Caddy"
+Write-Host "     reaches both over loopback, and forwarding them would publish the"
+Write-Host "     same two services again without TLS in front."
+Write-Host "  2. Run Caddy - infra\caddy\start.ps1. Without it 443 answers nothing."
+Write-Host "  3. Check LIVEKIT_URL in apps/server/.env reads"
+Write-Host "     wss://isthislegit-lk.duckdns.org and livekit.yaml has"
+Write-Host "     use_external_ip: true."
 Write-Host ""
 Write-Host "People outside then connect to:" -ForegroundColor Cyan
-Write-Host "  chat   http://$($public):3000"
-Write-Host "  voice  ws://$($public):7880"
+Write-Host "  chat   https://isthislegit.duckdns.org"
+Write-Host "  voice  wss://isthislegit-lk.duckdns.org"
 Write-Host ""
-Write-Host "That public address is a lease from your ISP and will move eventually."
-Write-Host "When it does, chat and voice both stop for everyone outside until"
-Write-Host "LIVEKIT_URL is updated - so check it before debugging anything else."
-Write-Host ""
-Write-Host "None of this is encrypted: plain HTTP and ws, no TLS. Anyone who finds" -ForegroundColor DarkYellow
-Write-Host "port 3000 can reach the login and register endpoints, and registration" -ForegroundColor DarkYellow
-Write-Host "is only as closed as your invite codes. Run -Remove when you are done." -ForegroundColor DarkYellow
+Write-Host "Both names are DuckDNS records that follow this connection's public"
+Write-Host "address ($public today), so an ISP lease change no longer breaks them."
+Write-Host "LiveKit is the exception: it discovers the public address by STUN once"
+Write-Host "at startup and advertises it in ICE candidates, so after the address"
+Write-Host "moves, voice stays silent until LiveKit is restarted. Chat recovers on"
+Write-Host "its own; voice needs the restart."
