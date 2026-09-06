@@ -62,7 +62,37 @@ Copy `infra/livekit/livekit.example.yaml` to `livekit.yaml` and fill in a pair.
 
 ## Running it
 
-**All three services, one command:**
+**The operator console starts everything and administers it.** It is the launcher, and the
+**isthislegit Server** app is how you open it — in development as well as on the server
+box, so both are running the same thing:
+
+```bash
+npm run server-app       # window + tray, and it starts the console itself
+npm run console          # just the console, headless, at http://127.0.0.1:4000
+```
+
+The app spawns the console and adopts one already listening on 4000, so the two commands
+do not conflict. It is a shell, not a second implementation: closing the window hides it to
+the tray, and **Quit** from the tray stops the console and everything the console started.
+
+**Start server** starts the chat server, LiveKit, and — in internet mode only — Caddy.
+**Start database** starts the PostgreSQL service. The rest of it is build, migrate, seed,
+the invite code, accounts, guilds and channels, and the deployment configuration. VS Code
+has one task for it, and one for the desktop client; there is deliberately nothing else in
+that list, because everything else is a button here.
+
+**`ISTHISLEGIT_ROOT` tells the app which tree to administer**, and the VS Code task sets it
+to the checkout. Without it the app searches — last used, beside its own executable,
+`C:\isthislegit`, then the repo — and on a machine with a server *installed* as well as
+checked out it would find the install first. The two are indistinguishable once the window
+is open, which is the whole reason the override exists. Set to a folder with no console in
+it, the app says so and quits rather than falling back to the search.
+
+The console binds `127.0.0.1` only, deliberately — it spawns processes, so exposing it to
+the network is remote code execution with no authentication in front of it. Do not change
+the bind address, and never forward port 4000.
+
+**Without the console**, the same three services in their own windows:
 
 ```bash
 powershell -ExecutionPolicy Bypass -File infra\start-all.ps1
@@ -79,24 +109,37 @@ It works in a repo checkout and in an installed copy, working out which from whe
 are `node.exe`, and so is anything else on the machine — `taskkill /IM node.exe` is how you
 kill PostgreSQL by accident.
 
-**The operator console** is separate and optional — it is the admin UI, not the launcher:
-
-```bash
-npm run console      # then http://127.0.0.1:4000
-```
-
-On the server box, open the **isthislegit Server** app instead: it runs the console and
-puts it in a window with a tray icon. It binds `127.0.0.1` only, deliberately — it spawns
-processes, so exposing it to the network is remote code execution with no authentication in
-front of it. Do not change the bind address, and never forward port 4000.
-
-**By hand, for development:**
+**Working on the server itself** needs watch mode, which the console has no way to offer —
+it runs `apps/server/dist/main.js`, so a code change there means Build then Restart in the
+console. Stop the console's server first; both want port 3000.
 
 ```bash
 npm install
 npm run build
 cd apps/server && npm run dev      # watch mode
 ```
+
+### Signing in on a fresh local checkout
+
+The chat server has no sign-up without an invite, and the first account to register into a
+guild becomes its admin. All of it is on one screen:
+
+1. Run the **Console** task. The isthislegit Server window opens on the console.
+2. **Status → Start database.** If the `chat` database does not exist yet, **Database →
+   Create role and database** makes it, using the postgres superuser password.
+3. **Maintenance → Run migrations**, then **Build**, then **Seed.** Seeding creates the
+   *Home* guild with `#general`, `#random` and a Voice channel, and prints an invite code
+   — the console reads it back on the **Invites** tab.
+4. **Accounts → Create the first admin**, with that invite code. That account is the admin.
+5. **Status → Start server.**
+6. Run the **Desktop app (dev)** task and sign in with the same username and password.
+
+The desktop client talks to `http://localhost:3000` unless you change **Server address** at
+the bottom of the sign-in screen; that address is remembered in `settings.json`, not
+compiled in. Voice is separate: the client is told where LiveKit is by `LIVEKIT_URL` in
+`apps/server/.env`, which must be this machine's **LAN** address rather than `localhost`,
+or it will work here and for nobody else. The console's **Configuration** tab writes it
+along with the two files that have to agree with it.
 
 ---
 
@@ -291,20 +334,53 @@ settings, and on speakers that combination will feed back.
 
 ### What each person controls
 
-In the app's voice settings, all defaulting to how it behaved before they existed:
+Settings open on a two-pane screen — Devices, Input, Behaviour, Quality — because the
+single 360px column had microphone choice and codec bitrate in the same scroll.
 
-- **Echo cancellation / noise suppression / automatic gain** — Chromium's own, applied at
-  capture. Changing any of them restarts the microphone.
-- **Sensitivity** — off, automatic, or a manual threshold with a live meter. Automatic
-  measures the room for 300 ms on join and sits a fixed margin above what it heard, so a
-  noisy room raises its own bar. It mutes and unmutes the published track exactly as
-  push-to-talk does; push-to-talk overrides it.
-- **Even out how loud people are** — turns down whoever is much louder than the rest over a
-  couple of seconds, recovering over about fifteen. Attenuation only; the other direction is
-  each person's own automatic gain, before their audio is ever encoded.
+- **Echo cancellation / noise suppression / automatic gain** (Input) — Chromium's own,
+  applied at capture. Changing any of them restarts the microphone.
+- **Push-to-talk** (Input) — the key and what it overrides only appear once the switch is
+  on, since neither means anything while it is off. If the global hook could not load, the
+  switch is disabled and says why instead.
+- **Sensitivity** (Input) — off, automatic, or a manual threshold with a live meter.
+  Automatic measures the room for 300 ms on join and sits a fixed margin above what it
+  heard, so a noisy room raises its own bar. It mutes and unmutes the published track
+  exactly as push-to-talk does; push-to-talk overrides it.
+- **Per-person volume** (right-click somebody in a voice channel) — remembered per user id,
+  applied whenever they are in the room. This is the whole of playback control, and it
+  replaced both a single output slider and an automatic leveller: turning the whole room
+  down at once is what the volume knob on the desk is for, and the problem worth an app
+  control is the one person who is twice as loud as everyone else, which is per person by
+  definition. **It only turns people down** — without `webAudioMix` a remote track's level
+  is an `HTMLMediaElement.volume`, which the spec caps at 1.0. Boosting would mean routing
+  everyone through Web Audio and putting a question mark over echo cancellation, which is a
+  bad trade in a voice app. The quiet direction is each person's own automatic gain,
+  applied before their audio is ever encoded.
+- **Rejoin the last voice channel** (Behaviour, off by default) — the channel is written
+  down on join and cleared on leave, so this only fires if the app stopped while you were
+  still in one. Leaving on purpose is remembered as leaving.
 
 **None of this processes the audio.** Every meter is an analyser tap wired to no
 destination, so the worst a bug in any of it can do is show a wrong number.
+
+### Who is talking, and how fast the light says so
+
+The speaking ring is measured in the client, not taken from LiveKit.
+`ActiveSpeakersChanged` is computed by the SFU from the audio it is forwarding and
+broadcast on its own clock, so it lagged at both ends — on after somebody had started, off
+after they had stopped. Every track already carries a meter for the gate, so the timely
+answer was in the room all along: remote tracks are polled at 50 ms and the
+local microphone at 20 ms, through a small hysteretic detector. `isSpeaking` stays the
+fallback for anybody not yet metered.
+
+### The screen picker draws before its pictures exist
+
+`desktopCapturer.getSources` with a thumbnail size captures a frame of every open window,
+which is seconds on a busy desktop — and that was the whole of the delay between clicking
+share and seeing anything. It now runs twice: once with `thumbnailSize: { width: 0, height:
+0 }` for the names, which is nearly free and is what the picker opens with, and once for
+the pictures, which arrive on a second IPC message and fill in behind them. Picking a
+window before its thumbnail has landed is allowed and does not wait.
 
 ---
 
@@ -495,8 +571,16 @@ Ordered by what hurts soonest.
 
 **Product**
 
-10. `Chat.tsx` is 1250 lines and holds the message list, editing, moderation, attachments,
-    unread markers and embeds. Split it before adding reactions.
+10. `Chat.tsx` is past 1300 lines and holds the message list, editing, moderation,
+    attachments, unread markers, embeds and now the per-person volume popup. Split it
+    before adding reactions.
 11. Emoji reactions, theme toggle, non-image attachments, mentions and notifications, search.
+    Images in a message now open full size on click and copy on right-click — the copy goes
+    through main, because an uploaded image is a blob: URL the renderer can rasterise but a
+    linked one is another origin, where a canvas is tainted and `fetch` is a CORS failure.
 12. Neither Electron app has an icon — both ship with Electron's default.
-13. Client error surfaces: what a user sees on a 500, or when the server is simply not there.
+13. Client error surfaces: what a user sees on a 500. "Server is not there" is done —
+    `fetch` rejects with "Failed to fetch" for every address that never reached a server,
+    and devtools shows those with provisional headers, which reads as a cross-origin block
+    and is not one. `api.ts` now names the origin that did not answer, and says that a
+    server with no proxy in front of it is `http://` on its own port.

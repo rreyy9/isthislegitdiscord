@@ -22,21 +22,25 @@ export interface VoiceSettings {
   /** dBFS, used only when gateMode is 'manual'. */
   gateThreshold: number;
   /* --- playback --- */
-  /** Turn down whoever is loudest so the room sits in one band. */
-  normalizeVoices: boolean;
-  /** 0..1, applied on top of normalisation. */
-  outputVolume: number;
+  /** Playback level per person, 0..1, keyed by user id. */
+  userVolumes: Record<string, number>;
+  /* --- behaviour --- */
+  /** Walk back into `lastVoiceChannelId` once the app has signed in again. */
+  rejoinLastChannel: boolean;
 }
 
 export interface Settings {
   serverUrl: string;
+  /** The voice channel this client was in when it last stopped, if any. */
+  lastVoiceChannelId: string | null;
   voice: VoiceSettings;
 }
 
 export interface ScreenSource {
   id: string;
   name: string;
-  thumbnail: string;
+  /** Null until the thumbnail pass catches up. */
+  thumbnail: string | null;
   isScreen: boolean;
 }
 
@@ -64,6 +68,26 @@ const bridge = {
   },
   chooseScreenSource: (sourceId: string | null): Promise<boolean> =>
     ipcRenderer.invoke('screen:chose', sourceId),
+  /** The pictures, id-keyed, arriving after the list they belong to. */
+  onScreenThumbnails: (
+    cb: (thumbnails: Record<string, string>) => void,
+  ): (() => void) => {
+    const handler = (_e: unknown, thumbnails: Record<string, string>) =>
+      cb(thumbnails);
+    ipcRenderer.on('screen:thumbnails', handler);
+    return () => {
+      ipcRenderer.off('screen:thumbnails', handler);
+    };
+  },
+
+  /* ---------------------------------------------------------- clipboard */
+
+  /**
+   * Put an image on the system clipboard. Pass `dataUrl` for something the
+   * renderer could encode itself, or `url` for one main has to go and fetch.
+   */
+  copyImage: (src: { dataUrl?: string; url?: string }): Promise<boolean> =>
+    ipcRenderer.invoke('clipboard:image', src),
 
   /* ------------------------------------------------------- push-to-talk */
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { attachmentUrl, type AttachmentDto } from '../api';
 import { IMAGE_EXT_RE, URL_RE, youtubeId, youtubeStart } from '../link-utils';
+import { useImageActions } from './ImageViewer';
 
 /**
  * Turning message text into something worth looking at.
@@ -54,6 +55,7 @@ function YouTube({ id, start }: { id: string; start: number | null }) {
 /** An image someone linked to directly, rather than uploaded. */
 function LinkedImage({ url }: { url: string }) {
   const [failed, setFailed] = useState(false);
+  const { imageProps } = useImageActions();
   if (failed) {
     return (
       <a className="link" href={url} onClick={openExternal(url)}>
@@ -63,9 +65,25 @@ function LinkedImage({ url }: { url: string }) {
   }
   return (
     <div className="embed-img">
-      <img src={url} alt="" loading="lazy" onError={() => setFailed(true)} />
+      <img
+        src={url}
+        alt=""
+        loading="lazy"
+        onError={() => setFailed(true)}
+        {...imageProps({ src: url, name: fileNameOf(url) })}
+      />
     </div>
   );
+}
+
+/** The last path segment of a URL, which is the only name a link ever has. */
+function fileNameOf(url: string): string {
+  try {
+    const path = new URL(url).pathname;
+    return decodeURIComponent(path.slice(path.lastIndexOf('/') + 1)) || url;
+  } catch {
+    return url;
+  }
 }
 
 /* --------------------------------------------------------- attachments */
@@ -74,6 +92,7 @@ function LinkedImage({ url }: { url: string }) {
 export function AttachmentImage({ file }: { file: AttachmentDto }) {
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const { imageProps } = useImageActions();
 
   useEffect(() => {
     let live = true;
@@ -101,7 +120,13 @@ export function AttachmentImage({ file }: { file: AttachmentDto }) {
       className={'attach' + (src ? '' : ' loading')}
       style={{ aspectRatio: ratio, maxWidth }}
     >
-      {src && <img src={src} alt={file.fileName} />}
+      {src && (
+        <img
+          src={src}
+          alt={file.fileName}
+          {...imageProps({ src, name: file.fileName })}
+        />
+      )}
     </div>
   );
 }

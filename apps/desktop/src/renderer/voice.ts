@@ -13,7 +13,7 @@ import {
 } from 'livekit-client';
 import { api, type VoiceAudioDto } from './api';
 import { bridge } from './bridge';
-import { InputGate, TrackMeter, VoiceNormalizer } from './audio-levels';
+import { InputGate, SpeakingDetector, TrackMeter } from './audio-levels';
 
 /**
  * Everything voice, in one hook.
@@ -82,8 +82,9 @@ export interface VoiceSettings {
   autoGainControl: boolean;
   gateMode: 'off' | 'auto' | 'manual';
   gateThreshold: number;
-  normalizeVoices: boolean;
-  outputVolume: number;
+  /** Playback level per person, 0..1, keyed by user id. Missing means 1. */
+  userVolumes: Record<string, number>;
+  rejoinLastChannel: boolean;
 }
 
 /** A live reading of the local microphone, for the meter in settings. */
@@ -172,13 +173,29 @@ export function useVoice(settings: VoiceSettings) {
     open: false,
   });
 
-  /** One meter and one leveller per remote person, keyed by identity. */
+  /** One meter and speech detector per remote person. */
   const remotesRef = useRef(
     new Map<
       string,
-      { meter: TrackMeter | null; norm: VoiceNormalizer; gain: number }
+      {
+        meter: TrackMeter | null;
+        speak: SpeakingDetector;
+      }
     >(),
   );
+
+  /**
+   * Who is talking, measured here rather than taken from LiveKit.
+   *
+   * The SFU works out its active speakers from the audio it is forwarding and
+   * broadcasts the answer on its own clock, so the light lagged at both ends —
+   * on after someone had started, off after they had stopped. Every track
+   * already carries a meter for the gate and the leveller, and that reading is
+   * milliseconds old, so the timely answer was in the room all along.
+   * `isSpeaking` stays the fallback for anyone not yet metered.
+   */
+  const speakingRef = useRef(new Map<string, boolean>());
+  const localSpeechRef = useRef(new SpeakingDetector());
 
   /* -------------------------------------------------- hidden audio sink */
 
@@ -206,7 +223,7 @@ export function useVoice(settings: VoiceSettings) {
     const peers: VoicePeer[] = all.map((p) => ({
       identity: p.identity,
       name: nameOf(p),
-      speaking: p.isSpeaking,
+      speaking: speakingRef.current.get(p.identity) ?? p.isSpeaking,
       muted: !p.isMicrophoneEnabled,
       isLocal: p === room.localParticipant,
       screenSharing: p.isScreenShareEnabled,
@@ -233,22 +250,35 @@ export function useVoice(settings: VoiceSettings) {
     }));
   }, []);
 
+  /** Record who is talking, and re-render only when the answer changes. */
+  const setSpeaking = useCallback(
+    (identity: string | undefined, speaking: boolean) => {
+      if (!identity) return;
+      if (speakingRef.current.get(identity) === speaking) return;
+      speakingRef.current.set(identity, speaking);
+      sync();
+    },
+    [sync],
+  );
+
   /* ------------------------------------------------------------ volumes */
 
   /**
-   * One place works out how loud a remote person should be, because three
-   * things have an opinion: deafen (silences everything), the output slider,
-   * and the leveller's per-person correction. Capped at 1 — without
-   * `webAudioMix` this ends up as an HTMLMediaElement `volume`, which throws
-   * above 1.0.
+   * One place works out how loud a remote person should be, because two things
+   * have an opinion: deafen (silences everything) and the slider set for that
+   * person.
+   *
+   * Capped at 1, which is also why the per-person slider only turns people
+   * down. Without `webAudioMix` this ends up as an HTMLMediaElement `volume`,
+   * and the spec caps that at 1.0 — anything above it throws. Boosting would
+   * mean routing every remote track through Web Audio, and being able to
+   * amplify is not worth putting a question mark over echo cancellation in a
+   * voice app.
    */
   const volumeFor = useCallback((identity: string) => {
     if (deafenedRef.current) return 0;
-    const s = settingsRef.current;
-    const gain = s.normalizeVoices
-      ? (remotesRef.current.get(identity)?.gain ?? 1)
-      : 1;
-    return Math.max(0, Math.min(1, s.outputVolume * gain));
+    const wanted = settingsRef.current.userVolumes[identity] ?? 1;
+    return Math.max(0, Math.min(1, wanted));
   }, []);
 
   const applyVolumes = useCallback(() => {
@@ -329,7 +359,14 @@ export function useVoice(settings: VoiceSettings) {
     micMeterRef.current = null;
     micSourceRef.current = source;
     gateRef.current.reset();
-    if (!source) return;
+    if (!source) {
+      // Muting unpublishes the track, which stops the meter — so if this is
+      // not said now, nothing will ever say it, and the ring stays lit on
+      // whatever the last reading before the mute happened to be.
+      localSpeechRef.current.reset();
+      setSpeaking(room?.localParticipant.identity, false);
+      return;
+    }
 
     micMeterRef.current = new TrackMeter(
       source,
@@ -347,11 +384,19 @@ export function useVoice(settings: VoiceSettings) {
           setState((prev) => ({ ...prev, gateOpen: open }));
           if (!s.pushToTalk && s.gateMode !== 'off') void applyMic();
         }
+        // Updated every tick and never short-circuited: the detector holds a
+        // timer, and skipping readings while muted would leave it stale. Being
+        // loud while muted is still not talking, so the two combine after.
+        const loud = localSpeechRef.current.update(db);
+        const live =
+          !mutedRef.current &&
+          (s.pushToTalk ? talkingRef.current : s.gateMode === 'off' || open);
+        setSpeaking(roomRef.current?.localParticipant.identity, loud && live);
       },
       // Essential, not an optimisation: see TrackMeter.
       { clone: true },
     );
-  }, [applyMic]);
+  }, [applyMic, setSpeaking]);
 
   /* --------------------------------------------------------- join/leave */
 
@@ -361,6 +406,8 @@ export function useVoice(settings: VoiceSettings) {
     micSourceRef.current = null;
     gateRef.current.reset();
     gateOpenRef.current = true;
+    localSpeechRef.current.reset();
+    speakingRef.current.clear();
     for (const entry of remotesRef.current.values()) entry.meter?.close();
     remotesRef.current.clear();
   }, []);
@@ -470,6 +517,7 @@ export function useVoice(settings: VoiceSettings) {
             if (track.kind === Track.Kind.Audio) {
               remotesRef.current.get(participant.identity)?.meter?.close();
               remotesRef.current.delete(participant.identity);
+              speakingRef.current.delete(participant.identity);
             }
             sync();
           },
@@ -541,27 +589,25 @@ export function useVoice(settings: VoiceSettings) {
   );
 
   /**
-   * Start levelling one remote person. The meter is a tap on their track; the
-   * correction is applied to the volume of the element LiveKit already made,
-   * so the audio path is exactly what it would have been.
+   * Start metering one remote person, which is how their portrait knows to
+   * light up. The meter is a tap on their track and connects to nothing, so
+   * the audio path is exactly what it would have been.
    */
   const watchRemote = useCallback(
     (participant: RemoteParticipant, track: RemoteTrack) => {
       remotesRef.current.get(participant.identity)?.meter?.close();
       const entry = {
         meter: null as TrackMeter | null,
-        norm: new VoiceNormalizer(),
-        gain: 1,
+        speak: new SpeakingDetector(),
       };
       remotesRef.current.set(participant.identity, entry);
-      entry.meter = new TrackMeter(track.mediaStreamTrack, 100, (db) => {
-        entry.gain = entry.norm.update(db);
-        if (settingsRef.current.normalizeVoices) {
-          participant.setVolume(volumeFor(participant.identity));
-        }
+      // 50ms rather than 100, because this reading decides whether someone's
+      // portrait is lit, and that is a thing people watch.
+      entry.meter = new TrackMeter(track.mediaStreamTrack, 50, (db) => {
+        setSpeaking(participant.identity, entry.speak.update(db));
       });
     },
-    [volumeFor],
+    [setSpeaking],
   );
 
   /* ------------------------------------------------------------ controls */
@@ -676,7 +722,7 @@ export function useVoice(settings: VoiceSettings) {
 
   useEffect(() => {
     applyVolumes();
-  }, [settings.normalizeVoices, settings.outputVolume, applyVolumes]);
+  }, [settings.userVolumes, applyVolumes]);
 
   useEffect(() => {
     gateRef.current.reset();

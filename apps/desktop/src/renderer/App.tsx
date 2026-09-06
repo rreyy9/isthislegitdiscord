@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, getToken, initApi, setToken, type Me } from './api';
 import { Login } from './components/Login';
 import { Chat } from './components/Chat';
+import { ImageViewerProvider } from './components/ImageViewer';
 
 type State =
   | { phase: 'loading' }
@@ -36,5 +37,12 @@ export function App() {
   if (state.phase === 'login') {
     return <Login onDone={() => void resolveSession()} />;
   }
-  return <Chat me={state.me} onSignOut={() => setState({ phase: 'login' })} />;
+  // The image viewer sits above Chat rather than inside it: the lightbox and
+  // the right-click menu are app-level overlays, and every image that wants
+  // them is somewhere under here.
+  return (
+    <ImageViewerProvider>
+      <Chat me={state.me} onSignOut={() => setState({ phase: 'login' })} />
+    </ImageViewerProvider>
+  );
 }

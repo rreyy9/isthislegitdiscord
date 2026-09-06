@@ -22,9 +22,11 @@ import { useVoice, type VoiceSettings } from '../voice';
 import {
   ScreenPicker,
   ScreenStage,
+  SettingsModal,
+  UserVolumeMenu,
   VoicePanel,
-  VoiceSettingsModal,
 } from './Voice';
+import { useImageActions } from './ImageViewer';
 
 type Status = 'connected' | 'disconnected' | 'connecting';
 
@@ -124,10 +126,16 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     autoGainControl: true,
     gateMode: 'off',
     gateThreshold: -45,
-    normalizeVoices: false,
-    outputVolume: 1,
+    userVolumes: {},
+    rejoinLastChannel: false,
   });
-  const [showVoiceSettings, setShowVoiceSettings] = useState(false);
+  /** Settings arrive from main, so nothing that reads them may act before. */
+  const [settingsReady, setSettingsReady] = useState(false);
+  /** The voice channel this client was in when it last stopped, if any. */
+  const [lastVoiceChannelId, setLastVoiceChannelId] = useState<string | null>(
+    null,
+  );
+  const [showSettings, setShowSettings] = useState(false);
   /** Images pasted or dropped, held locally until the message is sent. */
   const [pending, setPending] = useState<{ file: File; preview: string }[]>([]);
   /** channelId -> last message id this user has read. */
@@ -143,6 +151,12 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
    * the row — inside the scroll box it would be clipped.
    */
   const [menuFor, setMenuFor] = useState<{
+    userId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  /** Whose per-person volume popup is open, and where to draw it. */
+  const [volumeFor, setVolumeFor] = useState<{
     userId: string;
     x: number;
     y: number;
@@ -183,7 +197,11 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   /* ------------------------------------------------------ initial + socket */
 
   useEffect(() => {
-    void bridge.getSettings().then((s) => setVoiceSettings(s.voice));
+    void bridge.getSettings().then((s) => {
+      setVoiceSettings(s.voice);
+      setLastVoiceChannelId(s.lastVoiceChannelId);
+      setSettingsReady(true);
+    });
   }, []);
 
   /** Persisted in main's settings.json, and applied to a live call at once. */
@@ -193,6 +211,32 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     await bridge.setSettings({ voice: next });
     if (patch.inputDeviceId) await voice.setInputDevice(patch.inputDeviceId);
     if (patch.outputDeviceId) await voice.setOutputDevice(patch.outputDeviceId);
+  }
+
+  /** One person's playback level. 100% is stored as no entry at all. */
+  function setUserVolume(userId: string, volume: number) {
+    const next = { ...voiceSettings.userVolumes };
+    if (volume >= 1) delete next[userId];
+    else next[userId] = volume;
+    void updateVoiceSettings({ userVolumes: next });
+  }
+
+  /**
+   * Joining and leaving voice both go through here, so that "the channel I was
+   * in" is written down at the moment it changes. Leaving clears it: walking
+   * out of a channel on purpose and being put back in on the next launch is
+   * not what the setting offers.
+   */
+  function joinVoice(channelId: string) {
+    setLastVoiceChannelId(channelId);
+    void bridge.setSettings({ lastVoiceChannelId: channelId });
+    void voice.join(channelId);
+  }
+
+  function leaveVoice() {
+    setLastVoiceChannelId(null);
+    void bridge.setSettings({ lastVoiceChannelId: null });
+    void voice.leave();
   }
 
   const loadMembers = useCallback(async () => {
@@ -334,6 +378,34 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     return () => clearTimeout(t);
   }, [myMutedUntil, loadMembers]);
 
+  /**
+   * Walk back into the channel this client was in when it last stopped.
+   *
+   * Guarded by a ref rather than by state because it has to happen exactly
+   * once. The guild list and the settings arrive independently, so this runs
+   * again when the second of them lands — and by then somebody may already
+   * have left the channel it is about to put them back into.
+   */
+  const rejoinedRef = useRef(false);
+  useEffect(() => {
+    if (rejoinedRef.current || !settingsReady) return;
+    if (!voiceSettings.rejoinLastChannel || !lastVoiceChannelId) return;
+    const channel = guilds
+      .flatMap((g) => g.channels)
+      .find((c) => c.id === lastVoiceChannelId && c.kind === 'VOICE');
+    // A channel that has since been deleted, or that we were kicked out of,
+    // simply is not there — leave the stored id alone and try again next time.
+    if (!channel) return;
+    rejoinedRef.current = true;
+    void voice.join(channel.id);
+  }, [
+    guilds,
+    settingsReady,
+    voiceSettings.rejoinLastChannel,
+    lastVoiceChannelId,
+    voice.join,
+  ]);
+
   // Any click outside the moderation menu closes it, the way a menu should.
   useEffect(() => {
     if (!menuFor) return;
@@ -341,6 +413,14 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, [menuFor]);
+
+  // Same for the volume popup.
+  useEffect(() => {
+    if (!volumeFor) return;
+    const close = () => setVolumeFor(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [volumeFor]);
 
   // Errors from a refused action are worth reading, not worth keeping.
   useEffect(() => {
@@ -766,9 +846,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                         <div
                           className={'chan' + (here ? ' in-voice' : '')}
                           title={here ? 'You are in this channel' : 'Join voice'}
-                          onClick={() =>
-                            here ? void voice.leave() : void voice.join(c.id)
-                          }
+                          onClick={() => (here ? leaveVoice() : joinVoice(c.id))}
                         >
                           <span className="hash">🔊</span>
                           {c.name}
@@ -786,6 +864,20 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                               className={
                                 'voice-mem' + (peer?.speaking ? ' speaking' : '')
                               }
+                              title={
+                                id === me.id
+                                  ? undefined
+                                  : 'Right-click to set how loud they are'
+                              }
+                              onContextMenu={(e) => {
+                                if (id === me.id) return;
+                                e.preventDefault();
+                                setVolumeFor({
+                                  userId: id,
+                                  x: e.clientX,
+                                  y: e.clientY,
+                                });
+                              }}
                             >
                               <div className="avatar tiny">
                                 {initials(nameOfUser(id))}
@@ -810,7 +902,8 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           voice={voice}
           channelName={voiceChannelObj?.name ?? ''}
           pushToTalk={voiceSettings.pushToTalk}
-          onOpenSettings={() => setShowVoiceSettings(true)}
+          onLeave={leaveVoice}
+          onOpenSettings={() => setShowSettings(true)}
         />
 
         <div className="footer">
@@ -909,9 +1002,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                           />
                           {/* Our own pasted images, shown before the server echo. */}
                           {m.previews?.map((url) => (
-                            <div className="attach" key={url}>
-                              <img src={url} alt="" />
-                            </div>
+                            <PreviewImage key={url} url={url} />
                           ))}
                         </>
                       )}
@@ -1109,12 +1200,21 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
       </div>
 
       <ScreenPicker />
-      {showVoiceSettings && (
-        <VoiceSettingsModal
+      {volumeFor && (
+        <UserVolumeMenu
+          name={nameOfUser(volumeFor.userId)}
+          volume={voiceSettings.userVolumes[volumeFor.userId] ?? 1}
+          x={volumeFor.x}
+          y={volumeFor.y}
+          onChange={(v) => setUserVolume(volumeFor.userId, v)}
+        />
+      )}
+      {showSettings && (
+        <SettingsModal
           settings={voiceSettings}
           voice={voice}
           onChange={(patch) => void updateVoiceSettings(patch)}
-          onClose={() => setShowVoiceSettings(false)}
+          onClose={() => setShowSettings(false)}
         />
       )}
       {showBans && guilds[0] && (
@@ -1146,6 +1246,16 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** One of our own pasted images, shown until the server echo replaces it. */
+function PreviewImage({ url }: { url: string }) {
+  const { imageProps } = useImageActions();
+  return (
+    <div className="attach">
+      <img src={url} alt="" {...imageProps({ src: url, name: 'image' })} />
     </div>
   );
 }

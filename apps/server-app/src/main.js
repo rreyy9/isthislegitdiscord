@@ -80,6 +80,12 @@ function consoleDirFor(root) {
  * Where the server is. Checked in the order that needs the fewest questions:
  * what was used last, the installer's default, then the repo this app was
  * built from. Only when all three miss does it ask.
+ *
+ * `ISTHISLEGIT_ROOT` overrides the lot, and the development task sets it. A
+ * checkout and an install look identical once this window is open, so a box
+ * with both on it would otherwise start, stop and reconfigure whichever the
+ * search happened to reach first -- which is the install, because it is
+ * looked for earlier.
  */
 function findRoot() {
   // Installed, this app lives at <install>\app\, so the server is two levels
@@ -296,7 +302,21 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', showWindow);
 
   app.whenReady().then(async () => {
-    let root = findRoot();
+    const override = process.env.ISTHISLEGIT_ROOT;
+    // A typo here must not fall through to the search: being told the wrong
+    // folder and quietly administering a different one is the whole failure
+    // the override exists to prevent.
+    if (override && !consoleDirFor(override)) {
+      dialog.showErrorBox(
+        'ISTHISLEGIT_ROOT does not hold a console',
+        `Looked for console\\src\\main.mjs (or apps\\console\\src\\main.mjs) under:\n  ${override}\n\n` +
+          'Unset ISTHISLEGIT_ROOT to search the usual places instead.',
+      );
+      app.quit();
+      return;
+    }
+
+    let root = override || findRoot();
     if (!root) {
       root = await promptForRoot();
       if (!root) {
@@ -304,7 +324,9 @@ if (!app.requestSingleInstanceLock()) {
         return;
       }
     }
-    writeSettings({ root });
+    // Remembered only when it was found, never when it was dictated: a
+    // development override must not become the installed app's default.
+    if (!override) writeSettings({ root });
 
     const result = await startConsole(root);
     if (result.error) {

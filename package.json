@@ -12,7 +12,8 @@
     "db:migrate": "npm run db:migrate --workspace @isthislegit/server",
     "db:studio": "npm run db:studio --workspace @isthislegit/server",
     "db:generate": "npm run db:generate --workspace @isthislegit/server",
-    "console": "npm start --workspace @isthislegit/console"
+    "console": "npm start --workspace @isthislegit/console",
+    "server-app": "npm run dev --workspace @isthislegit/server-app"
   },
   "engines": {
     "node": ">=22"
