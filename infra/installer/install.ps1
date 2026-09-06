@@ -437,15 +437,30 @@ if ($lkKey -and $lkSecret) {
                 $seenExternal = $true
                 return "$indent" + "use_external_ip: " + $(if ($wantExternal) { 'true' } else { 'false' })
             }
+
+            # The key pair, and the webhook that has to name the same key.
+            #
+            # Line by line for the same reason as above, and for one more: a
+            # multiline -replace anchored with $ has to account for the \r of a
+            # CRLF file, and getting that wrong fails silently -- the pattern
+            # simply never matches, the placeholder ships, and LiveKit starts
+            # with a config that cannot mint or verify a token. Splitting on
+            # newlines first means no pattern here ever sees a line ending.
+            #
+            # `api_key` does not collide with the key-entry pattern: an
+            # underscore is not in [0-9a-zA-Z], so `api_key:` cannot match it.
+            if ($_ -match '^(\s*)API[0-9a-zA-Z]+:\s*\S+\s*$') {
+                return "$($Matches[1])${lkKey}: $lkSecret"
+            }
+            if ($_ -match '^(\s*)api_key:') {
+                return "$($Matches[1])api_key: $lkKey"
+            }
+            if ($_ -match '^(\s*)-\s*https?://\S*?/api/livekit/webhook\s*$') {
+                return "$($Matches[1])- http://127.0.0.1:$Port/api/livekit/webhook"
+            }
+
             return $_
         }) -join "`r`n"
-
-        # `\s*$` on the end would swallow the newline and the blank line after
-        # the keys block, closing the comment that follows up against it. Match
-        # trailing spaces and tabs only, and leave the line ending alone.
-        $yaml = $yaml -replace '(?m)^(\s*)API[0-9a-zA-Z]+:[ \t]*\S+[ \t]*$', "`${1}${lkKey}: $lkSecret"
-        $yaml = $yaml -replace '(?m)^(\s*)api_key:.*$', "`${1}api_key: $lkKey"
-        $yaml = $yaml -replace '(?m)^(\s*)-\s*http://[^\s]*?/api/livekit/webhook\s*$', "`${1}- http://127.0.0.1:$Port/api/livekit/webhook"
         # UTF-8 without a BOM. The comments in livekit.yaml contain non-ASCII
         # punctuation, so writing ASCII would mangle them, and Go's YAML parser
         # should not be handed a BOM.
