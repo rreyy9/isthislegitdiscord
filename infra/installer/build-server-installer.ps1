@@ -35,6 +35,11 @@ param(
     # dropped into caddy\bin (see infra/caddy/start.ps1 for where from).
     [switch] $NoCaddyBinary,
 
+    # Leave the isthislegit Server desktop app out. The install then has no
+    # window or tray icon and is driven from start-all.ps1 and a browser
+    # pointed at the console. Saves roughly 200 MB.
+    [switch] $NoServerApp,
+
     # Also emit a plain .zip of the same payload, for a box where running an
     # unsigned installer is not an option.
     [switch] $AlsoZip
@@ -111,6 +116,24 @@ if ($SkipBuild) {
     # imports zod schemas from shared at runtime, not only types, so shared has
     # to be compiled before the server is packaged.
     Invoke-Step 'npm run build' $repo 'npm' @('run', 'build')
+}
+
+# The admin app is packaged unpacked (electron-builder --dir) and staged as a
+# folder rather than built into its own installer. One machine, one download:
+# the server box should not have to run two setups to end up with a server and
+# a way to administer it.
+$serverAppUnpacked = Join-Path $repo 'apps\server-app\release\win-unpacked'
+if ($NoServerApp) {
+    Say "Skipping the admin app (-NoServerApp)." 'Yellow'
+} elseif ($SkipBuild -and (Test-Path $serverAppUnpacked)) {
+    Say "Reusing the existing admin app build (-SkipBuild)." 'Yellow'
+} else {
+    Say ""
+    Say "Building the admin app (electron-builder --dir)"
+    Invoke-Step 'npm run dist:dir' (Join-Path $repo 'apps\server-app') 'npm' @('run', 'dist:dir')
+    if (-not (Test-Path $serverAppUnpacked)) {
+        throw "electron-builder reported success but $serverAppUnpacked does not exist."
+    }
 }
 
 $prismaClient = Join-Path $repo 'apps\server\dist\generated\prisma'
@@ -209,6 +232,18 @@ if ($NoCaddyBinary) {
     Say "    caddy.exe not found in infra/caddy/bin -- omitted, TLS will not start" 'Yellow'
 }
 
+# The admin app, as an unpacked Electron folder. install.ps1 puts a Start Menu
+# and desktop shortcut on its executable, which is the thing anyone actually
+# opens day to day.
+if (-not $NoServerApp -and (Test-Path $serverAppUnpacked)) {
+    Say "  app/"
+    $appOut = Join-Path $staging 'app'
+    New-Item -ItemType Directory -Path $appOut -Force | Out-Null
+    # Contents, not the folder: copying win-unpacked itself would nest it as
+    # app\win-unpacked and the shortcut below would point at nothing.
+    Copy-Item (Join-Path $serverAppUnpacked '*') $appOut -Recurse -Force
+}
+
 # The firewall helper, the start/stop script and the installer itself. All three
 # sit at the root of the payload, which is where start-all.ps1 detects it is in
 # an installed copy rather than a repo checkout.
@@ -284,13 +319,15 @@ isthislegit-server-$version-setup.exe and it does the lot.
     console\     the operator console (binds to 127.0.0.1 only, by design)
     livekit\     LiveKit config, start script and (usually) the binary
     caddy\       TLS reverse proxy: Caddyfile, start script and the binary
+    app         the isthislegit Server admin app (window + tray icon)
+    app\         the isthislegit Server admin app (window and tray icon)
     install.ps1  everything the setup.exe does after unpacking
 
-Day to day you want the isthislegit Server app, which is a separate installer.
-It opens this console in a window and puts an icon in the tray. Everything is
-configured from its Configuration tab -- hostnames, ports, voice quality, and
-creating the database role -- and the first admin account is made from its
-Accounts tab.
+Day to day you want the isthislegit Server app. The installer puts it on the
+desktop and in the Start Menu; it opens the operator console in a window.
+Everything is configured from its Configuration tab -- hostnames, ports, voice
+quality, and creating the database role -- and the first admin account is made
+from its Accounts tab.
 
 start-all.ps1 starts and stops the three services from a terminal, for when
 that is easier than the app.

@@ -234,7 +234,7 @@ if ($inPlace) {
     Say "  payload is already in place -- nothing to copy"
 } elseif (-not (Would "copy server, shared, console, livekit and caddy")) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    foreach ($folder in @('server', 'shared', 'console', 'livekit', 'caddy')) {
+    foreach ($folder in @('server', 'shared', 'console', 'livekit', 'caddy', 'app')) {
         $src = Join-Path $here $folder
         if (Test-Path $src) { Copy-Item $src $InstallDir -Recurse -Force }
     }
@@ -571,6 +571,40 @@ if ($NoStartup) {
             -Principal $principal -Settings $settings | Out-Null
         Say "  registered $($t.Name)"
     }
+}
+
+# ----------------------------------------------------------------- 5b. shortcuts
+
+# The app is the thing anyone opens day to day, so it gets a shortcut in both
+# places people look. Made here rather than by NSIS because install.ps1 also
+# runs standalone, from the zip.
+$appExe = Join-Path $InstallDir 'app\isthislegit Server.exe'
+if (Test-Path $appExe) {
+    Step "Shortcuts"
+    if (-not (Would "add Start Menu and desktop shortcuts for the admin app")) {
+        $shell = New-Object -ComObject WScript.Shell
+        foreach ($dir in @(
+            [Environment]::GetFolderPath('Programs'),
+            [Environment]::GetFolderPath('Desktop')
+        )) {
+            if (-not $dir) { continue }
+            try {
+                $lnk = $shell.CreateShortcut((Join-Path $dir 'isthislegit Server.lnk'))
+                $lnk.TargetPath = $appExe
+                $lnk.WorkingDirectory = Join-Path $InstallDir 'app'
+                $lnk.Description = 'Administer the isthislegit server'
+                $lnk.Save()
+                Say "  $dir"
+            } catch {
+                Warn "  could not write a shortcut in $dir -- $($_.Exception.Message)"
+            }
+        }
+    }
+} elseif (-not $DryRun) {
+    Warn ""
+    Warn "The admin app is not in this payload, so no shortcut was made. The"
+    Warn "console can still be reached by running start-all.ps1 and opening"
+    Warn "http://127.0.0.1:4000 in a browser."
 }
 
 # ------------------------------------------------------------------ 6. firewall

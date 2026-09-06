@@ -82,8 +82,14 @@ function consoleDirFor(root) {
  * built from. Only when all three miss does it ask.
  */
 function findRoot() {
+  // Installed, this app lives at <install>\app\, so the server is two levels
+  // up from the executable. That is checked before the default path because it
+  // is the answer for a machine with the server installed somewhere else.
+  const besideExe = path.dirname(path.dirname(process.execPath));
+
   const candidates = [
     readSettings().root,
+    besideExe,
     'C:\\isthislegit',
     path.resolve(__dirname, '..', '..', '..'),
   ];
