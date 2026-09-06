@@ -11,12 +11,20 @@ not you have data on it, and the repository is public at
 
 ---
 
-## P0 — Live exposure
+## P0 — Live exposure — **done 2026-09-06** (commit `9f4fc12`)
 
 `HOSTING.md` said: "This directory is not a git repository today... The moment you run
-`git init` and push anywhere public, that file goes with it." That has now happened.
+`git init` and push anywhere public, that file goes with it." That happened, and this
+section is what it cost. All three are fixed; the write-ups are kept because the reasoning
+is the part worth not relearning.
 
-### 1. LiveKit API key and secret are published
+**One thing did not go away.** Force-pushing rewrote `main`, but GitHub still serves the
+old commit `67fa395` to anyone who asks for it by SHA — unreachable objects are only
+garbage-collected on request to GitHub Support. Forks, clones and scrapers may also hold
+it. That is why rotating the pair was the actual fix and the purge was only tidying.
+Both old secrets are dead, so what remains is a historical record rather than a live key.
+
+### 1. LiveKit API key and secret are published — done
 
 [infra/livekit/livekit.yaml](infra/livekit/livekit.yaml) holds this deployment's real key
 pair in plaintext. It is tracked in commit `67fa395` and that commit is on `origin/main`.
@@ -31,7 +39,7 @@ Anyone holding the pair can mint a join token for any voice room on the server.
 - Purge the file from git history and force-push.
 - Treat the old pair as burned regardless of the purge. It was public; assume it was read.
 
-### 2. `BETTER_AUTH_SECRET` is still the placeholder, and the placeholder is public
+### 2. `BETTER_AUTH_SECRET` is still the placeholder, and the placeholder is public — done
 
 `apps/server/.env` still holds `dev-only-secret-change-me-0123456789abcdef`, and
 [apps/server/.env.example](apps/server/.env.example) publishes that exact string to
@@ -46,13 +54,18 @@ including an admin one, without touching a password.
 Replace with 32+ random bytes. Every existing session is invalidated, so everyone signs
 in again once. That is the entire cost.
 
-### 3. The server installer bundles the live LiveKit key
+### 3. The server installer bundles the live LiveKit key — done
 
 `release/staging/isthislegit-server-0.1.0/livekit/livekit.yaml` contains the real pair.
 The server half of the package correctly ships `.env.example` rather than `.env`;
 `livekit.yaml` is the half that leaks. Fix
 [infra/installer/build-server-installer.ps1](infra/installer/build-server-installer.ps1)
 to template it, and do not hand the current build to anyone.
+
+Done, plus a check that fails the build if the payload ever carries a real key pair,
+a `devkey`, or a `.env`. `release/staging/` was deleted; the built `.exe` and `.zip`
+in `release/` still embed the old (now revoked) pair, so rebuild before distributing
+either.
 
 ---
 
