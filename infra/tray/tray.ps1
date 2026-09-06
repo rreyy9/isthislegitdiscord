@@ -93,15 +93,11 @@ $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 
 $consoleItem = New-Object System.Windows.Forms.ToolStripMenuItem 'Open operator console'
 $consoleItem.Add_Click({
-    # The console is a separate process and is not started by start-all: it is
-    # the admin UI, not part of the server. Start it if nothing holds 4000.
-    if (-not (Test-Port 4000)) {
-        Start-Process -FilePath 'powershell' -WorkingDirectory $repo -WindowStyle Hidden -ArgumentList @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'npm run console'
-        ) | Out-Null
-        Start-Sleep -Seconds 2
-    }
-    Start-Process 'http://127.0.0.1:4000'
+    # One script owns starting the console and opening it as an app window, so
+    # the tray and a double click from Explorer behave identically.
+    Start-Process -FilePath 'wscript.exe' -ArgumentList @(
+        "`"$here\isthislegit-console.vbs`""
+    ) | Out-Null
 })
 $menu.Items.Add($consoleItem) | Out-Null
 

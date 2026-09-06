@@ -68,6 +68,12 @@
   .muted { color: var(--dim); }
   .hidden { display: none !important; }
   .hint { color: var(--dim); font-size: 12.5px; margin-top: 9px; }
+  .lbl { color: var(--dim); font-size: 12.5px; min-width: 176px; }
+  .choice { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+            padding: 7px 13px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel2); }
+  .choice:has(input:checked) { border-color: var(--accent); color: var(--text); }
+  .warn-line { color: var(--warn); font-size: 12.5px; padding: 5px 0; }
+  .warn-line::before { content: "! "; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -77,6 +83,7 @@
   <span class="pill"><span class="dot" id="d-server"></span><span id="t-server">checking…</span></span>
   <span class="pill"><span class="dot" id="d-db"></span><span id="t-db">database</span></span>
   <span class="pill"><span class="dot" id="d-lk"></span><span id="t-lk">voice</span></span>
+  <span class="pill hidden" id="p-caddy"><span class="dot" id="d-caddy"></span><span id="t-caddy">tls</span></span>
   <span class="spacer"></span>
   <span class="pill hidden" id="who"></span>
   <button class="btn" id="signout" style="display:none">Sign out</button>
@@ -87,6 +94,7 @@
   <button data-tab="users">Accounts</button>
   <button data-tab="invites">Invites</button>
   <button data-tab="channels">Channels</button>
+  <button data-tab="config">Configuration</button>
   <button data-tab="logs">Logs</button>
 </nav>
 
@@ -220,6 +228,126 @@
     <div class="card not-admin"><span class="muted">Sign in on the Accounts tab first.</span></div>
   </section>
 
+  <!-- ----------------------------------------------------- configuration -->
+  <section id="tab-config" class="hidden">
+    <div class="card" id="cfg-warnings-card" style="display:none">
+      <h2>Attention</h2>
+      <div id="cfg-warnings"></div>
+    </div>
+
+    <div class="card">
+      <h2>Deployment</h2>
+      <div class="row">
+        <label class="choice"><input type="radio" name="cfg-mode" value="lan"> On the local network</label>
+        <label class="choice"><input type="radio" name="cfg-mode" value="internet"> On the internet, behind TLS</label>
+      </div>
+      <div class="hint">
+        This is one decision, not three. It sets the address LiveKit advertises,
+        the address clients are told to reach voice on, and whether Caddy runs.
+        Set separately, those three drift apart &mdash; and when they disagree
+        everyone joins the call, the channel shows them in it, and no audio ever
+        arrives.
+      </div>
+
+      <div id="cfg-lan" style="margin-top:14px">
+        <div class="row">
+          <label class="lbl">This machine on the network</label>
+          <input id="cfg-lanip" placeholder="192.168.1.230" style="width:170px">
+        </div>
+        <div class="hint">
+          Stated explicitly rather than detected: a box with several adapters
+          &mdash; Ethernet, VirtualBox, Hyper-V &mdash; and LiveKit picking the
+          wrong one is silent breakage. Check it with <code>ipconfig</code>.
+        </div>
+      </div>
+
+      <div id="cfg-internet" style="margin-top:14px">
+        <div class="row">
+          <label class="lbl">Chat hostname</label>
+          <input id="cfg-chathost" placeholder="something.duckdns.org" style="width:280px">
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="lbl">Voice hostname</label>
+          <input id="cfg-lkhost" placeholder="something-lk.duckdns.org" style="width:280px">
+        </div>
+        <div class="hint">
+          Two names, because the LiveKit client SDK opens its socket at the root
+          of whatever host it is given. Both point at this connection; Caddy
+          tells them apart by SNI, so it is still one forwarded port.
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Server</h2>
+      <div class="row">
+        <label class="lbl">HTTP port</label>
+        <input id="cfg-port" type="number" min="1" max="65535" style="width:110px">
+        <label class="lbl" style="margin-left:18px">Voice quality</label>
+        <select id="cfg-quality">
+          <option value="voice">voice &mdash; 24 kbps, for a bad connection</option>
+          <option value="balanced">balanced &mdash; 48 kbps, what most calls want</option>
+          <option value="high">high &mdash; 96 kbps, noticeably better</option>
+          <option value="studio">studio &mdash; 128 kbps stereo, headphones only</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:9px">
+        <label class="lbl">Attachment limit</label>
+        <input id="cfg-upload" type="number" min="1" style="width:110px"> <span class="muted">MB</span>
+      </div>
+      <div class="hint">
+        Voice quality is set here rather than per client, because the bitrate
+        everyone publishes at is what this connection's uplink has to carry.
+        Stereo (studio) means Chromium will not echo-cancel, so it feeds back on
+        speakers &mdash; headphones only.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Database</h2>
+      <div class="row">
+        <input id="cfg-pgpass" type="password" placeholder="postgres superuser password" style="width:280px">
+        <button class="btn" id="b-dbsetup">Create role and database</button>
+      </div>
+      <div class="hint">
+        Needed once, on a machine where PostgreSQL is installed but this app's
+        role and database have not been created. The password is used for this
+        one call and never stored. It is the superuser password you chose when
+        installing PostgreSQL &mdash; this console cannot install PostgreSQL
+        itself, and nothing here works until it is.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button class="btn primary" id="b-cfgsave">Save configuration</button>
+        <button class="btn" id="b-cfgreload">Discard changes</button>
+        <span class="muted" id="cfg-status"></span>
+      </div>
+      <div class="hint" id="cfg-restart-hint" style="display:none">
+        Saved. Nothing running has picked this up yet &mdash; restart from the
+        Server tab.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Not done from here</h2>
+      <div class="hint" style="margin-top:0">
+        <b>Port forwarding on the router.</b> Nothing on this machine can do it:
+        forward 443/tcp for chat and signalling, and 7881/tcp, 3478/udp and
+        50000&ndash;50100/udp for voice media, which goes straight to this box
+        rather than through Caddy. Do not forward 3000 or 7880 &mdash; Caddy
+        reaches both over loopback, and forwarding them republishes the same two
+        services with no TLS in front.<br><br>
+        <b>The firewall</b>, which needs an elevated terminal:
+        <code>infra\allow-lan.ps1 -Internet</code><br><br>
+        <b>Secrets</b> are not editable here. They are generated once, by the
+        installer or by hand, and a UI that can rewrite them is a UI that can
+        quietly lock everyone out.
+      </div>
+    </div>
+  </section>
+
   <!-- -------------------------------------------------------------- logs -->
   <section id="tab-logs" class="hidden">
     <div class="card">
@@ -272,8 +400,127 @@ document.querySelectorAll('nav button').forEach((b) => {
     if (b.dataset.tab === 'users') loadUsers();
     if (b.dataset.tab === 'invites') loadInvites();
     if (b.dataset.tab === 'channels') loadChannels();
+    if (b.dataset.tab === 'config') loadConfig();
   };
 });
+
+/* --------------------------------------------------------- configuration */
+
+let cfgLoaded = null;
+
+function cfgMode() {
+  const picked = document.querySelector('input[name="cfg-mode"]:checked');
+  return picked ? picked.value : 'lan';
+}
+
+/** Only the half of the form that applies to the chosen mode is shown. */
+function cfgSyncMode() {
+  const internet = cfgMode() === 'internet';
+  $('#cfg-internet').style.display = internet ? '' : 'none';
+  $('#cfg-lan').style.display = internet ? 'none' : '';
+}
+
+async function loadConfig() {
+  try {
+    const c = await (await fetch('/sv/config')).json();
+    if (!c.ok) return toast(c.error || 'Could not read the configuration.', true);
+    cfgLoaded = c;
+
+    for (const r of document.querySelectorAll('input[name="cfg-mode"]')) {
+      r.checked = r.value === c.mode;
+    }
+    $('#cfg-lanip').value = c.livekit.nodeIp ?? '';
+    $('#cfg-chathost').value = c.caddy.chat ?? '';
+    $('#cfg-lkhost').value = c.caddy.livekit ?? '';
+    $('#cfg-port').value = c.env.PORT ?? 3000;
+    $('#cfg-quality').value = c.env.VOICE_QUALITY ?? 'balanced';
+    $('#cfg-upload').value = Math.round(Number(c.env.MAX_UPLOAD_BYTES ?? 26214400) / 1048576);
+
+    const warnings = c.warnings ?? [];
+    $('#cfg-warnings').innerHTML = warnings
+      .map((w) => `<div class="warn-line"></div>`)
+      .join('');
+    // Set as text, never as HTML: a warning can quote a value out of a config
+    // file, and those are not ours to trust as markup.
+    document.querySelectorAll('#cfg-warnings .warn-line').forEach((el, i) => {
+      el.textContent = warnings[i];
+    });
+    $('#cfg-warnings-card').style.display = warnings.length ? '' : 'none';
+
+    $('#cfg-status').textContent = '';
+    $('#cfg-restart-hint').style.display = 'none';
+    cfgSyncMode();
+  } catch (e) {
+    toast('Could not read the configuration: ' + e.message, true);
+  }
+}
+
+document.querySelectorAll('input[name="cfg-mode"]').forEach((r) => {
+  r.onchange = cfgSyncMode;
+});
+
+$('#b-cfgreload').onclick = loadConfig;
+
+$('#b-cfgsave').onclick = async () => {
+  const body = {
+    mode: cfgMode(),
+    lanIp: $('#cfg-lanip').value.trim(),
+    chatHost: $('#cfg-chathost').value.trim(),
+    livekitHost: $('#cfg-lkhost').value.trim(),
+    port: Number($('#cfg-port').value),
+    voiceQuality: $('#cfg-quality').value,
+    maxUploadBytes: Math.round(Number($('#cfg-upload').value) * 1048576),
+  };
+
+  $('#b-cfgsave').disabled = true;
+  try {
+    const r = await (
+      await fetch('/sv/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    ).json();
+
+    if (!r.ok) {
+      toast((r.errors ?? ['Could not save.']).join(' · '), true);
+      return;
+    }
+    $('#cfg-status').textContent = r.written.length
+      ? `wrote ${r.written.length} file${r.written.length > 1 ? 's' : ''}`
+      : 'nothing changed';
+    $('#cfg-restart-hint').style.display = r.restartRequired ? '' : 'none';
+    toast('Configuration saved.');
+    await loadConfig();
+  } catch (e) {
+    toast('Could not save: ' + e.message, true);
+  } finally {
+    $('#b-cfgsave').disabled = false;
+  }
+};
+
+$('#b-dbsetup').onclick = async () => {
+  const password = $('#cfg-pgpass').value;
+  if (!password) return toast('Enter the postgres superuser password first.', true);
+
+  $('#b-dbsetup').disabled = true;
+  try {
+    const r = await (
+      await fetch('/sv/database/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+    ).json();
+    toast(r.ok ? r.note : r.error, !r.ok);
+    // Held only as long as the call needs it.
+    if (r.ok) $('#cfg-pgpass').value = '';
+  } catch (e) {
+    toast('Could not run the setup: ' + e.message, true);
+  } finally {
+    $('#b-dbsetup').disabled = false;
+  }
+};
 
 /* ---------------------------------------------------------------- status */
 async function poll() {
@@ -292,6 +539,18 @@ async function poll() {
       ? `voice up · :${s.livekit.port}`
       : (s.livekit.installed === false ? 'voice: no binary' : 'voice down');
     $('#b-lk-start').disabled = s.livekit.listening || s.livekit.installed === false;
+
+    // The TLS pill only appears when the deployment is actually behind Caddy.
+    // On a LAN install an absent proxy is correct, and a permanent red dot for
+    // something you are not using teaches people to ignore the dots.
+    const caddy = s.caddy ?? { required: false };
+    $('#p-caddy').classList.toggle('hidden', !caddy.required);
+    if (caddy.required) {
+      $('#d-caddy').className = 'dot ' + (caddy.listening ? 'on' : 'off');
+      $('#t-caddy').textContent = caddy.listening
+        ? `tls up · :${caddy.port}`
+        : (caddy.installed === false ? 'tls: no binary' : 'tls down');
+    }
     if (s.database.service) $('#db-svc').textContent = s.database.service;
 
     $('#b-kill-server').disabled = !up;

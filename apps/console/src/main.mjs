@@ -4,6 +4,7 @@ import net from 'node:net';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { readConfig, writeConfig, resolvePaths, envValue } from './config.mjs';
 
 /**
  * Operator console.
@@ -38,6 +39,17 @@ const LIVEKIT_CONFIG = path.join(LIVEKIT_DIR, 'livekit.yaml');
 /** The Windows service PostgreSQL 17 installs itself as. */
 const DB_SERVICE = process.env.DB_SERVICE ?? 'postgresql-x64-17';
 
+/** Caddy, found the same two ways as LiveKit: repo layout, or installed. */
+const CADDY_DIR = [
+  path.join(ROOT, 'infra/caddy'),
+  path.resolve(__dirname, '../../caddy'),
+].find((dir) => fs.existsSync(path.join(dir, 'Caddyfile'))) ?? path.join(ROOT, 'infra/caddy');
+const CADDY_EXE = path.join(CADDY_DIR, 'bin/caddy.exe');
+const CADDY_CONFIG = path.join(CADDY_DIR, 'Caddyfile');
+const CADDY_PORT = Number(process.env.CADDY_PORT ?? 443);
+
+const CONFIG_PATHS = resolvePaths(ROOT, __dirname);
+
 /* ------------------------------------------------------------------ state */
 
 let child = null;
@@ -47,6 +59,10 @@ let lastExit = null;
 let lk = null;
 let lkStartedAt = null;
 let lkLastExit = null;
+
+let caddy = null;
+let caddyStartedAt = null;
+let caddyLastExit = null;
 const LOG_LIMIT = 500;
 const logs = [];
 
@@ -174,6 +190,70 @@ async function stopLiveKit() {
     await new Promise((r) => setTimeout(r, 100));
   }
   return { ok: true, note: `LiveKit stopped (pid ${pid})` };
+}
+
+/**
+ * Caddy terminates TLS for the chat server and LiveKit's signalling. It is
+ * only started in internet mode: on a LAN deployment there is no hostname to
+ * get a certificate for, and it would sit retrying against Let's Encrypt
+ * forever while looking, from here, like a service that will not come up.
+ */
+async function startCaddy() {
+  if (caddy) return { ok: true, note: 'Caddy already running', pid: caddy.pid };
+
+  if (await tcpProbe(CADDY_PORT)) {
+    return {
+      ok: true,
+      note: `Caddy already listening on :${CADDY_PORT} (not started by this console)`,
+    };
+  }
+
+  if (!fs.existsSync(CADDY_EXE)) {
+    return {
+      ok: false,
+      error: `caddy.exe not found at ${CADDY_EXE} — download it from the Caddy releases page and put it there.`,
+    };
+  }
+
+  caddy = spawn(CADDY_EXE, ['run', '--config', CADDY_CONFIG, '--adapter', 'caddyfile'], {
+    cwd: CADDY_DIR,
+    env: { ...process.env },
+    windowsHide: true,
+  });
+  caddyStartedAt = Date.now();
+  caddyLastExit = null;
+  log('console', `starting Caddy (pid ${caddy.pid})`);
+
+  caddy.stdout.on('data', (d) => log('caddy', d.toString()));
+  caddy.stderr.on('data', (d) => log('caddy', d.toString()));
+  caddy.on('error', (e) => {
+    log('err', `Caddy failed to start: ${e.message}`);
+    caddy = null;
+    caddyStartedAt = null;
+  });
+  caddy.on('exit', (code, signal) => {
+    log('console', `Caddy exited (code=${code} signal=${signal ?? 'none'})`);
+    caddyLastExit = { code, signal, at: new Date().toISOString() };
+    caddy = null;
+    caddyStartedAt = null;
+  });
+
+  return { ok: true, note: `Caddy started (pid ${caddy.pid})`, pid: caddy.pid };
+}
+
+async function stopCaddy() {
+  if (!caddy) return { ok: true, note: 'Caddy not running' };
+  const pid = caddy.pid;
+  log('console', `stopping Caddy (pid ${pid})`);
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true });
+  } else {
+    caddy.kill('SIGTERM');
+  }
+  for (let i = 0; i < 40 && caddy; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return { ok: true, note: `Caddy stopped (pid ${pid})` };
 }
 
 async function stopServer() {
@@ -368,10 +448,11 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 app.get('/sv/status', async (req, res) => {
   const dbPort = readEnvPort();
-  const [apiUp, dbUp, livekitUp, dbService] = await Promise.all([
+  const [apiUp, dbUp, livekitUp, caddyUp, dbService] = await Promise.all([
     tcpProbe(SERVER_PORT),
     dbPort ? tcpProbe(dbPort) : Promise.resolve(false),
     tcpProbe(LIVEKIT_PORT),
+    tcpProbe(CADDY_PORT),
     serviceState(DB_SERVICE),
   ]);
 
@@ -412,6 +493,18 @@ app.get('/sv/status', async (req, res) => {
       lastExit: lkLastExit,
       installed: fs.existsSync(LIVEKIT_EXE),
     },
+    caddy: {
+      listening: caddyUp,
+      port: CADDY_PORT,
+      managed: Boolean(caddy),
+      pid: caddy?.pid ?? null,
+      uptimeSeconds: caddyStartedAt ? Math.round((Date.now() - caddyStartedAt) / 1000) : null,
+      lastExit: caddyLastExit,
+      installed: fs.existsSync(CADDY_EXE),
+      // Only meaningful in internet mode; the UI uses this to avoid reporting
+      // a LAN deployment's absent proxy as something being wrong.
+      required: readConfig(CONFIG_PATHS).mode === 'internet',
+    },
     console: { port: CONSOLE_PORT },
   });
 });
@@ -425,10 +518,20 @@ app.get('/sv/status', async (req, res) => {
 async function startAll() {
   const server = startServer();
   const livekit = await startLiveKit();
+
+  // Caddy last, and only when the deployment is actually behind it, so that a
+  // LAN install is not told a proxy it does not use has failed.
+  const wantsCaddy = readConfig(CONFIG_PATHS).mode === 'internet';
+  const caddyResult = wantsCaddy ? await startCaddy() : { ok: true, note: 'not used in LAN mode' };
+
   return {
     ...server,
     livekit,
-    error: server.error ?? (livekit.ok ? undefined : livekit.error),
+    caddy: caddyResult,
+    error:
+      server.error ??
+      (livekit.ok ? undefined : livekit.error) ??
+      (caddyResult.ok ? undefined : caddyResult.error),
   };
 }
 
@@ -436,16 +539,19 @@ app.post('/sv/server/start', async (req, res) => res.json(await startAll()));
 app.post('/sv/server/stop', async (req, res) => {
   const server = await stopServer();
   const livekit = await stopLiveKit();
-  res.json({ ok: server.ok, error: server.error, livekit });
+  const caddyStopped = await stopCaddy();
+  res.json({ ok: server.ok, error: server.error, livekit, caddy: caddyStopped });
 });
 app.post('/sv/server/restart', async (req, res) => {
   if (child) await stopServer();
   await stopLiveKit();
+  await stopCaddy();
   await new Promise((r) => setTimeout(r, 400));
   res.json(await startAll());
 });
 
 app.post('/sv/livekit/start', async (req, res) => res.json(await startLiveKit()));
+app.post('/sv/caddy/start', async (req, res) => res.json(await startCaddy()));
 
 /* ------------------------------------------------------------ stop things */
 
@@ -464,6 +570,11 @@ app.post('/sv/kill/livekit', async (req, res) => {
   res.json(await killPort(LIVEKIT_PORT, 'LiveKit'));
 });
 
+app.post('/sv/kill/caddy', async (req, res) => {
+  if (caddy) await stopCaddy();
+  res.json(await killPort(CADDY_PORT, 'Caddy'));
+});
+
 app.post('/sv/database/stop', async (req, res) => res.json(await stopDatabase()));
 app.post('/sv/database/start', async (req, res) => res.json(await startDatabase()));
 
@@ -474,6 +585,8 @@ app.post('/sv/kill/all', async (req, res) => {
   steps.push({ what: 'server', ...(await killPort(SERVER_PORT, 'chat server')) });
   if (lk) await stopLiveKit();
   steps.push({ what: 'livekit', ...(await killPort(LIVEKIT_PORT, 'LiveKit')) });
+  if (caddy) await stopCaddy();
+  steps.push({ what: 'caddy', ...(await killPort(CADDY_PORT, 'Caddy')) });
   steps.push({ what: 'database', ...(await stopDatabase()) });
 
   const failed = steps.filter((s) => !s.ok);
@@ -492,6 +605,104 @@ app.get('/sv/logs', (req, res) => {
 app.post('/sv/logs/clear', (req, res) => {
   logs.length = 0;
   res.json({ ok: true });
+});
+
+/* ------------------------------------------------------------- configuration */
+
+app.get('/sv/config', (req, res) => {
+  try {
+    res.json({ ok: true, ...readConfig(CONFIG_PATHS) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message ?? e) });
+  }
+});
+
+app.post('/sv/config', (req, res) => {
+  try {
+    const result = writeConfig(CONFIG_PATHS, req.body ?? {});
+    if (!result.ok) return res.status(400).json(result);
+    for (const p of result.written) log('console', `config written: ${p}`);
+    res.json({
+      ...result,
+      // Nothing here reaches a running process. Saying so is the difference
+      // between "I changed it and it did not work" and "I changed it".
+      restartRequired: Boolean(result.written.length),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, errors: [String(e?.message ?? e)] });
+  }
+});
+
+/**
+ * Creates the chat_app role and the chat database, using the superuser
+ * password typed in the UI and the application password already recorded in
+ * DATABASE_URL. The superuser password is used for this one call and never
+ * stored or logged.
+ */
+app.post('/sv/database/setup', async (req, res) => {
+  const superPassword = String(req.body?.password ?? '');
+  if (!superPassword) {
+    return res.status(400).json({ ok: false, error: 'The postgres superuser password is required.' });
+  }
+
+  if (!fs.existsSync(CONFIG_PATHS.env)) {
+    return res.status(400).json({ ok: false, error: `No .env at ${CONFIG_PATHS.env}.` });
+  }
+  const dbUrl = envValue(fs.readFileSync(CONFIG_PATHS.env, 'utf8'), 'DATABASE_URL') ?? '';
+  const appPassword = dbUrl.match(/^postgres(?:ql)?:\/\/[^:]+:([^@]+)@/)?.[1];
+  if (!appPassword) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Could not read the application password out of DATABASE_URL, so the role cannot be created to match it.',
+    });
+  }
+
+  const sql = path.join(SERVER_DIR, 'prisma/setup-postgres.sql');
+  if (!fs.existsSync(sql)) {
+    return res.status(400).json({ ok: false, error: `setup-postgres.sql not found at ${sql}.` });
+  }
+
+  // psql is not on PATH after a default Windows install.
+  let psql = 'psql';
+  const guesses = ['C:/Program Files/PostgreSQL'];
+  for (const base of guesses) {
+    if (!fs.existsSync(base)) continue;
+    const versions = fs.readdirSync(base).sort().reverse();
+    const found = versions
+      .map((v) => path.join(base, v, 'bin/psql.exe'))
+      .find((p) => fs.existsSync(p));
+    if (found) {
+      psql = found;
+      break;
+    }
+  }
+
+  log('console', 'running setup-postgres.sql');
+  const result = await new Promise((resolve) => {
+    execFile(
+      psql,
+      ['-U', 'postgres', '-w', '-v', `app_password=${appPassword}`, '-f', sql],
+      // -w above so a wrong password fails immediately instead of psql trying
+      // to prompt on a console this process does not have.
+      { windowsHide: true, env: { ...process.env, PGPASSWORD: superPassword } },
+      (err, stdout, stderr) => {
+        const out = String(stdout ?? '') + String(stderr ?? '');
+        for (const line of out.split(/\r?\n/)) if (line.trim()) log('task', line);
+        resolve({ ok: !err, out });
+      },
+    );
+  });
+
+  if (!result.ok) {
+    const wrongPassword = /authentication failed|no password supplied/i.test(result.out);
+    return res.json({
+      ok: false,
+      error: wrongPassword
+        ? 'PostgreSQL rejected that superuser password.'
+        : result.out.trim().split(/\r?\n/).slice(-4).join(' ') || 'psql failed.',
+    });
+  }
+  return res.json({ ok: true, note: 'chat_app role and chat database are ready.' });
 });
 
 app.post('/sv/task/:name', async (req, res) => {
@@ -550,6 +761,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     if (child) await stopServer();
     if (lk) await stopLiveKit();
+    if (caddy) await stopCaddy();
     process.exit(0);
   });
 }
