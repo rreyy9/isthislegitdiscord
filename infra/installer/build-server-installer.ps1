@@ -267,7 +267,14 @@ if ($SkipDependencies) {
     Say ""
     Say "Installing production dependencies into the staging tree"
     Say "  (this reaches the npm registry and takes a couple of minutes)"
-    Invoke-Step 'npm install --omit=dev' $serverOut 'npm' @('install', '--omit=dev', '--no-audit', '--no-fund')
+    Invoke-Step 'server: npm install --omit=dev' $serverOut 'npm' @('install', '--omit=dev', '--no-audit', '--no-fund')
+
+    # The console needs its own copy of express. In the repo it resolves one
+    # hoisted to the workspace root by npm, which is why this was never
+    # noticed -- but an installed console sits beside the server rather than
+    # inside a workspace, and the server's node_modules is not on its
+    # resolution path. Without this it cannot start at all.
+    Invoke-Step 'console: npm install --omit=dev' $consoleOut 'npm' @('install', '--omit=dev', '--no-audit', '--no-fund')
 }
 
 # ------------------------------------------------------------------- 5. readme
