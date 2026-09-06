@@ -437,6 +437,17 @@ export function SettingsModal({
                     mode={settings.gateMode}
                   />
 
+                  {/* The meter is fed by the call's own microphone track, so
+                      out of a call it is honestly empty rather than broken.
+                      Worth saying now that these settings open from the
+                      account menu, where being in a call is not the norm. */}
+                  {voice.status === 'idle' && (
+                    <div className="hint">
+                      The bar moves once you are in a voice channel — the
+                      microphone is only open during a call.
+                    </div>
+                  )}
+
                   {settings.gateMode === 'manual' && (
                     <input
                       className="slider"

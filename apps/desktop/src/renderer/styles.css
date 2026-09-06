@@ -70,6 +70,18 @@ button { font-family: inherit; cursor: pointer; }
   background: none; border: none; color: var(--dim); font-size: 12px;
 }
 .footer button:hover { color: var(--text); }
+/* The account button: everything but the sign-out link, so the target is the
+   size it looks. Negative margins let its hover fill sit outside the row's
+   padding without moving anything. */
+.footer .footer-user {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px;
+  color: var(--text); font-size: 13px; text-align: left;
+  padding: 4px 6px; margin: -4px -2px -4px -6px; border-radius: 7px;
+}
+.footer .footer-user:hover, .footer .footer-user.open { background: var(--panel2); }
+.footer-user:hover .name, .footer-user.open .name { color: var(--text); }
+.footer-caret { color: var(--faint); font-size: 10px; flex: none; }
+.footer-user:hover .footer-caret, .footer-user.open .footer-caret { color: var(--dim); }
 
 /* --------------------------------------------------------------- chat */
 .chat { background: var(--bg); }
@@ -435,7 +447,6 @@ button { font-family: inherit; cursor: pointer; }
   margin-top: 9px;
   accent-color: var(--accent);
 }
-
 
 /* ------------------------------------------------------------- lightbox */
 
