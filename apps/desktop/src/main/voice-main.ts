@@ -18,7 +18,8 @@ import { BrowserWindow, desktopCapturer, ipcMain, session } from 'electron';
 export interface ScreenSource {
   id: string;
   name: string;
-  thumbnail: string;
+  /** Null until the thumbnail pass catches up — see registerScreenShare. */
+  thumbnail: string | null;
   isScreen: boolean;
 }
 
@@ -32,9 +33,15 @@ export function registerScreenShare(getWindow: () => BrowserWindow | null) {
         const win = getWindow();
         if (!win) return callback({});
 
+        // Two passes, because the thumbnails are the whole cost. Asking for
+        // them makes desktopCapturer grab a frame of every open window, which
+        // on a busy desktop is seconds of nothing happening after the button
+        // is clicked. The names and ids are nearly free, so the list goes out
+        // first and the pictures fill in behind it.
         const sources = await desktopCapturer.getSources({
           types: ['screen', 'window'],
-          thumbnailSize: { width: 320, height: 180 },
+          thumbnailSize: { width: 0, height: 0 },
+          fetchWindowIcons: false,
         });
 
         // A second request while a picker is open cancels the first.
@@ -44,14 +51,33 @@ export function registerScreenShare(getWindow: () => BrowserWindow | null) {
           sources.map<ScreenSource>((s) => ({
             id: s.id,
             name: s.name,
-            thumbnail: s.thumbnail.toDataURL(),
+            thumbnail: null,
             isScreen: s.id.startsWith('screen:'),
           })),
         );
 
-        const chosenId = await new Promise<string | null>((resolve) => {
+        const chosen = new Promise<string | null>((resolve) => {
           pendingChoice = resolve;
         });
+
+        // Deliberately not awaited. Picking a window before its picture has
+        // arrived is an ordinary thing to do, and the choice must not be made
+        // to wait on a pass that exists only to make the list look nicer.
+        void desktopCapturer
+          .getSources({
+            types: ['screen', 'window'],
+            thumbnailSize: { width: 320, height: 180 },
+            fetchWindowIcons: false,
+          })
+          .then((shot) => {
+            if (!pendingChoice) return; // already picked, or cancelled
+            const thumbnails: Record<string, string> = {};
+            for (const s of shot) thumbnails[s.id] = s.thumbnail.toDataURL();
+            getWindow()?.webContents.send('screen:thumbnails', thumbnails);
+          })
+          .catch(() => {});
+
+        const chosenId = await chosen;
         pendingChoice = null;
 
         const source = sources.find((s) => s.id === chosenId);

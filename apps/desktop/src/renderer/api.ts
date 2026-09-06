@@ -42,11 +42,46 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * fetch rejects with "Failed to fetch" for everything that never reached a
+ * server: wrong port, wrong scheme, nothing listening, a name that does not
+ * resolve. The address is a field somebody typed, so that is the most likely
+ * thing to be wrong and the least likely thing that message will make them
+ * check -- and because the request has no response, devtools shows it with
+ * provisional headers, which reads like a cross-origin block and is not one.
+ *
+ * Same idea as joinErrorMessage in voice.ts: name the address that did not
+ * answer, because that is the diagnosis nine times out of ten.
+ */
+async function send(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw new ApiError(0, unreachable(url));
+  }
+}
+
+function unreachable(url: string): string {
+  let origin = url;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    // An address too malformed to parse is worth quoting back as typed.
+  }
+  return (
+    `Could not reach ${origin}. ` +
+    (origin.startsWith('https://')
+      ? 'Nothing answered over TLS there. A server with no reverse proxy in ' +
+        'front of it is plain http://, and on its own port — http://host:3000.'
+      : 'Check the address and port, and that the server is running.')
+  );
+}
+
 async function request<T>(
   path: string,
   opts: { method?: string; body?: unknown } = {},
 ): Promise<T> {
-  const res = await fetch(`${serverUrl}${path}`, {
+  const res = await send(`${serverUrl}${path}`, {
     method: opts.method ?? 'GET',
     headers: {
       'Content-Type': 'application/json',
@@ -190,7 +225,7 @@ export const api = {
     form.append('clientNonce', clientNonce);
     for (const f of files) form.append('files', f, f.name);
 
-    const res = await fetch(`${serverUrl}/api/channels/${channelId}/messages`, {
+    const res = await send(`${serverUrl}/api/channels/${channelId}/messages`, {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: form,

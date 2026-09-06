@@ -1,14 +1,12 @@
 /**
  * Level measurement, and the two things built on it: the input gate behind
- * "sensitivity", and the leveller that stops one person being twice as loud as
- * everyone else.
+ * "sensitivity", and the detector that decides who is speaking.
  *
  * The rule this whole file obeys: **nothing here goes in the audio path.**
  * Every analyser is a tap that connects to no destination, so if any of it
  * misbehaves the worst case is a wrong number, never a broken or degraded call.
- * The gate acts by toggling the same mute push-to-talk already uses, and the
- * leveller acts on the volume of the audio element LiveKit already created.
- * Neither one resamples, filters or re-encodes anything.
+ * The gate acts by toggling the same mute push-to-talk already uses. Nothing
+ * here resamples, filters or re-encodes anything.
  */
 
 /* --------------------------------------------------------------- context */
@@ -37,8 +35,6 @@ export function rmsDb(buf: Float32Array): number {
   const rms = Math.sqrt(sum / buf.length);
   return rms > 0 ? Math.max(-100, 20 * Math.log10(rms)) : -100;
 }
-
-export const dbToGain = (db: number) => Math.pow(10, db / 20);
 
 /* ------------------------------------------------------------------ meter */
 
@@ -187,53 +183,43 @@ export class InputGate {
   }
 }
 
-/* ------------------------------------------------------------- normaliser */
+/* ------------------------------------------------------- speaking detector */
 
-/** Where a speaking voice should land. Ordinary speech sits near this already. */
-const TARGET_DB = -22;
-/** Below this is a gap between words, not a quiet talker; do not chase it. */
-const SPEECH_FLOOR_DB = -50;
-/** How far a single voice may be turned down. */
-const MIN_GAIN_DB = -18;
-/**
- * Per-tick share of the remaining correction, at 100ms a tick. Down in a few
- * seconds of speech, back up over roughly quarter of a minute of it — both
- * slow enough not to pump between sentences, and both measured in speech
- * rather than wall clock, since silence does not move either one.
- */
-const DUCK_RATE = 0.12;
-const RECOVER_RATE = 0.04;
+/** Loud enough to be a voice rather than a room. */
+const SPEECH_ON_DB = -50;
+/** Once someone is speaking it takes less to keep them speaking. */
+const SPEECH_OFF_DB = -56;
+/** Carries the light through the gaps between words. */
+const SPEECH_HOLD_MS = 220;
 
 /**
- * Evens out how loud each person is, by turning the loud ones down.
+ * Whether one person is talking right now.
  *
- * It only ever attenuates, and that is a deliberate limit rather than an
- * oversight. Without `webAudioMix` a remote track's volume is the audio
- * element's own `volume`, which the HTML spec caps at 1.0 - there is no
- * headroom to boost with. Turning on `webAudioMix` would supply a gain node
- * that can exceed 1, at the cost of routing everyone's audio through Web Audio
- * and inheriting a known Chromium quirk about what the echo canceller uses as
- * its reference. Trading working echo cancellation for the ability to amplify
- * is a bad trade in a voice app.
+ * This exists because LiveKit's answer arrives too late to be useful for a
+ * light on a portrait. `ActiveSpeakersChanged` is computed by the SFU from the
+ * audio it is forwarding and broadcast on its own clock, so it lags a beat at
+ * both ends: the ring lights up after someone has started and stays lit after
+ * they have stopped. Every track already has a meter on it here for the gate
+ * and the leveller, and that reading is a few milliseconds old, so the honest
+ * answer was already in the room.
  *
- * The quiet half of the problem is already handled at the other end anyway:
- * `autoGainControl` in each person's capture constraints is Chromium's AGC
- * normalising their microphone before it is ever encoded. Between that pushing
- * quiet people up and this pulling loud people down, the room lands in a band.
- *
- * Adaptation is asymmetric on purpose. Somebody suddenly shouting is a problem
- * to fix now; letting the gain drift back up is not urgent, and doing it slowly
- * avoids audibly pumping between sentences.
+ * The thresholds are fixed rather than adaptive on purpose. This decides what
+ * a light does; the gate, which decides what is transmitted, is the one that
+ * has to be careful.
  */
-export class VoiceNormalizer {
-  private gainDb = 0;
+export class SpeakingDetector {
+  private openUntil = 0;
+  private on = false;
 
-  update(db: number): number {
-    if (db > SPEECH_FLOOR_DB) {
-      const wanted = Math.min(0, Math.max(MIN_GAIN_DB, TARGET_DB - db));
-      const rate = wanted < this.gainDb ? DUCK_RATE : RECOVER_RATE;
-      this.gainDb += (wanted - this.gainDb) * rate;
-    }
-    return dbToGain(this.gainDb);
+  update(db: number, now = Date.now()): boolean {
+    const bar = this.on ? SPEECH_OFF_DB : SPEECH_ON_DB;
+    if (db > bar) this.openUntil = now + SPEECH_HOLD_MS;
+    this.on = now < this.openUntil;
+    return this.on;
+  }
+
+  reset() {
+    this.openUntil = 0;
+    this.on = false;
   }
 }

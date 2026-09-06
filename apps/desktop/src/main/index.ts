@@ -1,4 +1,15 @@
-import { app, BrowserWindow, ipcMain, safeStorage, session, shell } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  ClipboardItem,
+  ipcMain,
+  nativeImage,
+  net,
+  safeStorage,
+  session,
+  shell,
+} from 'electron';
 import { join } from 'node:path';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { registerPushToTalk, registerScreenShare } from './voice-main';
@@ -33,19 +44,31 @@ interface VoiceSettings {
   /** dBFS, used only when gateMode is 'manual'. */
   gateThreshold: number;
   /* --- playback --- */
-  /** Turn down whoever is loudest so the room sits in one band. */
-  normalizeVoices: boolean;
-  /** 0..1, applied on top of normalisation. */
-  outputVolume: number;
+  /**
+   * Playback level per person, 0..1, keyed by user id. This replaced a single
+   * output slider: turning the whole room down at once is the one adjustment
+   * nobody needs from an app, because the system volume already does it. What
+   * people actually want is the one person who is twice as loud as the rest.
+   */
+  userVolumes: Record<string, number>;
+  /* --- behaviour --- */
+  /** Walk back into `lastVoiceChannelId` once the app has signed in again. */
+  rejoinLastChannel: boolean;
 }
 
 interface Settings {
   serverUrl: string;
+  /**
+   * The voice channel this client was in when it last stopped, or null if it
+   * left on purpose. Only acted on when `voice.rejoinLastChannel` is set.
+   */
+  lastVoiceChannelId: string | null;
   voice: VoiceSettings;
 }
 
 const defaultSettings: Settings = {
   serverUrl: 'http://localhost:3000',
+  lastVoiceChannelId: null,
   voice: {
     inputDeviceId: null,
     outputDeviceId: null,
@@ -60,10 +83,27 @@ const defaultSettings: Settings = {
     autoGainControl: true,
     gateMode: 'off',
     gateThreshold: -45,
-    normalizeVoices: false,
-    outputVolume: 1,
+    userVolumes: {},
+    rejoinLastChannel: false,
   },
 };
+
+/**
+ * Voice keys that no longer exist are dropped on the way in, not merged
+ * through. The renderer saves a setting by sending the whole voice object
+ * back, so anything removed in an upgrade would otherwise be read from disk
+ * and written straight out again, for ever.
+ */
+function knownVoiceKeys(stored: unknown): Partial<VoiceSettings> {
+  const out: Record<string, unknown> = {};
+  if (stored && typeof stored === 'object') {
+    for (const key of Object.keys(defaultSettings.voice)) {
+      const value = (stored as Record<string, unknown>)[key];
+      if (value !== undefined) out[key] = value;
+    }
+  }
+  return out as Partial<VoiceSettings>;
+}
 
 function loadSettings(): Settings {
   try {
@@ -73,7 +113,7 @@ function loadSettings(): Settings {
     return {
       ...defaultSettings,
       ...stored,
-      voice: { ...defaultSettings.voice, ...(stored.voice ?? {}) },
+      voice: { ...defaultSettings.voice, ...knownVoiceKeys(stored.voice) },
     };
   } catch {
     return defaultSettings;
@@ -190,6 +230,51 @@ ipcMain.handle('token:set', (_e, token: string) => {
   saveToken(token);
   return true;
 });
+
+/**
+ * Copying an image out of a message.
+ *
+ * It happens here because half of them cannot be reached from the renderer. An
+ * uploaded attachment is a blob: URL the renderer owns and can rasterise
+ * itself, so it arrives already encoded; an image somebody linked to lives on
+ * another origin, where a canvas would be tainted and fetch is a CORS failure.
+ * Main is subject to neither rule, so it fetches that one and encodes it.
+ */
+ipcMain.handle(
+  'clipboard:image',
+  async (_e, src: { dataUrl?: string; url?: string }) => {
+    try {
+      let image;
+      if (src.dataUrl) {
+        image = nativeImage.createFromDataURL(src.dataUrl);
+      } else if (src.url && /^https?:\/\//i.test(src.url)) {
+        const res = await net.fetch(src.url);
+        if (!res.ok) return false;
+        image = nativeImage.createFromBuffer(
+          Buffer.from(await res.arrayBuffer()),
+        );
+      } else {
+        return false;
+      }
+      // An unreadable format decodes to an empty image rather than throwing,
+      // and writing that would silently wipe whatever was on the clipboard.
+      if (image.isEmpty()) return false;
+      // Everything is re-encoded as PNG on the way out: a linked JPEG then
+      // pastes into applications that only ever look for image/png, which is
+      // most of them.
+      await clipboard.write([
+        new ClipboardItem({
+          'image/png': new Blob([new Uint8Array(image.toPNG())], {
+            type: 'image/png',
+          }),
+        }),
+      ]);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+);
 
 app.whenReady().then(() => {
   // Microphone and screen capture, and nothing else. Without this the renderer
