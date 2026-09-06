@@ -4,11 +4,11 @@ import type { ScreenSource } from '../../preload';
 import { bridge } from '../bridge';
 import {
   listAudioDevices,
+  noteScreenPickerCancelled,
   type InputLevel,
   type Voice,
   type VoiceSettings,
 } from '../voice';
-import type { VoiceAudioDto } from '../api';
 
 /* ------------------------------------------------------------ screen picker */
 
@@ -39,6 +39,10 @@ export function ScreenPicker() {
 
   function pick(id: string | null) {
     setSources(null);
+    // Said here rather than inferred from the rejection later: this is the
+    // only place that knows the difference between changing your mind and
+    // capture actually failing.
+    if (id === null) noteScreenPickerCancelled();
     void bridge.chooseScreenSource(id);
   }
 
@@ -231,14 +235,7 @@ function InputMeter({
   );
 }
 
-const QUALITY_LABEL: Record<VoiceAudioDto['quality'], string> = {
-  voice: 'Voice',
-  balanced: 'Balanced',
-  high: 'High',
-  studio: 'Studio',
-};
-
-type Section = 'devices' | 'input' | 'behaviour' | 'quality';
+type Section = 'devices' | 'input' | 'behaviour';
 
 /**
  * The nav down the left. Every section carries a sentence saying what it is
@@ -260,11 +257,6 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
     id: 'behaviour',
     label: 'Behaviour',
     blurb: 'What the app does on its own when you open it.',
-  },
-  {
-    id: 'quality',
-    label: 'Quality',
-    blurb: 'What this call is actually running at. Set on the server, for everyone.',
   },
 ];
 
@@ -503,6 +495,13 @@ export function SettingsModal({
                     Changing any of these three restarts the microphone, so your
                     voice will drop out for a moment if you are in a call.
                   </div>
+                  {voice.audio?.stereo && settings.echoCancellation && (
+                    <div className="hint">
+                      This server is set to stereo, and no echo canceller
+                      anywhere is: until you turn echo cancellation off, and
+                      wear headphones, your calls stay mono.
+                    </div>
+                  )}
                 </section>
               </>
             )}
@@ -525,37 +524,6 @@ export function SettingsModal({
                   channel on purpose is remembered as leaving. Your microphone
                   opens as it normally would on joining, so if that matters,
                   mute before you close.
-                </div>
-              </section>
-            )}
-
-            {section === 'quality' && (
-              <section className="set-group">
-                <h4>This call</h4>
-                {voice.audio ? (
-                  <>
-                    <div className="quality">
-                      <b>{QUALITY_LABEL[voice.audio.quality]}</b>
-                      <span>
-                        {Math.round(voice.audio.maxBitrate / 1000)} kbps
-                        {voice.audio.stereo ? ' stereo' : ' mono'}
-                        {voice.audio.red ? ' · loss protection' : ''}
-                      </span>
-                    </div>
-                    {voice.audio.stereo && settings.echoCancellation && (
-                      <div className="hint">
-                        Stereo needs echo cancellation off, and headphones.
-                        Until you turn it off under Input, this call stays mono.
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="hint">Shown once you have joined a call.</div>
-                )}
-                <div className="hint">
-                  Set on the server, for everyone — it is the host&apos;s upload
-                  that has to carry it. Change <code>VOICE_QUALITY</code> in the
-                  server&apos;s .env and restart it.
                 </div>
               </section>
             )}
@@ -607,7 +575,16 @@ export function VoicePanel({
       </div>
       <div className="vp-channel">🔊 {channelName}</div>
 
-      {voice.error && <div className="vp-error">{voice.error}</div>}
+      {voice.error && (
+        <div
+          className="vp-error"
+          title="Dismiss"
+          onClick={voice.clearError}
+          role="button"
+        >
+          {voice.error}
+        </div>
+      )}
 
       {pushToTalk && voice.status === 'connected' && (
         <div className={'vp-ptt' + (voice.talking ? ' live' : '')}>
