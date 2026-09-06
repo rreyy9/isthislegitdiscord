@@ -17,6 +17,18 @@ if (-not (Test-Path $exe)) {
     exit 1
 }
 
+# livekit.yaml holds a real API key pair, so it is gitignored and a fresh clone
+# does not have one. Without this check LiveKit starts on its own defaults and
+# rejects every join token, which reads as "voice is broken" rather than
+# "there is no config".
+if (-not (Test-Path $config)) {
+    Write-Host "livekit.yaml not found at $config" -ForegroundColor Red
+    Write-Host "Copy the template and fill in a key pair:"
+    Write-Host "  copy infra\livekit\livekit.example.yaml infra\livekit\livekit.yaml"
+    Write-Host "The pair must match LIVEKIT_API_KEY / LIVEKIT_API_SECRET in apps\server\.env."
+    exit 1
+}
+
 # Already listening? Starting a second one just fails on the port bind, with a
 # less obvious message than this.
 if (Get-NetTCPConnection -LocalPort 7880 -State Listen -ErrorAction SilentlyContinue) {

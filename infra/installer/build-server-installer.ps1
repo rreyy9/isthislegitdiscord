@@ -155,8 +155,19 @@ Copy-Item (Join-Path $repo 'apps\console\*') $consoleOut -Recurse -Force -Exclud
 
 # LiveKit: config and start script always; the binary only if it is here and
 # the caller wants it.
+#
+# The config staged here is livekit.example.yaml renamed, NOT this machine's
+# livekit.yaml. That file holds the live API key pair, and anyone holding a
+# pair can mint a join token for any voice room on the server that uses it --
+# so shipping it inside an installer hands every recipient the keys to this
+# deployment. install.ps1 generates a fresh pair on the target and rewrites the
+# placeholders, so the template is all it ever needed.
 Say "  livekit/"
-Copy-Item (Join-Path $repo 'infra\livekit\livekit.yaml') $livekitOut -Force
+$livekitTemplate = Join-Path $repo 'infra\livekit\livekit.example.yaml'
+if (-not (Test-Path $livekitTemplate)) {
+    throw "infra\livekit\livekit.example.yaml is missing. The installer must not fall back to livekit.yaml -- that file holds this deployment's real keys."
+}
+Copy-Item $livekitTemplate (Join-Path $livekitOut 'livekit.yaml') -Force
 Copy-Item (Join-Path $repo 'infra\livekit\start.ps1') $livekitOut -Force
 Copy-Item (Join-Path $repo 'infra\livekit\README.md') $livekitOut -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path (Join-Path $livekitOut 'bin') -Force | Out-Null
@@ -253,6 +264,48 @@ to skip the start-on-boot registration. Re-running keeps your database, your
 $readme | Set-Content (Join-Path $staging 'README.txt') -Encoding ASCII
 
 # ------------------------------------------------------------------- 6. makensis
+
+# ------------------------------------------------------ 5b. secret leak check
+
+# The build has one way to go badly wrong that nobody would notice: a file
+# carrying this deployment's live secrets ends up in the payload, and the
+# installer is then a copy of the keys handed to everyone who runs it. Both
+# known leak paths are closed above (.env.example rather than .env,
+# livekit.example.yaml rather than livekit.yaml) -- this fails the build if a
+# third one ever opens.
+Say ""
+Say "Checking the payload for secrets"
+
+$leaks = @()
+
+# A generated LiveKit key is APIxxxxxxxxxxxx; the shipped template is
+# APIchangeme, and LiveKit's own published pair is devkey/secret.
+$leakPatterns = @(
+    @{ Name = 'a real LiveKit API key'; Pattern = 'API[0-9a-f]{12}' },
+    @{ Name = "LiveKit's published dev key"; Pattern = '(?m)^\s*devkey:' }
+)
+
+foreach ($file in Get-ChildItem $staging -Recurse -File -Include '*.yaml', '*.yml', '*.env', '*.example', '*.json', '*.ps1' |
+        Where-Object { $_.FullName -notmatch '\\node_modules\\' }) {
+    $text = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+    if (-not $text) { continue }
+    foreach ($p in $leakPatterns) {
+        if ($text -match $p.Pattern) {
+            $leaks += "$($file.FullName.Substring($staging.Length + 1)) contains $($p.Name)"
+        }
+    }
+}
+
+# .env itself must never be staged, whatever is in it.
+foreach ($stray in Get-ChildItem $staging -Recurse -File -Filter '.env' -Force -ErrorAction SilentlyContinue) {
+    $leaks += "$($stray.FullName.Substring($staging.Length + 1)) is a real .env -- only .env.example may ship"
+}
+
+if ($leaks.Count -gt 0) {
+    $leaks | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    throw "Refusing to build: the staging tree carries live secrets. Fix the copy above, delete $staging, and run again."
+}
+Say "  clean -- no live key pair in the payload"
 
 Say ""
 Say "Compiling the installer"

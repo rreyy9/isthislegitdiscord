@@ -1,0 +1,77 @@
+# LiveKit server — self-hosted, no TLS, no Docker.
+#
+# THIS IS THE TEMPLATE. Copy it to livekit.yaml, which is gitignored because it
+# holds a real key pair:
+#
+#     copy infra\livekit\livekit.example.yaml infra\livekit\livekit.yaml
+#
+# Then replace the placeholders below. Nothing here is a working key — the
+# server will start and every join token will be rejected until you do.
+#
+# Run it with infra/livekit/start.ps1 (which passes livekit.yaml with --config).
+# `--dev` mode is deliberately not used because its key pair ("devkey"/"secret")
+# is published in LiveKit's own repository, so anyone who can reach port 7880
+# could mint a valid token.
+
+port: 7880
+
+rtc:
+  # The WebRTC media range. Every port here must be open on the box, UDP.
+  port_range_start: 50000
+  port_range_end: 50100
+  tcp_port: 7881
+
+  # The most important setting in this file, and it has two modes. Whichever
+  # you pick, the failure looks identical and is never an error: everyone
+  # connects, the UI shows them in the channel, and no audio ever arrives.
+  #
+  # --- LAN testing ---
+  # Advertise this machine's address on the local network. It has to be stated
+  # explicitly rather than discovered: a box with several IPv4 interfaces
+  # (Ethernet, VirtualBox, Hyper-V, link-local) and LiveKit picking any of the
+  # wrong ones is silent breakage. Check it with `ipconfig`.
+  #
+  # Leave this line uncommented even when you are not using it. install.ps1
+  # rewrites it in place with the address you give it, and its regex only
+  # matches an uncommented `node_ip:`.
+  node_ip: 192.168.0.1
+  use_external_ip: false
+  #
+  # --- Over the internet ---
+  # LiveKit discovers this box's public address via STUN at startup and
+  # advertises that, instead of the 192.168.x.x nobody outside can reach.
+  # Needs the ports forwarded on the router and the firewall widened past
+  # LocalSubnet -- infra/allow-lan.ps1 -Internet does the second half.
+  # use_external_ip: true
+
+# The API key this server accepts tokens signed with. Must match
+# LIVEKIT_API_KEY / LIVEKIT_API_SECRET in apps/server/.env — the chat server
+# signs join tokens with it and LiveKit verifies them here. Mismatched, voice
+# fails with a token error rather than silence, so at least this one tells you.
+#
+# Generate a pair (the secret must be 32+ characters):
+#   node -e "const c=require('crypto');console.log('API'+c.randomBytes(6).toString('hex'),c.randomBytes(32).toString('base64url'))"
+keys:
+  APIchangeme: change-me-32-characters-or-longer-please
+
+# TURN relays media for people whose network blocks direct UDP — roughly one
+# person in ten, and always the one on hotel or corporate wifi. LiveKit has it
+# built in, which is why this project needs no coturn.
+turn:
+  enabled: true
+  udp_port: 3478
+  # No TLS section and no domain: TLS TURN would need a certificate and a
+  # domain name, and this deployment has neither. UDP TURN needs neither.
+
+# LiveKit calls the chat server whenever someone joins or leaves a room, and
+# that is how the sidebar knows who is sitting in a voice channel. The calls
+# are signed with the key above; the receiving end verifies the signature.
+# api_key must be the same key name as in `keys:` above.
+webhook:
+  api_key: APIchangeme
+  urls:
+    - http://localhost:3000/api/livekit/webhook
+
+logging:
+  level: info
+  json: false
