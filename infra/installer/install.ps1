@@ -268,8 +268,15 @@ if (Test-Path $envPath) {
 
 Step "PostgreSQL"
 
+# Every "do it by hand" message below has to carry app_password. Without it
+# setup-postgres.sql falls back to the development password published in this
+# repository, while .env holds the generated one -- and the two disagreeing
+# presents as the server failing to reach a database that is plainly running.
+$manualPsql = "psql -U postgres -v app_password=$dbPassword -f `"$serverDir\prisma\setup-postgres.sql`""
+
 if ($SkipPostgres) {
-    Warn "  skipped (-SkipPostgres)"
+    Warn "  skipped (-SkipPostgres). Apply it by hand as the postgres superuser:"
+    Warn "    $manualPsql"
 } elseif (-not $dbPassword) {
     # Only reachable on an upgrade whose DATABASE_URL could not be parsed. The
     # role and database already exist, so there is nothing this step has to do
@@ -279,8 +286,9 @@ if ($SkipPostgres) {
     Warn "  DATABASE_URL, and the role must not be reset to the shared default."
     Warn "  The database already exists, so this is only a problem if it does not."
 } elseif (-not $elevated -and -not $DryRun) {
-    Warn "  skipped -- needs an elevated terminal. Re-run elevated, or apply"
-    Warn "  server\prisma\setup-postgres.sql by hand as the postgres superuser."
+    Warn "  skipped -- needs an elevated terminal. Re-run elevated, or apply it"
+    Warn "  by hand as the postgres superuser:"
+    Warn "    $manualPsql"
 } else {
     $psql = (Get-Command psql -ErrorAction SilentlyContinue).Source
     if (-not $psql) {
@@ -290,12 +298,16 @@ if ($SkipPostgres) {
     }
 
     if (-not $psql) {
-        Warn "  psql.exe not found. Install PostgreSQL 17, then run:"
-        Warn "    psql -U postgres -f `"$serverDir\prisma\setup-postgres.sql`""
+        Warn "  psql.exe not found -- PostgreSQL does not appear to be installed."
+        Warn "  This installer does not install it: it only creates the app's role"
+        Warn "  and database inside a server that is already running. Install it,"
+        Warn "    winget install PostgreSQL.PostgreSQL.17"
+        Warn "  which asks you to set a superuser password, then run:"
+        Warn "    $manualPsql"
     } elseif ($NonInteractive -and -not $PostgresPassword) {
         Warn "  skipped -- no postgres password was given and psql cannot prompt here."
         Warn "  Apply it by hand once, as the postgres superuser:"
-        Warn "    psql -U postgres -f `"$serverDir\prisma\setup-postgres.sql`""
+        Warn "    $manualPsql"
     } else {
         Say "  using $psql"
         # setup-postgres.sql is written to be safe to re-run: the role is created
@@ -451,7 +463,19 @@ if (-not (Would "npx prisma migrate deploy")) {
     Push-Location $serverDir
     try {
         & npx --no-install prisma migrate deploy
-        if ($LASTEXITCODE -ne 0) { throw "prisma migrate deploy failed (exit $LASTEXITCODE)" }
+        if ($LASTEXITCODE -ne 0) {
+            # Overwhelmingly the cause: the PostgreSQL step above was skipped,
+            # so the chat_app role this connects as was never created. That
+            # error arrives as an authentication failure against a database
+            # that is plainly running, which reads as a configuration mystery
+            # rather than a step that did not happen.
+            Warn ""
+            Warn "  If that was an authentication or 'role does not exist' error, the"
+            Warn "  PostgreSQL step above did not run. Do it now, as the superuser:"
+            Warn "    $manualPsql"
+            Warn "  then re-run this installer -- it is safe to run again."
+            throw "prisma migrate deploy failed (exit $LASTEXITCODE)"
+        }
     } finally { Pop-Location }
 }
 
