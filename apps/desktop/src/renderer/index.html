@@ -3,6 +3,20 @@
 <head>
 <meta charset="utf-8">
 <!--
+  connect-src carries https: and wss: as well as http: and ws:, because the
+  server address is a field the user fills in and may be either. Leaving the
+  TLS schemes out is a trap: the app would fail against an https server with
+  nothing but a console error, since a CSP refusal is not a network error and
+  surfaces nowhere in the UI. Two bugs in this file have already been of that
+  shape (frame-src and YouTube, blob: and attachments).
+
+  The schemes cannot be narrowed to one origin here: this is a static file and
+  the server address is only known at runtime. Pinning it would mean setting
+  the header from the main process with onHeadersReceived, per configured
+  server. What actually keeps this safe is default-src 'self' with no
+  script-src exception -- the renderer runs no code it did not ship with, so a
+  broad connect-src grants reach to nothing that wants it.
+
   blob: is in img-src because attachments are fetched with the auth token and
   turned into object URLs -- an <img src> cannot carry an Authorization header,
   and a token in a query string ends up in logs.
@@ -12,7 +26,7 @@
   someone clicks play; until then a message shows a still image.
 -->
 <meta http-equiv="Content-Security-Policy"
-  content="default-src 'self'; connect-src 'self' http://localhost:3000 http://127.0.0.1:3000 ws://localhost:3000 ws://127.0.0.1:3000 http: ws:; img-src 'self' data: blob: http: https:; style-src 'self' 'unsafe-inline'; frame-src https://www.youtube-nocookie.com https://www.youtube.com;">
+  content="default-src 'self'; connect-src 'self' http: https: ws: wss:; img-src 'self' data: blob: http: https:; style-src 'self' 'unsafe-inline'; frame-src https://www.youtube-nocookie.com https://www.youtube.com;">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>isthislegit</title>
 </head>

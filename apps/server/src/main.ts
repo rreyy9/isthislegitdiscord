@@ -16,6 +16,17 @@ async function bootstrap() {
 
   app.enableCors({ origin: true, credentials: true });
 
+  // Behind a TLS-terminating reverse proxy on the same box, every request
+  // arrives from 127.0.0.1. Without this, ThrottlerGuard sees one client and
+  // its per-IP limit becomes a single budget shared by everyone -- ten people
+  // reconnecting would rate-limit each other, and a per-IP limit on login
+  // would lock out all of them at once or none of them.
+  //
+  // 'loopback' and not `true`: `true` trusts X-Forwarded-For from whoever sent
+  // it, so any client could name its own address and step around every limit.
+  // Loopback only, because the proxy is on this machine.
+  app.set('trust proxy', 'loopback');
+
   const auth = app.get<Auth>(AUTH);
   const http = app.getHttpAdapter().getInstance();
 

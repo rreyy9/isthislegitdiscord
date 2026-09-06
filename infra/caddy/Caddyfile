@@ -1,0 +1,67 @@
+# Caddy: TLS termination for the chat server and LiveKit's signalling.
+#
+# Fill in the two hostnames below and the email, and this file is finished.
+# Everything else is deliberate and explained.
+#
+#   1. CHAT_HOST     -> your DuckDNS name, e.g. isthislegit.duckdns.org
+#   2. LIVEKIT_HOST  -> a second DuckDNS name, e.g. isthislegit-lk.duckdns.org
+#   3. ACME_EMAIL    -> where Let's Encrypt sends expiry warnings
+#
+# Both names are registered free at duckdns.org and point at the same IP.
+# DuckDNS has no wildcards, so they are two separate registrations rather than
+# one name with a subdomain.
+
+{
+	# 443 only. Caddy would normally also bind 80, for the ACME HTTP-01
+	# challenge and an HTTP->HTTPS redirect. Neither is worth a forwarded
+	# port here: the client is a desktop app with a server-address field,
+	# not a browser someone types a bare hostname into, so there is nothing
+	# to redirect -- and the challenge has an alternative that runs entirely
+	# on 443 (see disable_http_challenge below).
+	#
+	# Caddy may still open a local listener on 80. That is harmless as long
+	# as 80 is not forwarded on the router: nothing outside can reach it.
+	auto_https disable_redirects
+
+	# Let's Encrypt emails this address before a certificate expires. Renewal
+	# is automatic, so this is a warning channel for when it is not.
+	email ACME_EMAIL
+}
+
+# Reused by both sites: get certificates over TLS-ALPN-01, which is served on
+# 443 by Caddy itself, instead of HTTP-01, which needs port 80 open.
+(tls443) {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+}
+
+# --------------------------------------------------------------- chat server
+
+CHAT_HOST {
+	import tls443
+
+	# The HTTP API and Socket.IO both live here. reverse_proxy performs the
+	# WebSocket upgrade and then gets out of the way, so the socket needs no
+	# special handling -- but note the client connects with
+	# `transports: ['websocket']` and never long-polls, so if the upgrade
+	# breaks there is no fallback and the app simply never connects.
+	reverse_proxy 127.0.0.1:3000
+}
+
+# ------------------------------------------------------------------- livekit
+
+LIVEKIT_HOST {
+	import tls443
+
+	# Signalling only. LiveKit's actual voice and screen-share media is UDP
+	# on 50000-50100 and goes direct to the box -- Caddy cannot carry it and
+	# does not need to, because WebRTC media is already DTLS-SRTP encrypted.
+	#
+	# Which means: those media ports, 7881/tcp and 3478/udp stay forwarded on
+	# the router exactly as they are today. This file replaces the forwards
+	# for 3000 and 7880, nothing else.
+	reverse_proxy 127.0.0.1:7880
+}
