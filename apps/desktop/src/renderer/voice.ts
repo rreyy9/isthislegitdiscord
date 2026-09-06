@@ -87,6 +87,38 @@ export interface VoiceSettings {
   rejoinLastChannel: boolean;
 }
 
+/**
+ * Set when somebody closes the screen picker without choosing anything.
+ *
+ * The picker is a component and the request is made by this hook, so the one
+ * fact that explains the rejection lives in neither. A module flag rather than
+ * a round trip through main: it is set synchronously as the picker closes,
+ * which is strictly before the getDisplayMedia rejection it accounts for can
+ * arrive.
+ */
+let pickerCancelled = false;
+
+export function noteScreenPickerCancelled() {
+  pickerCancelled = true;
+}
+
+/**
+ * Was this failure just somebody closing the picker?
+ *
+ * The flag is the reliable half: it is set by the picker itself, so it does
+ * not depend on which of several messages Chromium picked this time. The
+ * pattern is a second line for the cancels that never reach our picker at all
+ * — a macOS screen-recording permission that was never granted, say.
+ */
+function isPickerCancellation(err: Error): boolean {
+  return (
+    pickerCancelled ||
+    /permission denied|not allowed|cancel|invalid capture constraints/i.test(
+      err.message ?? '',
+    )
+  );
+}
+
 /** A live reading of the local microphone, for the meter in settings. */
 export interface InputLevel {
   db: number;
@@ -544,9 +576,14 @@ export function useVoice(settings: VoiceSettings) {
             screenSharing: false,
           }));
         })
-        .on(RoomEvent.MediaDevicesError, (e: Error) =>
-          setState((st) => ({ ...st, error: e.message })),
-        );
+        // Screen-share failures arrive here as well as rejecting the call that
+        // started them, and this fires first — so cancelling the picker put a
+        // red banner up through this path no matter what the caller did with
+        // the rejection. Microphone failures are still worth saying out loud.
+        .on(RoomEvent.MediaDevicesError, (e: Error) => {
+          if (isPickerCancellation(e)) return;
+          setState((st) => ({ ...st, error: e.message }));
+        });
 
       try {
         await room.connect(url, token);
@@ -642,19 +679,31 @@ export function useVoice(settings: VoiceSettings) {
     const room = roomRef.current;
     if (!room) return;
     const on = room.localParticipant.isScreenShareEnabled;
+    pickerCancelled = false;
+    // Whatever went wrong last time is not this attempt's problem, and the
+    // banner has no dismiss of its own.
+    setState((s) => ({ ...s, error: null }));
     try {
       // Screen audio on Windows is the system mix, which is the whole point
       // when sharing a game; LiveKit publishes it as a second track.
       await room.localParticipant.setScreenShareEnabled(!on, { audio: true });
     } catch (err) {
-      // Cancelling the picker rejects. That is not an error worth showing.
-      const msg = (err as Error).message ?? '';
-      if (!/permission denied|not allowed|cancel/i.test(msg)) {
-        setState((s) => ({ ...s, error: msg }));
+      // Cancelling always rejects, and what it rejects with is Chromium's
+      // business — it has been a permission error and an "invalid capture
+      // constraints" at different times. Ours is the only account of it worth
+      // trusting, so the flag decides, not the message.
+      if (!isPickerCancellation(err as Error)) {
+        setState((s) => ({ ...s, error: (err as Error).message }));
       }
     }
+    pickerCancelled = false;
     sync();
   }, [sync]);
+
+  /** The banner sits there until something replaces it; this is its dismiss. */
+  const clearError = useCallback(() => {
+    setState((s) => (s.error === null ? s : { ...s, error: null }));
+  }, []);
 
   const setInputDevice = useCallback(
     async (deviceId: string) => {
@@ -761,6 +810,7 @@ export function useVoice(settings: VoiceSettings) {
     setMuted,
     setDeafened,
     toggleScreenShare,
+    clearError,
     setInputDevice,
     setOutputDevice,
     getInputLevel,

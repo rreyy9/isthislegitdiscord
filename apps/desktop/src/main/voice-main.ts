@@ -1,4 +1,5 @@
 import { BrowserWindow, desktopCapturer, ipcMain, session } from 'electron';
+import type { Streams } from 'electron';
 
 /**
  * The two parts of voice that a renderer cannot do by itself.
@@ -29,9 +30,22 @@ let pendingChoice: ((sourceId: string | null) => void) | null = null;
 export function registerScreenShare(getWindow: () => BrowserWindow | null) {
   session.defaultSession.setDisplayMediaRequestHandler(
     (_request, callback) => {
+      /**
+       * Cancelling is `callback(null)`, not `callback({})`.
+       *
+       * Electron reads an object with no `video` as a promise to supply one
+       * that was then broken: it throws "Video was requested, but no video
+       * stream was provided" inside this handler, which surfaces as an
+       * unhandled rejection in main and reaches the renderer as the useless
+       * "Invalid capture constraints". Null is the documented way to say the
+       * request is off, and the renderer gets an ordinary permission-denied
+       * rejection instead.
+       */
+      const cancel = () => (callback as (s: Streams | null) => void)(null);
+
       void (async () => {
         const win = getWindow();
-        if (!win) return callback({});
+        if (!win) return cancel();
 
         // Two passes, because the thumbnails are the whole cost. Asking for
         // them makes desktopCapturer grab a frame of every open window, which
@@ -81,9 +95,7 @@ export function registerScreenShare(getWindow: () => BrowserWindow | null) {
         pendingChoice = null;
 
         const source = sources.find((s) => s.id === chosenId);
-        // An empty object cancels: getDisplayMedia rejects and the renderer
-        // treats that as "user changed their mind", not as an error.
-        if (!source) return callback({});
+        if (!source) return cancel();
 
         callback({
           video: source,
@@ -92,7 +104,11 @@ export function registerScreenShare(getWindow: () => BrowserWindow | null) {
           // windows — per-window audio is not a thing the OS offers.
           audio: source.id.startsWith('screen:') ? 'loopback' : undefined,
         });
-      })();
+      })().catch(() => {
+        // Nothing in here is worth taking the app down for, and a request left
+        // unanswered hangs getDisplayMedia for ever, so failure is a cancel.
+        cancel();
+      });
     },
     // Our own picker, not the OS one: the OS picker exists on macOS 15+ only.
     { useSystemPicker: false },

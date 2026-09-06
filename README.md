@@ -330,12 +330,17 @@ goes without.
 **`studio` is stereo, and Chromium will not run its echo canceller on a two-channel
 capture.** No echo canceller anywhere is stereo; this is not an Electron limitation. The
 client will not switch to stereo until echo cancellation is turned off in its voice
-settings, and on speakers that combination will feed back.
+settings, and on speakers that combination will feed back. Clients on a stereo server say
+so under Input, beside the echo cancellation switch.
 
 ### What each person controls
 
-Settings open on a two-pane screen — Devices, Input, Behaviour, Quality — because the
-single 360px column had microphone choice and codec bitrate in the same scroll.
+Settings open on a two-pane screen — Devices, Input, Behaviour — because the single 360px
+column had microphone choice and every other switch in the same scroll. There is no
+Quality pane: the bitrate is the server's to set and nobody's to change from here, so a
+tab of read-only numbers was a tab nobody had a reason to open. The one part of it that
+did depend on a local setting — stereo needing echo cancellation off — now sits under
+Input next to the switch it is about, and only when the server is actually set to stereo.
 
 - **Echo cancellation / noise suppression / automatic gain** (Input) — Chromium's own,
   applied at capture. Changing any of them restarts the microphone.
@@ -381,6 +386,37 @@ share and seeing anything. It now runs twice: once with `thumbnailSize: { width:
 0 }` for the names, which is nearly free and is what the picker opens with, and once for
 the pictures, which arrive on a second IPC message and fill in behind them. Picking a
 window before its thumbnail has landed is allowed and does not wait.
+
+### Cancelling the picker is `callback(null)`
+
+`setDisplayMediaRequestHandler` reads `callback({})` as a promise of a video stream that
+was then broken, not as a refusal: it throws *"Video was requested, but no video stream was
+provided"* inside the handler — an unhandled rejection in main — and the renderer's
+`getDisplayMedia` rejects with the unrelated-sounding *"Invalid capture constraints"*,
+which the app then showed as a red error for closing a dialog. `callback(null)` is the
+documented refusal and rejects with an ordinary permission error instead.
+
+The client does not read that message to decide, though. The picker is a component and the
+request comes from the voice hook, so cancelling sets a module flag on its way out —
+synchronously, and therefore strictly before the rejection it explains — and the hook
+trusts that over whatever string Chromium chose that week.
+
+**A cancelled share fails twice, and only one of them is a rejection.** LiveKit also emits
+`RoomEvent.MediaDevicesError` for the same failure, and it fires *first* — so a handler
+that put every device error on screen showed the banner no matter how carefully the caller
+filtered the rejection it got back. Both paths now ask the same question before saying
+anything. Microphone failures still come through that event and are still worth showing,
+which is why it is a filter rather than a removed listener. The banner is clickable to
+dismiss, since nothing else clears it until the next attempt.
+
+**`Failed to start capture: -2147024809` in the console is not this.** That is
+`E_INVALIDARG` from Windows Graphics Capture, logged once per window that refuses to be
+captured while the thumbnail pass runs — a minimised window, or one with capture
+protection. Those windows list without a picture and the rest of the picker is unaffected;
+Chromium logs it and there is nothing above it to catch. Likewise `Binding request timed
+out` from a `192.168.56.x` or `172.24.64.x` address is ICE trying a VirtualBox or WSL
+adapter that cannot reach the STUN server, and it stops mattering the moment a real
+candidate works.
 
 ---
 

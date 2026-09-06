@@ -88,6 +88,9 @@ function muteLabel(iso: string) {
 const MENU_WIDTH = 158;
 const MENU_HEIGHT = 265;
 
+/** Same, for the account menu — which opens upwards, out of the footer. */
+const ACCOUNT_MENU_HEIGHT = 42;
+
 const MUTE_OPTIONS: { label: string; minutes: number | null }[] = [
   { label: '5 minutes', minutes: 5 },
   { label: '1 hour', minutes: 60 },
@@ -158,6 +161,16 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   /** Whose per-person volume popup is open, and where to draw it. */
   const [volumeFor, setVolumeFor] = useState<{
     userId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  /**
+   * Whether the account menu in the footer is open, and where its button is.
+   * Settings used to be reachable only from the voice panel, which appears
+   * only once you are in a call — so the one screen that decides which
+   * microphone you speak into could not be opened before speaking.
+   */
+  const [accountMenu, setAccountMenu] = useState<{
     x: number;
     y: number;
   } | null>(null);
@@ -421,6 +434,14 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, [volumeFor]);
+
+  // And for the account menu.
+  useEffect(() => {
+    if (!accountMenu) return;
+    const close = () => setAccountMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [accountMenu]);
 
   // Errors from a refused action are worth reading, not worth keeping.
   useEffect(() => {
@@ -907,10 +928,25 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
         />
 
         <div className="footer">
-          <div className="avatar" style={{ width: 30, height: 30, fontSize: 12 }}>
-            {initials(me.displayName || me.username || '?')}
-          </div>
-          <div className="name">{me.displayName || me.username}</div>
+          {/* The whole avatar-and-name block is the button, not just the
+              picture: it is the biggest thing down here, and a caret on the
+              end is what says so. */}
+          <button
+            className={'footer-user' + (accountMenu ? ' open' : '')}
+            title="Account and settings"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (accountMenu) return setAccountMenu(null);
+              const r = e.currentTarget.getBoundingClientRect();
+              setAccountMenu({ x: r.left, y: r.top });
+            }}
+          >
+            <div className="avatar" style={{ width: 30, height: 30, fontSize: 12 }}>
+              {initials(me.displayName || me.username || '?')}
+            </div>
+            <div className="name">{me.displayName || me.username}</div>
+            <span className="footer-caret">▾</span>
+          </button>
           <button onClick={signOut}>Sign out</button>
         </div>
       </div>
@@ -1208,6 +1244,23 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           y={volumeFor.y}
           onChange={(v) => setUserVolume(volumeFor.userId, v)}
         />
+      )}
+      {accountMenu && (
+        // Opens upwards: the button it belongs to is the last row on screen.
+        <div
+          className="menu"
+          style={{ left: accountMenu.x, top: accountMenu.y - ACCOUNT_MENU_HEIGHT }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              setAccountMenu(null);
+              setShowSettings(true);
+            }}
+          >
+            ⚙ Settings
+          </button>
+        </div>
       )}
       {showSettings && (
         <SettingsModal
