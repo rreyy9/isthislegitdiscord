@@ -34,6 +34,11 @@ param(
     # Add the LocalSubnet firewall rules as well.
     [switch] $AllowLan,
 
+    # Install as a LAN-only server even when the payload carries a Caddyfile
+    # with real hostnames. Without this, a payload whose Caddyfile names two
+    # hosts is taken to be an internet deployment and configured for TLS.
+    [switch] $LanOnly,
+
     # The postgres superuser password, used only to apply setup-postgres.sql.
     # Passed through PGPASSWORD so psql never prompts. Blank means "skip the
     # database role setup" when running non-interactively.
@@ -51,10 +56,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$here      = Split-Path -Parent $MyInvocation.MyCommand.Path
-$serverDir = Join-Path $InstallDir 'server'
-$lkDir     = Join-Path $InstallDir 'livekit'
-$envPath   = Join-Path $serverDir '.env'
+$here       = Split-Path -Parent $MyInvocation.MyCommand.Path
+$serverDir  = Join-Path $InstallDir 'server'
+$lkDir      = Join-Path $InstallDir 'livekit'
+$caddyDir   = Join-Path $InstallDir 'caddy'
+$envPath    = Join-Path $serverDir '.env'
 
 function Say([string] $text, [string] $color = 'Cyan') { Write-Host $text -ForegroundColor $color }
 function Warn([string] $text) { Write-Host $text -ForegroundColor Yellow }
@@ -96,6 +102,43 @@ function Get-EnvValue([string] $path, [string] $key) {
     return $null
 }
 
+# Reads the hostnames back out of a Caddyfile, matched to the service each one
+# proxies to rather than to the order they appear in. The Caddyfile is the only
+# place a deployment's public names are written down, so this keeps them from
+# having to be typed a second time -- and keeps them from drifting apart, which
+# would present as voice connecting and staying silent.
+#
+# Returns $null when the file is missing or still has its placeholder names, so
+# a payload built without a real Caddyfile installs LAN-only.
+function Get-CaddyHosts([string] $path) {
+    if (-not (Test-Path $path)) { return $null }
+
+    $hosts = @{}
+    $current = $null
+    foreach ($line in (Get-Content $path)) {
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+
+        # A site block opens with the hostname it serves. Require a dot, so
+        # snippet definitions like (tls443) and the global block are skipped.
+        if ($trimmed -match '^([A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z]{2,})\s*\{') {
+            $current = $Matches[1]
+            continue
+        }
+        if ($trimmed -eq '}') { $current = $null; continue }
+
+        if ($current -and $trimmed -match '^reverse_proxy\s+127\.0\.0\.1:(\d+)') {
+            switch ($Matches[1]) {
+                '3000' { $hosts['chat'] = $current }
+                '7880' { $hosts['livekit'] = $current }
+            }
+        }
+    }
+
+    if ($hosts['chat'] -and $hosts['livekit']) { return $hosts }
+    return $null
+}
+
 Say ""
 Say "isthislegit server installer"
 Say "  payload      $here"
@@ -116,6 +159,26 @@ if (-not (Test-Path (Join-Path $here 'server\node_modules'))) {
     Warn "  The server will not start until dependencies are installed."
 }
 Say "  payload looks complete"
+
+# LAN or internet? Decided by the payload's own Caddyfile rather than by an
+# answer someone has to type, because the hostnames are already written down
+# there and a second copy is a second thing to get wrong.
+$caddyHosts = if ($LanOnly) { $null } else { Get-CaddyHosts (Join-Path $here 'caddy\Caddyfile') }
+$caddyExe   = Join-Path $caddyDir 'bin\caddy.exe'
+
+if ($caddyHosts) {
+    Say "  deployment   internet, behind TLS"
+    Say "    chat       https://$($caddyHosts['chat'])"
+    Say "    voice      wss://$($caddyHosts['livekit'])"
+    if (-not (Test-Path (Join-Path $here 'caddy\bin\caddy.exe'))) {
+        Warn "    caddy.exe is not in the payload -- nothing will answer on 443"
+        Warn "    until it is dropped into $caddyDir\bin."
+    }
+} elseif ($LanOnly) {
+    Say "  deployment   LAN only (-LanOnly)"
+} else {
+    Say "  deployment   LAN only (no Caddyfile with real hostnames in the payload)"
+}
 
 Step "Checking prerequisites"
 
@@ -169,10 +232,11 @@ $inPlace = ($here.TrimEnd('\')) -ieq ($InstallDir.TrimEnd('\'))
 
 if ($inPlace) {
     Say "  payload is already in place -- nothing to copy"
-} elseif (-not (Would "copy server, shared, console and livekit")) {
+} elseif (-not (Would "copy server, shared, console, livekit and caddy")) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    foreach ($folder in @('server', 'shared', 'console', 'livekit')) {
-        Copy-Item (Join-Path $here $folder) $InstallDir -Recurse -Force
+    foreach ($folder in @('server', 'shared', 'console', 'livekit', 'caddy')) {
+        $src = Join-Path $here $folder
+        if (Test-Path $src) { Copy-Item $src $InstallDir -Recurse -Force }
     }
     foreach ($file in @('allow-lan.ps1', 'README.txt')) {
         $src = Join-Path $here $file
@@ -183,10 +247,37 @@ if ($inPlace) {
 
 # --------------------------------------------------------------- 2. PostgreSQL
 
+# Settled before the database step, because setup-postgres.sql needs it and
+# the .env that records it is not written until after. On an upgrade this is
+# read back out of the existing .env, so nothing changes; on a fresh install it
+# is generated, so two installs never share a database credential.
+if (Test-Path $envPath) {
+    $existingDbUrl = Get-EnvValue $envPath 'DATABASE_URL'
+    if ($existingDbUrl -match '^postgres(?:ql)?://[^:]+:([^@]+)@') {
+        $dbPassword = $Matches[1]
+    } else {
+        $dbPassword = $null
+    }
+} else {
+    # Generated per install rather than shared. The old fixed value is
+    # published in this project's repository, which made it a known password
+    # for the application's database role on every box that ran this.
+    # New-Secret is alphanumeric, so it needs no escaping inside DATABASE_URL.
+    $dbPassword = New-Secret
+}
+
 Step "PostgreSQL"
 
 if ($SkipPostgres) {
     Warn "  skipped (-SkipPostgres)"
+} elseif (-not $dbPassword) {
+    # Only reachable on an upgrade whose DATABASE_URL could not be parsed. The
+    # role and database already exist, so there is nothing this step has to do
+    # -- and running it without a password would reset the role to the
+    # published development one, which is worse than doing nothing.
+    Warn "  skipped -- could not read the database password out of the existing"
+    Warn "  DATABASE_URL, and the role must not be reset to the shared default."
+    Warn "  The database already exists, so this is only a problem if it does not."
 } elseif (-not $elevated -and -not $DryRun) {
     Warn "  skipped -- needs an elevated terminal. Re-run elevated, or apply"
     Warn "  server\prisma\setup-postgres.sql by hand as the postgres superuser."
@@ -213,6 +304,12 @@ if ($SkipPostgres) {
             $previousPgPassword = $env:PGPASSWORD
             try {
                 $psqlArgs = @('-U', 'postgres', '-f', (Join-Path $serverDir 'prisma\setup-postgres.sql'))
+
+                # Without app_password the script falls back to the published
+                # development password. Never let that happen on an install:
+                # the guard above means we always have one to pass here.
+                $psqlArgs = @('-v', "app_password=$dbPassword") + $psqlArgs
+
                 if ($PostgresPassword) {
                     # -w so a wrong password fails immediately. Without it psql
                     # falls back to a prompt, and under the GUI installer there
@@ -242,17 +339,24 @@ if (Test-Path $envPath) {
     $lkSecret = New-Secret
     $authSecret = New-Secret
 
+    # Behind Caddy the client is told a public wss:// address; on a LAN install
+    # it is told this box directly. Either way the value reaches the client
+    # from /api/config rather than being compiled into it, so it can change
+    # here without anyone reinstalling anything.
+    $livekitUrl = if ($caddyHosts) { "wss://$($caddyHosts['livekit'])" } else { "ws://${LanIp}:7880" }
+    $authUrl    = if ($caddyHosts) { "https://$($caddyHosts['chat'])" } else { "http://${LanIp}:$Port" }
+
     $envText = @"
 # Written by install.ps1 on $(Get-Date -Format 'yyyy-MM-dd HH:mm'). Secrets below
 # were generated for this machine. Keep this file off any shared drive.
-DATABASE_URL="postgres://chat_app:chat_app_local_dev_pw@localhost:5432/chat?schema=public"
+DATABASE_URL="postgres://chat_app:$dbPassword@localhost:5432/chat?schema=public"
 
 BETTER_AUTH_SECRET="$authSecret"
-BETTER_AUTH_URL="http://${LanIp}:$Port"
+BETTER_AUTH_URL="$authUrl"
 
 PORT=$Port
 
-LIVEKIT_URL="ws://${LanIp}:7880"
+LIVEKIT_URL="$livekitUrl"
 LIVEKIT_API_KEY="$lkKey"
 LIVEKIT_API_SECRET="$lkSecret"
 
@@ -280,9 +384,54 @@ VOICE_QUALITY="studio"
 $lkYaml = Join-Path $lkDir 'livekit.yaml'
 if ($lkKey -and $lkSecret) {
     if (-not (Would "point livekit.yaml at $LanIp and the server's key pair")) {
-        $yaml = Get-Content $lkYaml -Raw
-        $yaml = $yaml -replace '(?m)^(\s*)node_ip:.*$', "`${1}node_ip: $LanIp"
-        $yaml = $yaml -replace '(?m)^(\s*)API[0-9a-zA-Z]+:\s*\S+\s*$', "`${1}${lkKey}: $lkSecret"
+        # Read as UTF-8 explicitly. Get-Content -Raw under Windows PowerShell
+        # 5.1 decodes a BOM-less file as Windows-1252, so the em dashes in this
+        # file's comments come back as mojibake and are then written back out
+        # that way -- the same encoding trap that has already broken a .ps1 in
+        # this repo. The write below is UTF-8 without a BOM; the read has to
+        # agree with it.
+        $yaml = [IO.File]::ReadAllText($lkYaml, (New-Object Text.UTF8Encoding($false)))
+
+        # Which address LiveKit advertises in its ICE candidates. Media goes
+        # straight to this box either way -- Caddy carries only the signalling
+        # -- so behind TLS this still has to be the public address, discovered
+        # by STUN at startup. Getting this wrong is the failure where everyone
+        # joins the call, the UI shows them in the channel, and no audio ever
+        # arrives.
+        #
+        # Done line by line rather than with -replace, because the file
+        # documents both modes and so contains two use_external_ip lines, one
+        # of them commented. A global replace would set both and hand LiveKit
+        # a duplicate key, which it refuses to start on. The first occurrence
+        # of each setting wins and any later one is commented out.
+        $wantExternal = [bool] $caddyHosts
+        $seenNodeIp = $false
+        $seenExternal = $false
+
+        $yaml = (($yaml -split "`r?`n") | ForEach-Object {
+            if ($_ -match '^(\s*)#?\s*node_ip:') {
+                $indent = $Matches[1]
+                if ($seenNodeIp) { return "$indent# node_ip: $LanIp" }
+                $seenNodeIp = $true
+                # Under TLS the LAN address is kept as a comment, so the file
+                # still records what it was if the deployment moves back.
+                if ($wantExternal) { return "$indent# node_ip: $LanIp" }
+                return "$indent" + "node_ip: $LanIp"
+            }
+            if ($_ -match '^(\s*)#?\s*use_external_ip:') {
+                $indent = $Matches[1]
+                # A later occurrence keeps its own text and is commented out.
+                if ($seenExternal) { return ($_ -replace '^(\s*)#?\s*', '$1# ') }
+                $seenExternal = $true
+                return "$indent" + "use_external_ip: " + $(if ($wantExternal) { 'true' } else { 'false' })
+            }
+            return $_
+        }) -join "`r`n"
+
+        # `\s*$` on the end would swallow the newline and the blank line after
+        # the keys block, closing the comment that follows up against it. Match
+        # trailing spaces and tabs only, and leave the line ending alone.
+        $yaml = $yaml -replace '(?m)^(\s*)API[0-9a-zA-Z]+:[ \t]*\S+[ \t]*$', "`${1}${lkKey}: $lkSecret"
         $yaml = $yaml -replace '(?m)^(\s*)api_key:.*$', "`${1}api_key: $lkKey"
         $yaml = $yaml -replace '(?m)^(\s*)-\s*http://[^\s]*?/api/livekit/webhook\s*$', "`${1}- http://127.0.0.1:$Port/api/livekit/webhook"
         # UTF-8 without a BOM. The comments in livekit.yaml contain non-ASCII
@@ -349,6 +498,19 @@ if ($NoStartup) {
         @{ Name = 'isthislegit-livekit'; Exe = $lkExe;          Args = "--config `"$lkDir\livekit.yaml`""; Dir = $lkDir;     Check = $lkExeCheck }
     )
 
+    # Caddy only on an internet deployment: on a LAN install there is no
+    # hostname to get a certificate for, and it would sit retrying forever.
+    if ($caddyHosts) {
+        $caddyExeCheck = if ($DryRun) { Join-Path $here 'caddy\bin\caddy.exe' } else { $caddyExe }
+        $tasks += @{
+            Name  = 'isthislegit-caddy'
+            Exe   = $caddyExe
+            Args  = "run --config `"$caddyDir\Caddyfile`" --adapter caddyfile"
+            Dir   = $caddyDir
+            Check = $caddyExeCheck
+        }
+    }
+
     foreach ($t in $tasks) {
         if (-not (Test-Path $t.Check)) {
             Warn "  $($t.Name): $($t.Check) not found -- task not registered"
@@ -391,17 +553,43 @@ if ($AllowLan) {
 Write-Host ""
 if ($DryRun) { Warn "Dry run finished. Nothing was changed." } else { Say "Installed." 'Green' }
 Write-Host ""
-Write-Host "  server      http://${LanIp}:$Port"
-Write-Host "  livekit     ws://${LanIp}:7880"
+if ($caddyHosts) {
+    Write-Host "  server      https://$($caddyHosts['chat'])"
+    Write-Host "  livekit     wss://$($caddyHosts['livekit'])"
+    Write-Host "              (both on this box as http://${LanIp}:$Port and ws://${LanIp}:7880)"
+} else {
+    Write-Host "  server      http://${LanIp}:$Port"
+    Write-Host "  livekit     ws://${LanIp}:7880"
+}
 Write-Host "  console     cd `"$InstallDir\console`" && node src\main.mjs   -> http://127.0.0.1:4000"
 Write-Host "  config      $envPath"
 Write-Host ""
 if (-not $NoStartup) {
-    Write-Host "  Both tasks start on boot. To start them now without rebooting:"
+    Write-Host "  The tasks start on boot. To start them now without rebooting:"
     Write-Host "    Start-ScheduledTask -TaskName isthislegit-server"
     Write-Host "    Start-ScheduledTask -TaskName isthislegit-livekit"
+    if ($caddyHosts) {
+        Write-Host "    Start-ScheduledTask -TaskName isthislegit-caddy"
+    }
     Write-Host ""
 }
-Write-Host "  Point the desktop client at http://${LanIp}:$Port and register with the"
-Write-Host "  invite code the seed printed above."
+
+if ($caddyHosts) {
+    Write-Host "  Point the desktop client at https://$($caddyHosts['chat']) and register"
+    Write-Host "  with the invite code the seed printed above."
+    Write-Host ""
+    Write-Host "  Still to do by hand, and nothing reaches this box without them:" -ForegroundColor Yellow
+    Write-Host "    1. Forward 443/tcp, 7881/tcp, 3478/udp and 50000-50100/udp on the"
+    Write-Host "       router to $LanIp. Do not forward 3000 or 7880 -- Caddy reaches"
+    Write-Host "       both over loopback, and forwarding them would republish the same"
+    Write-Host "       two services with no TLS in front."
+    Write-Host "    2. Open the firewall:  powershell -File `"$InstallDir\allow-lan.ps1`" -Internet"
+    Write-Host "    3. Check both hostnames resolve to this connection's public address."
+    Write-Host ""
+    Write-Host "  Caddy fetches its certificates on first start. Give it a few seconds,"
+    Write-Host "  then check https://$($caddyHosts['chat'])/api/health from outside."
+} else {
+    Write-Host "  Point the desktop client at http://${LanIp}:$Port and register with the"
+    Write-Host "  invite code the seed printed above."
+}
 Write-Host ""

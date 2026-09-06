@@ -219,6 +219,8 @@ Section "Uninstall"
   nsExec::ExecToLog 'schtasks /Delete /TN "isthislegit-server" /F'
   nsExec::ExecToLog 'schtasks /End /TN "isthislegit-livekit"'
   nsExec::ExecToLog 'schtasks /Delete /TN "isthislegit-livekit" /F'
+  nsExec::ExecToLog 'schtasks /End /TN "isthislegit-caddy"'
+  nsExec::ExecToLog 'schtasks /Delete /TN "isthislegit-caddy" /F'
 
   DetailPrint "Removing program files..."
   RMDir /r "$INSTDIR\server\dist"
@@ -227,6 +229,7 @@ Section "Uninstall"
   RMDir /r "$INSTDIR\shared"
   RMDir /r "$INSTDIR\console"
   RMDir /r "$INSTDIR\livekit"
+  RMDir /r "$INSTDIR\caddy"
   Delete "$INSTDIR\server\package.json"
   Delete "$INSTDIR\server\package-lock.json"
   Delete "$INSTDIR\server\prisma7.config.ts"

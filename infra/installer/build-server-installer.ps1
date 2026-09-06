@@ -31,6 +31,10 @@ param(
     # binary itself (see infra/livekit/README.md).
     [switch] $NoLiveKitBinary,
 
+    # Leave caddy.exe out. The target box then has no TLS until the binary is
+    # dropped into caddy\bin (see infra/caddy/start.ps1 for where from).
+    [switch] $NoCaddyBinary,
+
     # Also emit a plain .zip of the same payload, for a box where running an
     # unsigned installer is not an option.
     [switch] $AlsoZip
@@ -126,7 +130,8 @@ $serverOut  = Join-Path $staging 'server'
 $sharedOut  = Join-Path $staging 'shared'
 $consoleOut = Join-Path $staging 'console'
 $livekitOut = Join-Path $staging 'livekit'
-foreach ($d in @($serverOut, $sharedOut, $consoleOut, $livekitOut)) {
+$caddyOut   = Join-Path $staging 'caddy'
+foreach ($d in @($serverOut, $sharedOut, $consoleOut, $livekitOut, $caddyOut)) {
     New-Item -ItemType Directory -Path $d -Force | Out-Null
 }
 
@@ -180,6 +185,28 @@ if ($NoLiveKitBinary) {
     Say "    livekit-server.exe included"
 } else {
     Say "    livekit-server.exe not found in infra/livekit/bin -- omitted" 'Yellow'
+}
+
+# Caddy: the Caddyfile and its start script always; the binary only if it is
+# here and the caller wants it.
+#
+# Unlike livekit.yaml, the Caddyfile carries no secret -- only two hostnames --
+# so the real one ships rather than a template. That is deliberate: install.ps1
+# reads the hostnames back out of it to decide whether this is an internet
+# deployment, and a templated file would make every install LAN-only.
+Say "  caddy/"
+Copy-Item (Join-Path $repo 'infra\caddy\Caddyfile') $caddyOut -Force
+Copy-Item (Join-Path $repo 'infra\caddy\start.ps1') $caddyOut -Force
+New-Item -ItemType Directory -Path (Join-Path $caddyOut 'bin') -Force | Out-Null
+
+$caddyExe = Join-Path $repo 'infra\caddy\bin\caddy.exe'
+if ($NoCaddyBinary) {
+    Say "    binary omitted (-NoCaddyBinary)" 'Yellow'
+} elseif (Test-Path $caddyExe) {
+    Copy-Item $caddyExe (Join-Path $caddyOut 'bin') -Force
+    Say "    caddy.exe included"
+} else {
+    Say "    caddy.exe not found in infra/caddy/bin -- omitted, TLS will not start" 'Yellow'
 }
 
 # The firewall helper and the installer itself.
@@ -245,6 +272,7 @@ isthislegit-server-$version-setup.exe and it does the lot.
     shared\      schemas the server imports at runtime
     console\     the operator console (binds to 127.0.0.1 only, by design)
     livekit\     LiveKit config, start script and (usually) the binary
+    caddy\       TLS reverse proxy: Caddyfile, start script and the binary
     install.ps1  everything the setup.exe does after unpacking
 
 Requirements on the target box

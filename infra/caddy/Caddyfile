@@ -8,7 +8,6 @@
 #   isthislegit-lk.duckdns.org   -> LiveKit       (127.0.0.1:7880)
 #
 # Start it with infra/caddy/start.ps1.
-
 {
 	# 443 only. Caddy would normally also bind 80, for the ACME HTTP-01
 	# challenge and an HTTP->HTTPS redirect. Neither is worth a forwarded
