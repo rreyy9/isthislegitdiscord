@@ -19,7 +19,18 @@ import { readConfig, writeConfig, resolvePaths, envValue } from './config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../../..');
-const SERVER_DIR = path.join(ROOT, 'apps/server');
+
+/**
+ * The chat server sits at apps/server in the repo and at server/ next to the
+ * console in an installed copy. Look for both rather than assuming a layout:
+ * `../../..` from an installed console/src lands outside the install directory
+ * entirely, which made every process-control button and every task quietly
+ * point at a path that does not exist.
+ */
+const SERVER_DIR = [
+  path.join(ROOT, 'apps/server'),
+  path.resolve(__dirname, '../../server'),
+].find((dir) => fs.existsSync(path.join(dir, 'package.json'))) ?? path.join(ROOT, 'apps/server');
 
 const CONSOLE_PORT = Number(process.env.CONSOLE_PORT ?? 4000);
 const SERVER_PORT = Number(process.env.SERVER_PORT ?? 3000);

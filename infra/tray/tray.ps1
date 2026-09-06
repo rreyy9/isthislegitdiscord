@@ -18,8 +18,17 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repo = (Resolve-Path (Join-Path $here '..\..')).Path
-$startAll = Join-Path $repo 'infra\start-all.ps1'
+
+# Two layouts: infra\tray in the repo, <install>\tray in an installed copy.
+# start-all.ps1 only exists in the first; the second is run by the scheduled
+# tasks the installer registered, so starting and stopping there means driving
+# those rather than spawning windows that would compete with them.
+$startAll = Join-Path (Split-Path -Parent $here) 'start-all.ps1'
+$repo = if (Test-Path $startAll) { (Resolve-Path (Join-Path $here '..\..')).Path } else { Split-Path -Parent $here }
+
+$taskNames = @('isthislegit-server', 'isthislegit-livekit', 'isthislegit-caddy')
+$useTasks = -not (Test-Path $startAll) -and
+    [bool] (Get-ScheduledTask -TaskName 'isthislegit-server' -ErrorAction SilentlyContinue)
 
 # Matched by listening port, never by image name. Three of these are node.exe
 # and so is anything else on the machine; matching on the name is how
@@ -60,8 +69,27 @@ function Test-Port([int] $port) {
 }
 
 function Invoke-StartAll([string[]] $extraArgs) {
-    $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $startAll) + $extraArgs
-    Start-Process -FilePath 'powershell' -ArgumentList $args -WindowStyle Hidden | Out-Null
+    # On an installed server the scheduled tasks own these processes. Starting
+    # a second copy from here would just fail on the port bind, and stopping
+    # one would leave the task's restart-on-failure to bring it straight back.
+    if ($useTasks) {
+        $stopping = $extraArgs -contains '-Stop'
+        foreach ($name in $taskNames) {
+            if (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { continue }
+            if ($stopping) { Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue }
+            else { Start-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue }
+        }
+        return
+    }
+
+    if (-not (Test-Path $startAll)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Could not find start-all.ps1 at:`n`n$startAll`n`nand no isthislegit scheduled tasks are registered.",
+            'isthislegit', 'OK', 'Warning') | Out-Null
+        return
+    }
+    $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $startAll) + $extraArgs
+    Start-Process -FilePath 'powershell' -ArgumentList $psArgs -WindowStyle Hidden | Out-Null
 }
 
 # --------------------------------------------------------------------- menu

@@ -15,28 +15,44 @@
 
 Option Explicit
 
-Dim shell, fso, here, repo, url, i, ok, browser
+Dim shell, fso, here, url, i, ok, browser
+Dim consoleDir, launchCmd
 
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 here = fso.GetParentFolderName(WScript.ScriptFullName)
-repo = fso.GetParentFolderName(fso.GetParentFolderName(here))
 url = "http://127.0.0.1:4000"
+
+' Two layouts. In the repo this sits at infra\tray and the console is at
+' apps\console; in an installed copy it sits at <install>\tray and the console
+' is at <install>\console. Detect rather than assume -- an installed console
+' also has no npm workspace around it, so it is started differently.
+consoleDir = ""
+If fso.FileExists(Up(2, here) & "\apps\console\src\main.mjs") Then
+    consoleDir = Up(2, here) & "\apps\console"
+    launchCmd = "cmd /c npm run console"
+ElseIf fso.FileExists(Up(1, here) & "\console\src\main.mjs") Then
+    consoleDir = Up(1, here) & "\console"
+    ' No workspace to run an npm script from: call node directly.
+    launchCmd = "cmd /c node src\main.mjs"
+End If
 
 ' Already up? Then just open it. Starting a second console would fail on the
 ' port bind and leave a window explaining that instead of the console.
 If Not ConsoleIsUp() Then
-    If Not fso.FileExists(fso.BuildPath(repo, "apps\console\src\main.mjs")) Then
-        MsgBox "Could not find the console at:" & vbCrLf & vbCrLf & _
-               fso.BuildPath(repo, "apps\console\src\main.mjs"), vbExclamation, "isthislegit"
+    If consoleDir = "" Then
+        MsgBox "Could not find the operator console next to this file." & vbCrLf & vbCrLf & _
+               "Looked in:" & vbCrLf & _
+               "  " & Up(2, here) & "\apps\console" & vbCrLf & _
+               "  " & Up(1, here) & "\console", vbExclamation, "isthislegit"
         WScript.Quit 1
     End If
 
     ' Hidden: the console's own output goes to its Logs tab, so a console
     ' window here would only be something to accidentally close.
-    shell.CurrentDirectory = repo
-    shell.Run "cmd /c npm run console", 0, False
+    shell.CurrentDirectory = consoleDir
+    shell.Run launchCmd, 0, False
 
     ' Up to about twenty seconds. npm's own startup dominates this.
     ok = False
@@ -50,7 +66,7 @@ If Not ConsoleIsUp() Then
 
     If Not ok Then
         MsgBox "The console did not start within 20 seconds." & vbCrLf & vbCrLf & _
-               "Run 'npm run console' in " & repo & " to see why.", vbExclamation, "isthislegit"
+               "Run it by hand in " & consoleDir & " to see why.", vbExclamation, "isthislegit"
         WScript.Quit 1
     End If
 End If
@@ -63,6 +79,15 @@ Else
 End If
 
 ' ---------------------------------------------------------------- helpers
+
+' n folders up from p.
+Function Up(n, p)
+    Dim k
+    Up = p
+    For k = 1 To n
+        Up = fso.GetParentFolderName(Up)
+    Next
+End Function
 
 ' A request rather than a port scan: the console answering on 4000 is what we
 ' actually care about, and WinHTTP is on every Windows without anything added.
