@@ -7,11 +7,17 @@ import { contextBridge, ipcRenderer } from 'electron';
  * the screen-source picker and the global push-to-talk hook.
  */
 
+/** A key or a mouse button, in uiohook's own codes. See voice-main.ts. */
+export interface PttBinding {
+  type: 'key' | 'mouse';
+  code: number;
+}
+
 export interface VoiceSettings {
   inputDeviceId: string | null;
   outputDeviceId: string | null;
   pushToTalk: boolean;
-  pttKeycode: number | null;
+  pttBinding: PttBinding | null;
   pttLabel: string | null;
   /* --- capture constraints, handed straight to getUserMedia --- */
   echoCancellation: boolean;
@@ -33,6 +39,14 @@ export interface Settings {
   serverUrl: string;
   /** The voice channel this client was in when it last stopped, if any. */
   lastVoiceChannelId: string | null;
+  /** The text channel that was open when the app last closed. */
+  lastTextChannelId: string | null;
+  /**
+   * Where the reader had got to in each text channel, as the id of the
+   * bottom-most message they could see. `chatPositions` is merged rather than
+   * replaced by `setSettings`, so one channel may be sent on its own.
+   */
+  chatPositions: Record<string, string>;
   voice: VoiceSettings;
 }
 
@@ -94,12 +108,18 @@ const bridge = {
   pttAvailable: (): Promise<boolean> => ipcRenderer.invoke('ptt:available'),
   setPtt: (opts: {
     enabled: boolean;
-    keycode: number | null;
+    binding: PttBinding | null;
   }): Promise<{ ok: boolean; label: string | null }> =>
     ipcRenderer.invoke('ptt:set', opts),
-  /** Resolves on the next key pressed anywhere, or null after ten seconds. */
-  capturePttKey: (): Promise<{ keycode: number; label: string } | null> =>
-    ipcRenderer.invoke('ptt:capture'),
+  /**
+   * Resolves on the next key or mouse button pressed anywhere, or null after
+   * ten seconds. Left click is skipped rather than bound, since it is how the
+   * settings panel is operated.
+   */
+  capturePttBinding: (): Promise<{
+    binding: PttBinding;
+    label: string;
+  } | null> => ipcRenderer.invoke('ptt:capture'),
   onPttChange: (cb: (held: boolean) => void): (() => void) => {
     const handler = (_e: unknown, held: boolean) => cb(held);
     ipcRenderer.on('ptt:changed', handler);

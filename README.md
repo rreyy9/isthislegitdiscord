@@ -344,9 +344,11 @@ Input next to the switch it is about, and only when the server is actually set t
 
 - **Echo cancellation / noise suppression / automatic gain** (Input) — Chromium's own,
   applied at capture. Changing any of them restarts the microphone.
-- **Push-to-talk** (Input) — the key and what it overrides only appear once the switch is
-  on, since neither means anything while it is off. If the global hook could not load, the
-  switch is disabled and says why instead.
+- **Push-to-talk** (Input) — bind a keyboard key or a mouse button (a thumb button, the
+  middle button, anything but left click, which has to stay usable for clicking). The
+  binding and what it overrides only appear once the switch is on, since neither means
+  anything while it is off. If the global hook could not load, the switch is disabled and
+  says why instead.
 - **Sensitivity** (Input) — off, automatic, or a manual threshold with a live meter.
   Automatic measures the room for 300 ms on join and sits a fixed margin above what it
   heard, so a noisy room raises its own bar. It mutes and unmutes the published track
@@ -489,8 +491,11 @@ Socket.IO events are declared in `packages/shared/src/index.ts`.
   the signature is over the raw bytes. Parsing first silently breaks verification.
 - **Join tokens live ten minutes.** They only have to survive the join.
 - **Push-to-talk is `uiohook-napi`, not Electron's `globalShortcut`.** `globalShortcut`
-  reports presses but never releases, so it cannot express "hold". If the native module
-  fails to load, push-to-talk reports itself unavailable and everything else still works.
+  reports presses but never releases, so it cannot express "hold", and it does not see the
+  mouse at all. The same hook reports both, so a key and a mouse button bind through one
+  path; the saved binding carries its kind, because the two code spaces overlap. If the
+  native module fails to load, push-to-talk reports itself unavailable and everything else
+  still works.
 - **Screen capture needs the main process.** Electron ships no picker on Windows, so
   `getDisplayMedia` fails unless the app answers the request.
 - **`--dev` mode is never used.** Its key pair is published in LiveKit's own repository.

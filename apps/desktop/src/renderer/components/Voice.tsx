@@ -288,10 +288,10 @@ export function SettingsModal({
 
   async function bindKey() {
     setBinding(true);
-    const result = await bridge.capturePttKey();
+    const result = await bridge.capturePttBinding();
     setBinding(false);
     if (result) {
-      onChange({ pttKeycode: result.keycode, pttLabel: result.label });
+      onChange({ pttBinding: result.binding, pttLabel: result.label });
     }
   }
 
@@ -380,17 +380,17 @@ export function SettingsModal({
                       disabled={!pttOk}
                       onChange={(e) => onChange({ pushToTalk: e.target.checked })}
                     />
-                    Only transmit while a key is held
+                    Only transmit while a key or mouse button is held
                   </label>
 
-                  {/* The key and what it overrides only matter once the
+                  {/* The binding and what it overrides only matter once the
                       switch is on, so they appear with it rather than sitting
                       there greyed out. The unavailable notice is the one thing
                       that has to show while it is off, since it is the reason
                       the switch cannot be turned on. */}
                   {!pttOk ? (
                     <div className="hint">
-                      The global key hook could not load on this machine, so
+                      The global input hook could not load on this machine, so
                       push-to-talk is unavailable. Everything else still works.
                     </div>
                   ) : (
@@ -399,13 +399,15 @@ export function SettingsModal({
                         <div className="ptt-row">
                           <button onClick={bindKey} disabled={binding}>
                             {binding
-                              ? 'Press any key…'
+                              ? 'Select a key'
                               : settings.pttLabel
-                                ? `Key: ${settings.pttLabel}`
-                                : 'Set a key'}
+                                ? `Bound to: ${settings.pttLabel}`
+                                : 'Set a key or button'}
                           </button>
                           <span className="hint inline">
-                            Works while another window has focus.
+                            {binding
+                              ? 'Left click is skipped, so it stays usable here.'
+                              : 'Works while another window has focus.'}
                           </span>
                         </div>
                         <div className="hint">
@@ -552,15 +554,16 @@ export function VoicePanel({
   voice,
   channelName,
   onLeave,
-  onOpenSettings,
   pushToTalk,
+  pttLabel,
 }: {
   voice: Voice;
   channelName: string;
   /** Leaving goes through Chat, which also forgets the channel to rejoin. */
   onLeave: () => void;
-  onOpenSettings: () => void;
   pushToTalk: boolean;
+  /** Named here so the reminder says which key or button, not just "your key". */
+  pttLabel: string | null;
 }) {
   if (voice.status === 'idle') return null;
 
@@ -599,7 +602,11 @@ export function VoicePanel({
 
       {pushToTalk && voice.status === 'connected' && (
         <div className={'vp-ptt' + (voice.talking ? ' live' : '')}>
-          {voice.talking ? 'Transmitting' : 'Hold your key to talk'}
+          {voice.talking
+            ? 'Transmitting'
+            : pttLabel
+              ? `Hold ${pttLabel} to talk`
+              : 'Nothing bound — set a key or button in settings'}
         </div>
       )}
 
@@ -627,9 +634,6 @@ export function VoicePanel({
           title={voice.screenSharing ? 'Stop sharing' : 'Share your screen'}
         >
           🖥
-        </button>
-        <button onClick={onOpenSettings} title="Settings">
-          ⚙
         </button>
       </div>
     </div>

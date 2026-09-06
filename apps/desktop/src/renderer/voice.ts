@@ -13,6 +13,7 @@ import {
 } from 'livekit-client';
 import { api, type VoiceAudioDto } from './api';
 import { bridge } from './bridge';
+import type { PttBinding } from '../preload';
 import { InputGate, SpeakingDetector, TrackMeter } from './audio-levels';
 
 /**
@@ -75,7 +76,8 @@ export interface VoiceSettings {
   inputDeviceId: string | null;
   outputDeviceId: string | null;
   pushToTalk: boolean;
-  pttKeycode: number | null;
+  /** The key or mouse button to hold, in uiohook codes. */
+  pttBinding: PttBinding | null;
   pttLabel: string | null;
   echoCancellation: boolean;
   noiseSuppression: boolean;
@@ -758,14 +760,14 @@ export function useVoice(settings: VoiceSettings) {
   useEffect(() => {
     void bridge.setPtt({
       enabled: settings.pushToTalk,
-      keycode: settings.pttKeycode,
+      binding: settings.pttBinding,
     });
     if (!settings.pushToTalk) {
       talkingRef.current = false;
       setState((s) => ({ ...s, talking: false }));
     }
     void applyMic();
-  }, [settings.pushToTalk, settings.pttKeycode, applyMic]);
+  }, [settings.pushToTalk, settings.pttBinding, applyMic]);
 
   /* --------------------------------------------- react to settings changes */
 

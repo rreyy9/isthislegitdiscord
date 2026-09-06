@@ -122,7 +122,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     inputDeviceId: null,
     outputDeviceId: null,
     pushToTalk: false,
-    pttKeycode: null,
+    pttBinding: null,
     pttLabel: null,
     echoCancellation: true,
     noiseSuppression: true,
@@ -138,6 +138,19 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const [lastVoiceChannelId, setLastVoiceChannelId] = useState<string | null>(
     null,
   );
+  /** The text channel that was open when the app last closed, if any. */
+  const [lastTextChannelId, setLastTextChannelId] = useState<string | null>(
+    null,
+  );
+  /**
+   * Whether the message list is parked at the bottom. Everything about new
+   * messages hangs off this: scrolled to the end, they push the view along;
+   * scrolled back, they leave the reader where they are and light up the
+   * jump button instead.
+   */
+  const [atBottom, setAtBottom] = useState(true);
+  /** A message arrived while the reader was scrolled back up. */
+  const [hasNew, setHasNew] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   /** Images pasted or dropped, held locally until the message is sent. */
   const [pending, setPending] = useState<{ file: File; preview: string }[]>([]);
@@ -190,6 +203,15 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const activeChannelRef = useRef<string | null>(null);
   const lastSeenIdRef = useRef<string | null>(null);
   const typingSentRef = useRef(false);
+  /**
+   * channelId -> the message the reader had got to. Held in a ref rather than
+   * in state because it is written on every scroll frame and read only when a
+   * channel opens; nothing on screen depends on it.
+   */
+  const positionsRef = useRef<Record<string, string>>({});
+  const atBottomRef = useRef(true);
+  /** Pending debounced write of `positionsRef` to settings.json. */
+  const saveTimerRef = useRef<number | null>(null);
 
   activeChannelRef.current = activeChannel;
 
@@ -213,6 +235,8 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     void bridge.getSettings().then((s) => {
       setVoiceSettings(s.voice);
       setLastVoiceChannelId(s.lastVoiceChannelId);
+      setLastTextChannelId(s.lastTextChannelId);
+      positionsRef.current = s.chatPositions;
       setSettingsReady(true);
     });
   }, []);
@@ -276,8 +300,6 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     (async () => {
       const gs = await api.guilds();
       setGuilds(gs);
-      const firstText = gs[0]?.channels.find((c) => c.kind === 'TEXT');
-      if (firstText) setActiveChannel(firstText.id);
       await loadMembers();
       // A client starting up mid-call would otherwise see empty voice channels
       // until the next person joined or left.
@@ -311,6 +333,10 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           return [...prev, m];
         });
         lastSeenIdRef.current = m.id;
+        // Reading the end of the channel means following it; reading further
+        // back means being left there, with the jump button to say why.
+        if (atBottomRef.current) requestAnimationFrame(scrollToBottom);
+        else setHasNew(true);
         void markRead(m.channelId, m.id);
       },
       onMessageUpdated: (m) =>
@@ -452,31 +478,87 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
 
   /* --------------------------------------------------------- channel load */
 
+  /**
+   * Reopen the channel that was on screen when the app last closed, once the
+   * guild list and the stored settings are both in. Guarded by a ref because
+   * it must happen exactly once: after this, the channel is whichever one the
+   * reader has clicked since.
+   */
+  const reopenedRef = useRef(false);
+  useEffect(() => {
+    if (reopenedRef.current || !settingsReady || guilds.length === 0) return;
+    reopenedRef.current = true;
+    const texts = guilds.flatMap((g) => g.channels).filter((c) => c.kind === 'TEXT');
+    // A channel that has since been deleted falls back to the first one,
+    // which is where a first-ever launch starts anyway.
+    const target = texts.find((c) => c.id === lastTextChannelId) ?? texts[0];
+    if (target) setActiveChannel(target.id);
+  }, [guilds, settingsReady, lastTextChannelId]);
+
+  /** Remember which channel to come back to. */
   useEffect(() => {
     if (!activeChannel) return;
+    void bridge.setSettings({ lastTextChannelId: activeChannel });
+  }, [activeChannel]);
+
+  /**
+   * How many extra pages of history to walk back through looking for the
+   * message the reader was last on. Far enough to cover a channel left in the
+   * middle of a busy evening, short enough that opening one never hangs.
+   */
+  const MAX_RESTORE_PAGES = 5;
+
+  useEffect(() => {
+    // Settings carry the reading position, so a channel opened before they
+    // land would open at the bottom and then overwrite it.
+    if (!activeChannel || !settingsReady) return;
     let cancelled = false;
     joinChannel(activeChannel);
     setMessages([]);
     setTypingUsers({});
+    setHasNew(false);
     clearPending();
     (async () => {
+      const anchor = positionsRef.current[activeChannel] ?? null;
       const page = await api.history(activeChannel);
       if (cancelled) return;
-      setMessages(page.messages);
-      setCursor(page.nextCursor);
-      const last = page.messages[page.messages.length - 1];
+      let loaded = page.messages;
+      let next = page.nextCursor;
+      // Page back until the remembered message is in hand. Ids are UUIDv7, so
+      // "older than everything loaded" is a plain string compare — and an
+      // anchor newer than the oldest loaded message that still is not there
+      // was deleted, so there is nothing to page back to.
+      for (let i = 0; anchor && next && i < MAX_RESTORE_PAGES; i++) {
+        if (loaded.some((m) => m.id === anchor)) break;
+        if (loaded.length > 0 && anchor > loaded[0].id) break;
+        const older = await api.history(activeChannel, next);
+        if (cancelled) return;
+        loaded = [...older.messages, ...loaded];
+        next = older.nextCursor;
+      }
+      setMessages(loaded);
+      setCursor(next);
+      const last = loaded[loaded.length - 1];
       lastSeenIdRef.current = last?.id ?? null;
       if (last) {
         setLatest((prev) => ({ ...prev, [activeChannel]: last.id }));
         void markRead(activeChannel, last.id);
       }
-      requestAnimationFrame(scrollToBottom);
+      requestAnimationFrame(() => {
+        // Nothing to restore to if the reader was already at the end.
+        const restored =
+          Boolean(anchor) && anchor !== last?.id && scrollToMessage(anchor!);
+        if (!restored) scrollToBottom();
+        holdAt(restored ? anchor : null);
+        updateScrollState();
+      });
     })();
     return () => {
       cancelled = true;
+      releaseHold();
       leaveChannel(activeChannel);
     };
-  }, [activeChannel]);
+  }, [activeChannel, settingsReady]);
 
   /**
    * Read state plus the newest message id per channel. Both are needed: unread
@@ -561,6 +643,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     });
     const last = page.messages[page.messages.length - 1];
     if (last) lastSeenIdRef.current = last.id;
+    if (atBottomRef.current) requestAnimationFrame(scrollToBottom);
   }
 
   async function loadOlder() {
@@ -579,6 +662,119 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     const box = msgsRef.current;
     if (box) box.scrollTop = box.scrollHeight;
   }
+
+  /** What the jump button does: to the end, and stop counting arrivals. */
+  function jumpToLatest() {
+    releaseHold();
+    scrollToBottom();
+    setHasNew(false);
+  }
+
+  /* ------------------------------------------------- reading position */
+
+  /** Anything this close to the end counts as being at the end. */
+  const BOTTOM_SLACK = 40;
+
+  /**
+   * Put a message at the bottom of the view, which is where it was when the
+   * reader last saw it — what they had read stays on screen, and whatever
+   * arrived since is below, waiting. False if the message is not loaded.
+   */
+  function scrollToMessage(id: string) {
+    const box = msgsRef.current;
+    const el = box?.querySelector<HTMLElement>(`[data-mid="${CSS.escape(id)}"]`);
+    if (!box || !el) return false;
+    const offset =
+      el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+    box.scrollTop = Math.max(0, offset + el.offsetHeight - box.clientHeight);
+    return true;
+  }
+
+  /** The bottom-most message with any part of it on screen. */
+  function bottomVisibleId(box: HTMLElement) {
+    const limit = box.getBoundingClientRect().bottom;
+    let found: string | null = null;
+    for (const child of box.children) {
+      const id = (child as HTMLElement).dataset.mid;
+      if (!id) continue; // the "load earlier" button, and unsent messages
+      if (child.getBoundingClientRect().top >= limit) break;
+      found = id;
+    }
+    return found;
+  }
+
+  /**
+   * Called on every scroll: tracks whether the jump button is needed, and
+   * writes down where the reader has got to. The write is debounced because
+   * this runs dozens of times a second and lands on disk in main.
+   */
+  function updateScrollState() {
+    const box = msgsRef.current;
+    const channelId = activeChannelRef.current;
+    if (!box || !channelId) return;
+    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+    const bottom = gap <= BOTTOM_SLACK;
+    atBottomRef.current = bottom;
+    setAtBottom(bottom);
+    if (bottom) setHasNew(false);
+
+    const id = bottomVisibleId(box);
+    if (!id || positionsRef.current[channelId] === id) return;
+    positionsRef.current = { ...positionsRef.current, [channelId]: id };
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(savePositions, 500);
+  }
+
+  /* ------------------------------------------------------------- holding */
+
+  const holdTimerRef = useRef<number | null>(null);
+
+  /**
+   * Keep the view on a message — or on the end, for a null id — for a moment
+   * after landing there. Attachments are fetched after the message they hang
+   * off, so the list keeps growing underneath for a second or two; without
+   * this the reader arrives in the right place and then slides away from it.
+   */
+  function holdAt(id: string | null) {
+    releaseHold();
+    const until = Date.now() + 2500;
+    holdTimerRef.current = window.setInterval(() => {
+      // A held message that has gone (deleted under us) ends the hold early.
+      const held = id === null ? Boolean(msgsRef.current) : scrollToMessage(id);
+      if (id === null) scrollToBottom();
+      if (!held || Date.now() > until) releaseHold();
+    }, 100);
+  }
+
+  /** Any scrolling of the reader's own ends the hold at once. */
+  function releaseHold() {
+    if (holdTimerRef.current !== null) clearInterval(holdTimerRef.current);
+    holdTimerRef.current = null;
+  }
+
+  useEffect(() => releaseHold, []);
+
+  function savePositions() {
+    saveTimerRef.current = null;
+    void bridge.setSettings({ chatPositions: positionsRef.current });
+  }
+
+  /**
+   * Closing the app is exactly the moment the position matters, and it is the
+   * one moment a debounced write would be thrown away.
+   */
+  useEffect(() => {
+    const flush = () => {
+      if (saveTimerRef.current === null) return;
+      clearTimeout(saveTimerRef.current);
+      savePositions();
+    };
+    window.addEventListener('beforeunload', flush);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      flush();
+    };
+  }, []);
 
   /* ------------------------------------------------------------- sending */
 
@@ -923,8 +1119,8 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           voice={voice}
           channelName={voiceChannelObj?.name ?? ''}
           pushToTalk={voiceSettings.pushToTalk}
+          pttLabel={voiceSettings.pttBinding ? voiceSettings.pttLabel : null}
           onLeave={leaveVoice}
-          onOpenSettings={() => setShowSettings(true)}
         />
 
         <div className="footer">
@@ -968,103 +1164,126 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
 
         <ScreenStage voice={voice} />
 
-        <div className="msgs" ref={msgsRef}>
-          {cursor && (
-            <button className="load-more" onClick={loadOlder}>
-              Load earlier messages
-            </button>
-          )}
-          {messages.length === 0 ? (
-            <div className="empty">No messages yet. Say something.</div>
-          ) : (
-            messages.map((m, i) => {
-              const prev = messages[i - 1];
-              const newDay = !prev || !sameDay(prev.createdAt, m.createdAt);
-              // A day boundary always starts a fresh block, even for the same
-              // author a minute apart across midnight.
-              const grouped =
-                prev &&
-                !newDay &&
-                prev.author.id === m.author.id &&
-                new Date(m.createdAt).getTime() - new Date(prev.createdAt).getTime() < 5 * 60_000;
-              return (
-                <div key={m.id}>
-                  {newDay && (
-                    <div className="day-sep">
-                      <span>{dayLabel(m.createdAt)}</span>
-                    </div>
-                  )}
-                  <div className={'msg' + (grouped ? ' grouped' : '') + (m.pending ? ' pending' : '')}>
-                    {grouped ? (
-                      <div className="avatar spacer" />
-                    ) : (
-                      <div className="avatar">{initials(m.author.displayName || m.author.username)}</div>
-                    )}
-                    <div className="msg-body">
-                      {!grouped && (
-                        <div className="msg-head">
-                          <span className="msg-author">{m.author.displayName || m.author.username}</span>
-                          <span className="msg-time">{timeOf(m.createdAt)}</span>
-                        </div>
-                      )}
-                      {editingId === m.id ? (
-                        <div className="msg-edit">
-                          <textarea
-                            autoFocus
-                            rows={Math.min(10, editDraft.split('\n').length)}
-                            value={editDraft}
-                            onChange={(e) => setEditDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Escape') {
-                                e.preventDefault();
-                                cancelEdit();
-                              } else if (e.key === 'Enter' && !e.shiftKey) {
-                                e.preventDefault();
-                                void saveEdit(m);
-                              }
-                            }}
-                          />
-                          <div className="msg-edit-hint">
-                            escape to <a onClick={cancelEdit}>cancel</a> · enter to{' '}
-                            <a onClick={() => void saveEdit(m)}>save</a>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          <MessageContent
-                            content={m.content}
-                            attachments={m.attachments}
-                            edited={Boolean(m.editedAt)}
-                          />
-                          {/* Our own pasted images, shown before the server echo. */}
-                          {m.previews?.map((url) => (
-                            <PreviewImage key={url} url={url} />
-                          ))}
-                        </>
-                      )}
-                    </div>
-                    {editingId !== m.id && (canEdit(m) || canDelete(m)) && (
-                      <div className="msg-actions">
-                        {canEdit(m) && (
-                          <button title="Edit" onClick={() => beginEdit(m)}>
-                            ✎
-                          </button>
-                        )}
-                        {canDelete(m) && (
-                          <button
-                            className="danger"
-                            title={m.author.id === me.id ? 'Delete' : 'Delete as admin'}
-                            onClick={() => askDelete(m)}
-                          >
-                            🗑
-                          </button>
-                        )}
+        <div className="msgs-wrap">
+          <div
+            className="msgs"
+            ref={msgsRef}
+            onScroll={updateScrollState}
+            onWheel={releaseHold}
+            onPointerDown={releaseHold}
+            onKeyDown={releaseHold}
+          >
+            {cursor && (
+              <button className="load-more" onClick={loadOlder}>
+                Load earlier messages
+              </button>
+            )}
+            {messages.length === 0 ? (
+              <div className="empty">No messages yet. Say something.</div>
+            ) : (
+              messages.map((m, i) => {
+                const prev = messages[i - 1];
+                const newDay = !prev || !sameDay(prev.createdAt, m.createdAt);
+                // A day boundary always starts a fresh block, even for the same
+                // author a minute apart across midnight.
+                const grouped =
+                  prev &&
+                  !newDay &&
+                  prev.author.id === m.author.id &&
+                  new Date(m.createdAt).getTime() - new Date(prev.createdAt).getTime() < 5 * 60_000;
+                return (
+                  // `data-mid` is how the reading position is both read off the
+                  // list and restored to it. Unsent messages are left untagged:
+                  // their ids do not survive the round trip.
+                  <div key={m.id} data-mid={m.pending ? undefined : m.id}>
+                    {newDay && (
+                      <div className="day-sep">
+                        <span>{dayLabel(m.createdAt)}</span>
                       </div>
                     )}
+                    <div className={'msg' + (grouped ? ' grouped' : '') + (m.pending ? ' pending' : '')}>
+                      {grouped ? (
+                        <div className="avatar spacer" />
+                      ) : (
+                        <div className="avatar">{initials(m.author.displayName || m.author.username)}</div>
+                      )}
+                      <div className="msg-body">
+                        {!grouped && (
+                          <div className="msg-head">
+                            <span className="msg-author">{m.author.displayName || m.author.username}</span>
+                            <span className="msg-time">{timeOf(m.createdAt)}</span>
+                          </div>
+                        )}
+                        {editingId === m.id ? (
+                          <div className="msg-edit">
+                            <textarea
+                              autoFocus
+                              rows={Math.min(10, editDraft.split('\n').length)}
+                              value={editDraft}
+                              onChange={(e) => setEditDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  cancelEdit();
+                                } else if (e.key === 'Enter' && !e.shiftKey) {
+                                  e.preventDefault();
+                                  void saveEdit(m);
+                                }
+                              }}
+                            />
+                            <div className="msg-edit-hint">
+                              escape to <a onClick={cancelEdit}>cancel</a> · enter to{' '}
+                              <a onClick={() => void saveEdit(m)}>save</a>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <MessageContent
+                              content={m.content}
+                              attachments={m.attachments}
+                              edited={Boolean(m.editedAt)}
+                            />
+                            {/* Our own pasted images, shown before the server echo. */}
+                            {m.previews?.map((url) => (
+                              <PreviewImage key={url} url={url} />
+                            ))}
+                          </>
+                        )}
+                      </div>
+                      {editingId !== m.id && (canEdit(m) || canDelete(m)) && (
+                        <div className="msg-actions">
+                          {canEdit(m) && (
+                            <button title="Edit" onClick={() => beginEdit(m)}>
+                              ✎
+                            </button>
+                          )}
+                          {canDelete(m) && (
+                            <button
+                              className="danger"
+                              title={m.author.id === me.id ? 'Delete' : 'Delete as admin'}
+                              onClick={() => askDelete(m)}
+                            >
+                              🗑
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
-            })
+                );
+              })
+            )}
+          </div>
+
+          {!atBottom && (
+            <button
+              className={'jump-latest' + (hasNew ? ' fresh' : '')}
+              onClick={jumpToLatest}
+              title="Jump to the newest message"
+            >
+              <span className="jump-arrow">↓</span>
+              {hasNew ? 'New messages' : 'Jump to latest'}
+            </button>
           )}
         </div>
 

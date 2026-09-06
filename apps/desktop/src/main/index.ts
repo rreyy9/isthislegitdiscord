@@ -12,7 +12,11 @@ import {
 } from 'electron';
 import { join } from 'node:path';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { registerPushToTalk, registerScreenShare } from './voice-main';
+import {
+  registerPushToTalk,
+  registerScreenShare,
+  type PttBinding,
+} from './voice-main';
 
 /**
  * Main process. Deliberately small: no mTLS in this build, so the renderer can
@@ -32,8 +36,11 @@ interface VoiceSettings {
   inputDeviceId: string | null;
   outputDeviceId: string | null;
   pushToTalk: boolean;
-  /** A uiohook keycode, not a DOM key — the hook is global, so DOM codes do not apply. */
-  pttKeycode: number | null;
+  /**
+   * The key or mouse button to hold. uiohook's own codes, not DOM ones — the
+   * hook is global, so DOM codes do not apply.
+   */
+  pttBinding: PttBinding | null;
   pttLabel: string | null;
   /* --- capture constraints, handed straight to getUserMedia --- */
   echoCancellation: boolean;
@@ -63,17 +70,28 @@ interface Settings {
    * left on purpose. Only acted on when `voice.rejoinLastChannel` is set.
    */
   lastVoiceChannelId: string | null;
+  /** The text channel that was open when the app last closed. */
+  lastTextChannelId: string | null;
+  /**
+   * Where the reader had got to in each text channel, as the id of the
+   * bottom-most message they could see. Kept here rather than on the server:
+   * it is this machine's scroll position, not a claim about what the account
+   * has read, which is what `reads` is for.
+   */
+  chatPositions: Record<string, string>;
   voice: VoiceSettings;
 }
 
 const defaultSettings: Settings = {
   serverUrl: 'http://localhost:3000',
   lastVoiceChannelId: null,
+  lastTextChannelId: null,
+  chatPositions: {},
   voice: {
     inputDeviceId: null,
     outputDeviceId: null,
     pushToTalk: false,
-    pttKeycode: null,
+    pttBinding: null,
     pttLabel: null,
     // Every new option defaults to exactly what the client did before it
     // existed, so an upgrade cannot change how anyone's call sounds until
@@ -105,6 +123,23 @@ function knownVoiceKeys(stored: unknown): Partial<VoiceSettings> {
   return out as Partial<VoiceSettings>;
 }
 
+/**
+ * `pttKeycode` was a bare keyboard code, from before mouse buttons could be
+ * bound. Anyone upgrading keeps the key they chose instead of finding
+ * push-to-talk on with nothing bound to it.
+ */
+function migrateVoice(stored: unknown): unknown {
+  if (!stored || typeof stored !== 'object') return stored;
+  const voice = stored as Record<string, unknown>;
+  if (voice.pttBinding !== undefined || typeof voice.pttKeycode !== 'number') {
+    return voice;
+  }
+  return {
+    ...voice,
+    pttBinding: { type: 'key', code: voice.pttKeycode } satisfies PttBinding,
+  };
+}
+
 function loadSettings(): Settings {
   try {
     const stored = JSON.parse(readFileSync(settingsPath, 'utf8'));
@@ -113,7 +148,14 @@ function loadSettings(): Settings {
     return {
       ...defaultSettings,
       ...stored,
-      voice: { ...defaultSettings.voice, ...knownVoiceKeys(stored.voice) },
+      chatPositions:
+        stored.chatPositions && typeof stored.chatPositions === 'object'
+          ? stored.chatPositions
+          : {},
+      voice: {
+        ...defaultSettings.voice,
+        ...knownVoiceKeys(migrateVoice(stored.voice)),
+      },
     };
   } catch {
     return defaultSettings;
@@ -221,6 +263,9 @@ ipcMain.handle('settings:set', (_e, patch: Partial<Settings>) => {
   saveSettings({
     ...current,
     ...patch,
+    // Merged, not replaced: the renderer sends one channel's reading position
+    // at a time, and it has no business forgetting the others.
+    chatPositions: { ...current.chatPositions, ...(patch.chatPositions ?? {}) },
     voice: { ...current.voice, ...(patch.voice ?? {}) },
   });
   return loadSettings();
