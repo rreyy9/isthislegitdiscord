@@ -1,0 +1,50 @@
+{
+  "name": "@isthislegit/server-app",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Desktop app for administering an isthislegit server",
+  "author": {
+    "name": "kreso"
+  },
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "dist": "electron-builder",
+    "dist:dir": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^44.1.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.isthislegit.serverapp",
+    "productName": "isthislegit Server",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "npmRebuild": false,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "isthislegit Server"
+    },
+    "electronVersion": "44.1.1"
+  }
+}

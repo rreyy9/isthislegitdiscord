@@ -166,6 +166,23 @@
       <div class="hint">Administration needs an account with the ADMIN role. The first account created from an invite gets it.</div>
     </div>
 
+    <div class="card" id="bootstrap-card">
+      <h2>Create the first admin</h2>
+      <div class="row">
+        <input id="bs-user" placeholder="username">
+        <input id="bs-name" placeholder="display name (optional)">
+        <input id="bs-pass" type="password" placeholder="password (8+ chars)">
+        <input id="bs-invite" placeholder="invite code" style="width:150px">
+        <button class="btn primary" id="b-bootstrap">Create and sign in</button>
+      </div>
+      <div class="hint" id="bs-hint">
+        For a server with no accounts yet. The first person to register into a
+        guild becomes its admin, so this makes the account the rest of this tab
+        needs &mdash; without installing the desktop client on the server just
+        to create one. Everyone else can then be added above, or invited.
+      </div>
+    </div>
+
     <div class="card admin-only hidden">
       <h2>Create an account</h2>
       <div class="row">
@@ -627,6 +644,7 @@ function setAdminUi(isAdmin) {
   document.querySelectorAll('.admin-only').forEach(e => e.classList.toggle('hidden', !isAdmin));
   document.querySelectorAll('.not-admin').forEach(e => e.classList.toggle('hidden', isAdmin));
   $('#login-card').classList.toggle('hidden', isAdmin);
+  $('#bootstrap-card').classList.toggle('hidden', isAdmin);
   $('#signout').style.display = isAdmin ? '' : 'none';
   $('#who').classList.toggle('hidden', !isAdmin);
   if (isAdmin && me) $('#who').textContent = 'signed in as ' + (me.username || me.id);
@@ -642,6 +660,57 @@ $('#b-login').onclick = async () => {
     await afterLogin();
   } catch (e) { toast(e.message, true); }
 };
+/**
+ * Registers the first account, which the server makes an admin because it is
+ * the first into that guild, then signs in with the token it returns.
+ */
+$('#b-bootstrap').onclick = async () => {
+  const username = $('#bs-user').value.trim();
+  const password = $('#bs-pass').value;
+  const inviteCode = $('#bs-invite').value.trim();
+  if (!username || !password || !inviteCode) {
+    return toast('Username, password and invite code are all needed.', true);
+  }
+
+  $('#b-bootstrap').disabled = true;
+  try {
+    const r = await api('/api/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        username,
+        password,
+        inviteCode,
+        displayName: $('#bs-name').value.trim() || undefined,
+      }),
+    });
+    if (!r.token) throw new Error('No token returned.');
+    token = r.token;
+    localStorage.setItem('token', token);
+    $('#bs-pass').value = '';
+    await afterLogin();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    $('#b-bootstrap').disabled = false;
+  }
+};
+
+/** Prefill the code the seed left on disk, so it need not be retyped. */
+async function loadInviteCode() {
+  try {
+    const r = await (await fetch('/sv/invite-code')).json();
+    if (r.ok && r.code && !$('#bs-invite').value) {
+      $('#bs-invite').value = r.code;
+      $('#bs-hint').insertAdjacentHTML(
+        'beforeend',
+        '<br><br>The code above was read from the file the seed wrote.',
+      );
+    }
+  } catch {
+    // Nothing on disk; it can be typed.
+  }
+}
+
 $('#signout').onclick = () => {
   token = ''; me = null; localStorage.removeItem('token');
   setAdminUi(false); $('#stats').textContent = 'Sign in to view.'; toast('signed out');
@@ -846,6 +915,7 @@ function esc(s) {
 
 /* ------------------------------------------------------------------ boot */
 setAdminUi(false);
+loadInviteCode();
 poll(); setInterval(poll, 2500);
 pollLogs(); setInterval(pollLogs, 1200);
 if (token) afterLogin().catch(() => { token=''; localStorage.removeItem('token'); setAdminUi(false); });

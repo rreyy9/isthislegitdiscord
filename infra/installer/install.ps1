@@ -234,7 +234,7 @@ if ($inPlace) {
     Say "  payload is already in place -- nothing to copy"
 } elseif (-not (Would "copy server, shared, console, livekit and caddy")) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    foreach ($folder in @('server', 'shared', 'console', 'livekit', 'caddy', 'tray')) {
+    foreach ($folder in @('server', 'shared', 'console', 'livekit', 'caddy')) {
         $src = Join-Path $here $folder
         if (Test-Path $src) { Copy-Item $src $InstallDir -Recurse -Force }
     }

@@ -230,6 +230,9 @@ Section "Uninstall"
   RMDir /r "$INSTDIR\console"
   RMDir /r "$INSTDIR\livekit"
   RMDir /r "$INSTDIR\caddy"
+  ; Kept although nothing ships a tray\ folder any more: an install made
+  ; before the isthislegit Server app replaced it still has one, and an
+  ; uninstall should not leave it behind.
   RMDir /r "$INSTDIR\tray"
   Delete "$INSTDIR\server\package.json"
   Delete "$INSTDIR\server\package-lock.json"

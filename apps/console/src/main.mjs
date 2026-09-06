@@ -618,6 +618,37 @@ app.post('/sv/logs/clear', (req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * The bootstrap invite code, if the seed left one on disk.
+ *
+ * Creating the first admin is a chicken-and-egg: administering anything needs
+ * an ADMIN account, and the only way to get one is to register with an invite,
+ * because the first person into a guild becomes its admin. That previously
+ * meant installing the desktop client on the server just to make one account.
+ *
+ * install.ps1 tees the seed's output to invite-code.txt, so the code is
+ * already here. Serving it saves retyping it, and it is not a secret worth
+ * protecting from someone who can already reach a loopback-only console that
+ * starts and stops processes.
+ */
+app.get('/sv/invite-code', (req, res) => {
+  const candidates = [
+    path.join(ROOT, 'invite-code.txt'),
+    path.resolve(__dirname, '../../invite-code.txt'),
+  ];
+  for (const file of candidates) {
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      // "  Invite code:  ABCD2345"
+      const code = text.match(/Invite code:\s*([A-Z0-9]{6,})/)?.[1];
+      if (code) return res.json({ ok: true, code, file });
+    } catch {
+      // Try the next location.
+    }
+  }
+  res.json({ ok: false, code: null });
+});
+
 /* ------------------------------------------------------------- configuration */
 
 app.get('/sv/config', (req, res) => {

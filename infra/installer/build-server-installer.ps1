@@ -209,13 +209,6 @@ if ($NoCaddyBinary) {
     Say "    caddy.exe not found in infra/caddy/bin -- omitted, TLS will not start" 'Yellow'
 }
 
-# The tray icon and the console's app-window launcher. Both detect which layout
-# they are in, so the same files work here and in an installed copy -- in an
-# installed one the tray drives the scheduled tasks rather than spawning its own
-# windows, because those tasks are what actually own the processes there.
-Say "  tray/"
-Copy-Item (Join-Path $repo 'infra\tray') $staging -Recurse -Force
-
 # The firewall helper, the start/stop script and the installer itself. All three
 # sit at the root of the payload, which is where start-all.ps1 detects it is in
 # an installed copy rather than a repo checkout.
@@ -291,12 +284,16 @@ isthislegit-server-$version-setup.exe and it does the lot.
     console\     the operator console (binds to 127.0.0.1 only, by design)
     livekit\     LiveKit config, start script and (usually) the binary
     caddy\       TLS reverse proxy: Caddyfile, start script and the binary
-    tray\        tray icon, and the launcher that opens the console as an app
     install.ps1  everything the setup.exe does after unpacking
 
-Day to day you want tray\isthislegit-console.vbs, which opens the operator
-console in its own window. Everything is configured from its Configuration tab
--- hostnames, ports, voice quality, and creating the database role.
+Day to day you want the isthislegit Server app, which is a separate installer.
+It opens this console in a window and puts an icon in the tray. Everything is
+configured from its Configuration tab -- hostnames, ports, voice quality, and
+creating the database role -- and the first admin account is made from its
+Accounts tab.
+
+start-all.ps1 starts and stops the three services from a terminal, for when
+that is easier than the app.
 
 Requirements on the target box
     Windows 10/11 or Server, x64
