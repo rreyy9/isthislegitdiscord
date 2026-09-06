@@ -28,7 +28,7 @@ param(
     [switch] $SkipDependencies,
 
     # Leave livekit-server.exe out. The target box then has to download the
-    # binary itself (see infra/livekit/README.md).
+    # binary itself -- infra/livekit/start.ps1 says where from.
     [switch] $NoLiveKitBinary,
 
     # Leave caddy.exe out. The target box then has no TLS until the binary is
