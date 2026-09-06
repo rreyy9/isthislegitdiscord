@@ -216,8 +216,12 @@ if ($NoCaddyBinary) {
 Say "  tray/"
 Copy-Item (Join-Path $repo 'infra\tray') $staging -Recurse -Force
 
-# The firewall helper and the installer itself.
-Copy-Item (Join-Path $repo 'infra\allow-lan.ps1') $staging -Force -ErrorAction SilentlyContinue
+# The firewall helper, the start/stop script and the installer itself. All three
+# sit at the root of the payload, which is where start-all.ps1 detects it is in
+# an installed copy rather than a repo checkout.
+foreach ($file in @('infra\allow-lan.ps1', 'infra\start-all.ps1')) {
+    Copy-Item (Join-Path $repo $file) $staging -Force -ErrorAction SilentlyContinue
+}
 Copy-Item (Join-Path $here 'install.ps1') $staging -Force
 
 # ------------------------------------------- 3. a package.json the target uses

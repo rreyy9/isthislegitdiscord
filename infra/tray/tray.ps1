@@ -20,15 +20,17 @@ Add-Type -AssemblyName System.Drawing
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Two layouts: infra\tray in the repo, <install>\tray in an installed copy.
-# start-all.ps1 only exists in the first; the second is run by the scheduled
-# tasks the installer registered, so starting and stopping there means driving
-# those rather than spawning windows that would compete with them.
+# start-all.ps1 sits one level up in both, and works out its own layout.
 $startAll = Join-Path (Split-Path -Parent $here) 'start-all.ps1'
-$repo = if (Test-Path $startAll) { (Resolve-Path (Join-Path $here '..\..')).Path } else { Split-Path -Parent $here }
+$repo = Split-Path -Parent $here
 
+# On an installed server the scheduled tasks own these processes, so prefer
+# them: starting a second copy alongside one would only fail on the port bind,
+# and stopping one would leave the task's restart-on-failure to bring it
+# straight back. An install done without elevation registers no tasks, and
+# then start-all.ps1 is the fallback rather than a dead end.
 $taskNames = @('isthislegit-server', 'isthislegit-livekit', 'isthislegit-caddy')
-$useTasks = -not (Test-Path $startAll) -and
-    [bool] (Get-ScheduledTask -TaskName 'isthislegit-server' -ErrorAction SilentlyContinue)
+$useTasks = [bool] (Get-ScheduledTask -TaskName 'isthislegit-server' -ErrorAction SilentlyContinue)
 
 # Matched by listening port, never by image name. Three of these are node.exe
 # and so is anything else on the machine; matching on the name is how
@@ -84,7 +86,11 @@ function Invoke-StartAll([string[]] $extraArgs) {
 
     if (-not (Test-Path $startAll)) {
         [System.Windows.Forms.MessageBox]::Show(
-            "Could not find start-all.ps1 at:`n`n$startAll`n`nand no isthislegit scheduled tasks are registered.",
+            "Nothing here to start the services with." +
+            "`n`nNo isthislegit scheduled tasks are registered, and start-all.ps1 is not at:`n$startAll" +
+            "`n`nAn install registers those tasks only when the installer is run elevated, so this" +
+            " usually means the install did not finish. Re-run it as administrator and watch for" +
+            " the 'Start on boot' step.",
             'isthislegit', 'OK', 'Warning') | Out-Null
         return
     }

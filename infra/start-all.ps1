@@ -26,7 +26,25 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repo = (Resolve-Path (Join-Path $here '..')).Path
+
+# Two layouts, and the difference is not cosmetic: a repo checkout builds the
+# server into apps/server/dist, an installed copy ships it already built into
+# server/. This script sits at infra/ in the first and at the install root in
+# the second, so work out which before resolving anything else.
+$repoRoot = (Resolve-Path (Join-Path $here '..')).Path
+if (Test-Path (Join-Path $repoRoot 'apps\server\package.json')) {
+    $layout     = 'repo'
+    $root       = $repoRoot
+    $serverDir  = Join-Path $root 'apps\server'
+    $livekitDir = Join-Path $root 'infra\livekit'
+    $caddyDir   = Join-Path $root 'infra\caddy'
+} else {
+    $layout     = 'installed'
+    $root       = $here
+    $serverDir  = Join-Path $root 'server'
+    $livekitDir = Join-Path $root 'livekit'
+    $caddyDir   = Join-Path $root 'caddy'
+}
 
 function Say([string] $t, [string] $c = 'Cyan') { Write-Host $t -ForegroundColor $c }
 function Warn([string] $t) { Write-Host $t -ForegroundColor Yellow }
@@ -115,10 +133,14 @@ if ($pg.Status -ne 'Running') {
     }
 }
 
-$serverDir = Join-Path $repo 'apps\server'
 if (-not (Test-Path (Join-Path $serverDir 'dist\main.js'))) {
-    Warn "apps\server\dist\main.js does not exist -- the server is not built."
-    Warn "Build it first:  npm run build"
+    Warn "$serverDir\dist\main.js does not exist."
+    if ($layout -eq 'repo') {
+        Warn "The server is not built. Build it first:  npm run build"
+    } else {
+        Warn "This install is incomplete -- the compiled server should have shipped"
+        Warn "with it. Re-run the installer."
+    }
     exit 1
 }
 
@@ -144,13 +166,11 @@ foreach ($s in $services) {
         }
         'livekit' {
             Say "Starting livekit"
-            Start-InWindow 'isthislegit livekit' (Join-Path $repo 'infra\livekit') `
-                "& '$repo\infra\livekit\start.ps1'"
+            Start-InWindow 'isthislegit livekit' $livekitDir "& '$livekitDir\start.ps1'"
         }
         'caddy' {
             Say "Starting caddy"
-            Start-InWindow 'isthislegit caddy' (Join-Path $repo 'infra\caddy') `
-                "& '$repo\infra\caddy\start.ps1'"
+            Start-InWindow 'isthislegit caddy' $caddyDir "& '$caddyDir\start.ps1'"
         }
     }
 
@@ -165,7 +185,11 @@ foreach ($s in $services) {
 Start-Sleep -Seconds 2
 Show-Status
 
-Say "The operator console is separate, and optional:" 'DarkGray'
-Say "  npm run console   ->  http://127.0.0.1:4000" 'DarkGray'
+Say "The operator console is separate, and optional. Open it as an app window:" 'DarkGray'
+if ($layout -eq 'repo') {
+    Say "  infra\tray\isthislegit-console.vbs   ->  http://127.0.0.1:4000" 'DarkGray'
+} else {
+    Say "  tray\isthislegit-console.vbs         ->  http://127.0.0.1:4000" 'DarkGray'
+}
 Write-Host ""
 Say "Stop everything again with:  -Stop      Check without changing:  -Status" 'DarkGray'

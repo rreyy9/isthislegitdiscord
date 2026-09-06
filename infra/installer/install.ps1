@@ -238,7 +238,7 @@ if ($inPlace) {
         $src = Join-Path $here $folder
         if (Test-Path $src) { Copy-Item $src $InstallDir -Recurse -Force }
     }
-    foreach ($file in @('allow-lan.ps1', 'README.txt')) {
+    foreach ($file in @('allow-lan.ps1', 'start-all.ps1', 'README.txt')) {
         $src = Join-Path $here $file
         if (Test-Path $src) { Copy-Item $src $InstallDir -Force }
     }
