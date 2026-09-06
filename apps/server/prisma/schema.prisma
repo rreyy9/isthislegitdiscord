@@ -57,7 +57,13 @@ model Session {
 
 model Account {
   id                    String    @id
-  issuer                String
+  // Nullable on purpose. Better Auth only has an issuer for providers that
+  // have one -- an OIDC or SSO account. A credential account, which is all
+  // this deployment creates, has none, and 1.7.3 stopped sending the field at
+  // all rather than sending an empty string. Required, that turned every
+  // registration into a Prisma validation error at the point the account row
+  // was written, after the user row already existed.
+  issuer                String?
   accountId             String
   providerId            String
   userId                String

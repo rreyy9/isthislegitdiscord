@@ -263,13 +263,38 @@ Copy-Item (Join-Path $here 'install.ps1') $staging -Force
 Say ""
 Say "Writing staged manifest"
 
+# Exact versions, resolved from what is installed in this repo right now,
+# rather than the caret ranges the manifest declares.
+#
+# A range means the target resolves whatever is newest at install time, so an
+# installed server can be running dependencies no one here has ever run. That
+# is not hypothetical: better-auth ^1.7.2 resolved to 1.7.3 on the target while
+# the repo had 1.7.2, and 1.7.3 stopped sending a field the schema required, so
+# every registration failed on a box where the identical code worked.
+#
+# Falls back to the declared range when a package is somehow not installed,
+# which is worse but still builds.
+function Resolve-InstalledVersion([string] $name, [string] $fallback) {
+    foreach ($base in @(
+        (Join-Path $repo "node_modules\$name\package.json"),
+        (Join-Path $repo "apps\server\node_modules\$name\package.json")
+    )) {
+        if (Test-Path $base) {
+            $v = (Get-Content $base -Raw | ConvertFrom-Json).version
+            if ($v) { return $v }
+        }
+    }
+    Say "    $name is not installed here -- shipping the range $fallback" 'Yellow'
+    return $fallback
+}
+
 $deps = [ordered] @{}
 foreach ($name in ($serverPkg.dependencies.PSObject.Properties.Name | Sort-Object)) {
-    $deps[$name] = $serverPkg.dependencies.$name
+    $deps[$name] = Resolve-InstalledVersion $name $serverPkg.dependencies.$name
 }
 $deps['@isthislegit/shared'] = 'file:../shared'
 foreach ($tool in @('prisma', 'dotenv', 'typescript')) {
-    $deps[$tool] = $serverPkg.devDependencies.$tool
+    $deps[$tool] = Resolve-InstalledVersion $tool $serverPkg.devDependencies.$tool
 }
 
 $staged = [ordered] @{
