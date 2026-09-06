@@ -1,0 +1,119 @@
+### Everything below works against a freshly seeded local server.
+### Replace @invite with the code printed by `npm run db:seed`.
+
+@host = http://localhost:3000
+@invite = REPLACE_ME
+
+### Health — also proves the database connection
+GET {{host}}/api/health
+
+### Config the client asks for instead of hardcoding
+GET {{host}}/api/config
+
+### Register. The first account to use a code becomes that guild's admin.
+# @name register
+POST {{host}}/api/register
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "hunter2hunter2",
+  "inviteCode": "{{invite}}",
+  "displayName": "Alice"
+}
+
+### Registration without a valid code is refused
+POST {{host}}/api/register
+Content-Type: application/json
+
+{
+  "username": "mallory",
+  "password": "hunter2hunter2",
+  "inviteCode": "NOPE1234"
+}
+
+### Login
+# @name login
+POST {{host}}/api/login
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "hunter2hunter2"
+}
+
+### Who am I
+GET {{host}}/api/me
+
+### Guilds and their channels
+# @name guilds
+GET {{host}}/api/guilds
+
+### Members, with who is currently online
+GET {{host}}/api/members
+
+### Send a message — clientNonce comes back on the socket echo
+@channel = {{guilds.response.body.0.channels.0.id}}
+POST {{host}}/api/channels/{{channel}}/messages
+Content-Type: application/json
+
+{
+  "content": "hello from the .http file",
+  "clientNonce": "nonce-1"
+}
+
+### History, newest page
+GET {{host}}/api/channels/{{channel}}/messages?limit=20
+
+### History, older page (paste a nextCursor from the response above)
+GET {{host}}/api/channels/{{channel}}/messages?limit=20&before=PASTE_NEXT_CURSOR
+
+### Edit a message (author only — paste an id from the history above)
+PATCH {{host}}/api/channels/{{channel}}/messages/PASTE_MESSAGE_ID
+Content-Type: application/json
+
+{ "content": "hello from the .http file, corrected" }
+
+### Delete a message (author, or an admin of the guild)
+DELETE {{host}}/api/channels/{{channel}}/messages/PASTE_MESSAGE_ID
+
+### Create an invite (admins only)
+@guild = {{guilds.response.body.0.id}}
+POST {{host}}/api/guilds/{{guild}}/invites
+Content-Type: application/json
+
+{ "maxUses": 5, "expiresInHours": 48 }
+
+### List invites
+GET {{host}}/api/guilds/{{guild}}/invites
+
+### LiveKit token for a voice channel
+@voice = {{guilds.response.body.0.channels.2.id}}
+POST {{host}}/api/channels/{{voice}}/voice-token
+
+### Mute a member (admins only; durationMinutes null = indefinitely)
+POST {{host}}/api/guilds/{{guild}}/members/PASTE_USER_ID/mute
+Content-Type: application/json
+
+{ "durationMinutes": 5, "reason": "spamming" }
+
+### Unmute
+POST {{host}}/api/guilds/{{guild}}/members/PASTE_USER_ID/unmute
+
+### Kick — removed from the guild, can return with a new invite
+POST {{host}}/api/guilds/{{guild}}/members/PASTE_USER_ID/kick
+Content-Type: application/json
+
+{ "reason": "" }
+
+### Ban — removed, signed out, and cannot rejoin with this account
+POST {{host}}/api/guilds/{{guild}}/members/PASTE_USER_ID/ban
+Content-Type: application/json
+
+{ "reason": "" }
+
+### The ban list
+GET {{host}}/api/guilds/{{guild}}/bans
+
+### Lift a ban (does not restore membership — they still need an invite)
+DELETE {{host}}/api/guilds/{{guild}}/bans/PASTE_USER_ID

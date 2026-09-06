@@ -1,0 +1,234 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+  runtime      = "nodejs"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------- Better Auth
+// These four models are Better Auth's required shape. It owns them; we only
+// read from User. Verify against `npx @better-auth/cli generate` after changing
+// Better Auth's version or plugins.
+
+model User {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // username plugin
+  username        String? @unique
+  displayUsername String?
+
+  sessions    Session[]
+  accounts    Account[]
+  memberships GuildMember[]
+  messages    Message[]
+  readStates  ChannelReadState[]
+  invitesMade InviteCode[]       @relation("InviteCreator")
+  attachments Attachment[]
+  bans        GuildBan[]         @relation("BannedUser")
+  bansIssued  GuildBan[]         @relation("BanIssuer")
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  issuer                String
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@map("account")
+}
+
+model Verification {
+  id         String    @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime? @default(now())
+  updatedAt  DateTime? @updatedAt
+
+  @@map("verification")
+}
+
+// ------------------------------------------------------------------- App
+
+enum ChannelKind {
+  TEXT
+  VOICE
+}
+
+enum MemberRole {
+  ADMIN
+  MEMBER
+}
+
+model Guild {
+  id        String   @id
+  name      String
+  createdAt DateTime @default(now())
+
+  channels Channel[]
+  members  GuildMember[]
+  invites  InviteCode[]
+  bans     GuildBan[]
+}
+
+model Channel {
+  id        String      @id
+  guildId   String
+  guild     Guild       @relation(fields: [guildId], references: [id], onDelete: Cascade)
+  name      String
+  kind      ChannelKind @default(TEXT)
+  position  Int         @default(0)
+  createdAt DateTime    @default(now())
+
+  messages   Message[]
+  readStates ChannelReadState[]
+
+  @@index([guildId])
+}
+
+model GuildMember {
+  id       String     @id
+  guildId  String
+  guild    Guild      @relation(fields: [guildId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     MemberRole @default(MEMBER)
+  joinedAt DateTime   @default(now())
+
+  // A mute is a deadline rather than a flag, so it lifts itself with no timer
+  // and no sweeper job. Null means not muted; an indefinite mute is simply a
+  // date far enough out that it never arrives.
+  mutedUntil DateTime?
+
+  @@unique([guildId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id        String   @id
+  channelId String
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  content   String
+  createdAt DateTime @default(now())
+
+  editedAt  DateTime?
+  deletedAt DateTime?
+  // Who deleted it: null when the author did, a moderator's id otherwise. The
+  // row survives either way, so a deletion can still be looked into later.
+  deletedById String?
+
+  // Echoed back to the sender so an optimistic copy can be de-duplicated.
+  clientNonce String?
+
+  attachments Attachment[]
+
+  // Ids are UUIDv7, so id order is chronological order: this one index serves
+  // the cursor pagination in both directions.
+  @@index([channelId, id])
+}
+
+model Attachment {
+  id          String   @id
+  messageId   String
+  message     Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  uploaderId  String
+  uploader    User     @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
+  fileName    String
+  storedName  String
+  contentType String
+  size        Int
+  // Kept so the message list can reserve space and not jump while images load.
+  width       Int?
+  height      Int?
+  createdAt   DateTime @default(now())
+
+  @@index([messageId])
+}
+
+model ChannelReadState {
+  id                String   @id
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channelId         String
+  channel           Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  lastReadMessageId String?
+  updatedAt         DateTime @updatedAt
+
+  @@unique([userId, channelId])
+}
+
+model InviteCode {
+  id          String    @id
+  code        String    @unique
+  guildId     String
+  guild       Guild     @relation(fields: [guildId], references: [id], onDelete: Cascade)
+  createdById String
+  createdBy   User      @relation("InviteCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  maxUses     Int       @default(1)
+  uses        Int       @default(0)
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([guildId])
+}
+
+/**
+ * A ban is a row that outlives the membership it removed, which is the whole
+ * point: kicking deletes the GuildMember and nothing remembers, banning
+ * deletes it and leaves a record that blocks the way back in.
+ */
+model GuildBan {
+  id         String   @id
+  guildId    String
+  guild      Guild    @relation(fields: [guildId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
+  bannedById String
+  bannedBy   User     @relation("BanIssuer", fields: [bannedById], references: [id], onDelete: Cascade)
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  @@unique([guildId, userId])
+  @@index([userId])
+}

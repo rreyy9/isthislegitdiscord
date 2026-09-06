@@ -1,0 +1,71 @@
+{
+  "name": "@isthislegit/desktop",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "dist": "electron-vite build && electron-builder",
+    "dist:dir": "electron-vite build && electron-builder --dir"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.1.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6"
+  },
+  "dependencies": {
+    "livekit-client": "^2.22.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "socket.io-client": "^4.8.3",
+    "uiohook-napi": "^1.5.5"
+  },
+  "description": "Chat and voice client for a self-hosted isthislegit server",
+  "author": {
+    "name": "kreso"
+  },
+  "build": {
+    "appId": "com.isthislegit.desktop",
+    "productName": "isthislegit",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/*.node",
+      "**/node_modules/uiohook-napi/**"
+    ],
+    "npmRebuild": false,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "isthislegit"
+    },
+    "electronVersion": "44.1.1"
+  }
+}

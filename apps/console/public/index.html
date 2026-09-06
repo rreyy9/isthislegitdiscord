@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server Console</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --panel2: #23262f; --line: #2e323c;
+    --text: #e6e8ec; --dim: #99a0ad; --accent: #5b8def; --ok: #3fb950;
+    --warn: #d29922; --bad: #f85149; --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+           background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  h1 { font-size: 15px; margin: 0 20px 0 0; font-weight: 600; letter-spacing: .2px; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px;
+          border-radius: 999px; background: var(--panel2); font-size: 12.5px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 7px var(--ok); }
+  .dot.off { background: var(--bad); }
+  .spacer { flex: 1; }
+  nav { display: flex; gap: 2px; padding: 0 20px; background: var(--panel);
+        border-bottom: 1px solid var(--line); overflow-x: auto; }
+  nav button { background: none; border: none; color: var(--dim); padding: 10px 15px;
+               cursor: pointer; font-size: 13.5px; border-bottom: 2px solid transparent; white-space: nowrap; }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { padding: 20px; max-width: 1180px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+          padding: 16px 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px;
+             color: var(--dim); margin: 0 0 14px; font-weight: 600; }
+  button.btn { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+               padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  button.btn:hover:not(:disabled) { border-color: var(--accent); }
+  button.btn:disabled { opacity: .4; cursor: not-allowed; }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.btn.danger { color: var(--bad); }
+  .row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+  input, select { background: var(--bg); color: var(--text); border: 1px solid var(--line);
+                  padding: 7px 10px; border-radius: 6px; font-size: 13px; font-family: inherit; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--dim); font-weight: 600; font-size: 11.5px;
+       text-transform: uppercase; letter-spacing: .5px; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  code, .mono { font-family: var(--mono); font-size: 12.5px; }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: var(--panel2); color: var(--dim); }
+  .tag.admin { background: #3a2d12; color: var(--warn); }
+  .tag.on { background: #12301a; color: var(--ok); }
+  .tag.bad { background: #3a1a18; color: var(--bad); }
+  #logs { background: #0e1013; border: 1px solid var(--line); border-radius: 7px; padding: 12px;
+          height: 58vh; overflow-y: auto; font-family: var(--mono); font-size: 12px; line-height: 1.65; }
+  .lg-err { color: var(--bad); } .lg-console { color: var(--accent); }
+  .lg-task { color: var(--warn); } .lg-out { color: #b9c0cc; }
+  .lg-lk { color: #8ab4c8; }
+  .stat { display: inline-block; margin-right: 26px; }
+  .stat b { display: block; font-size: 21px; font-weight: 600; }
+  .stat span { color: var(--dim); font-size: 11.5px; text-transform: uppercase; letter-spacing: .5px; }
+  #toast { position: fixed; right: 20px; bottom: 20px; background: var(--panel2); color: var(--text);
+           padding: 11px 16px; border-radius: 7px; border: 1px solid var(--line); display: none;
+           max-width: 460px; box-shadow: 0 8px 26px rgba(0,0,0,.45); }
+  #toast.bad { border-color: var(--bad); }
+  .muted { color: var(--dim); }
+  .hidden { display: none !important; }
+  .hint { color: var(--dim); font-size: 12.5px; margin-top: 9px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Server Console</h1>
+  <span class="pill"><span class="dot" id="d-server"></span><span id="t-server">checking…</span></span>
+  <span class="pill"><span class="dot" id="d-db"></span><span id="t-db">database</span></span>
+  <span class="pill"><span class="dot" id="d-lk"></span><span id="t-lk">voice</span></span>
+  <span class="spacer"></span>
+  <span class="pill hidden" id="who"></span>
+  <button class="btn" id="signout" style="display:none">Sign out</button>
+</header>
+
+<nav>
+  <button data-tab="server" class="active">Server</button>
+  <button data-tab="users">Accounts</button>
+  <button data-tab="invites">Invites</button>
+  <button data-tab="channels">Channels</button>
+  <button data-tab="logs">Logs</button>
+</nav>
+
+<main>
+  <!-- ------------------------------------------------------------ server -->
+  <section id="tab-server">
+    <div class="card">
+      <h2>Process</h2>
+      <div class="row">
+        <button class="btn primary" id="b-start">Start server</button>
+        <button class="btn" id="b-stop">Stop</button>
+        <button class="btn" id="b-restart">Restart</button>
+        <span class="muted" id="proc-detail" style="margin-left:8px"></span>
+      </div>
+      <div class="hint">
+        Starts both the chat server and LiveKit — voice is a separate process, so
+        without it text works and calls never connect. Both run as child processes,
+        so stopping the console stops them too.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Maintenance</h2>
+      <div class="row">
+        <button class="btn" id="b-build">Build</button>
+        <button class="btn" id="b-migrate">Run migrations</button>
+        <button class="btn" id="b-seed">Seed</button>
+        <button class="btn" id="b-generate">Regenerate Prisma client</button>
+      </div>
+      <div class="hint">Output goes to the Logs tab.</div>
+    </div>
+
+    <div class="card">
+      <h2>Stop things</h2>
+      <div class="row">
+        <button class="btn danger" id="b-kill-server">Kill server</button>
+        <button class="btn" id="b-lk-start">Start LiveKit</button>
+        <button class="btn danger" id="b-kill-livekit">Stop LiveKit</button>
+        <button class="btn danger" id="b-db-stop">Stop database</button>
+        <button class="btn" id="b-db-start">Start database</button>
+        <span class="spacer"></span>
+        <button class="btn danger" id="b-kill-all">Stop everything</button>
+      </div>
+      <div class="hint">
+        These act on whatever holds the port, so they also clear a server someone
+        left running in another terminal — which <em>Stop</em> above cannot do.
+        Processes are matched by port, never by name, so the console and other
+        Node processes on this machine are never touched.
+        The database is a Windows service (<span id="db-svc">postgresql-x64-17</span>);
+        stopping it needs an elevated terminal.
+      </div>
+    </div>
+
+    <div class="card" id="stats-card">
+      <h2>Statistics</h2>
+      <div id="stats" class="muted">Sign in to view.</div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------- users -->
+  <section id="tab-users" class="hidden">
+    <div class="card" id="login-card">
+      <h2>Sign in as an admin</h2>
+      <div class="row">
+        <input id="li-user" placeholder="username" autocomplete="username">
+        <input id="li-pass" type="password" placeholder="password" autocomplete="current-password">
+        <button class="btn primary" id="b-login">Sign in</button>
+      </div>
+      <div class="hint">Administration needs an account with the ADMIN role. The first account created from an invite gets it.</div>
+    </div>
+
+    <div class="card admin-only hidden">
+      <h2>Create an account</h2>
+      <div class="row">
+        <input id="nu-user" placeholder="username">
+        <input id="nu-name" placeholder="display name (optional)">
+        <input id="nu-pass" type="password" placeholder="password (8+ chars)">
+        <select id="nu-role"><option value="MEMBER">Member</option><option value="ADMIN">Admin</option></select>
+        <select id="nu-guild"></select>
+        <button class="btn primary" id="b-createuser">Create</button>
+      </div>
+      <div class="hint">Creates the account directly — no invite code needed by the person joining.</div>
+    </div>
+
+    <div class="card admin-only hidden">
+      <h2>Accounts</h2>
+      <table><thead><tr>
+        <th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Created</th><th></th>
+      </tr></thead><tbody id="users-body"></tbody></table>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------------- invites -->
+  <section id="tab-invites" class="hidden">
+    <div class="card admin-only hidden">
+      <h2>Create an invite</h2>
+      <div class="row">
+        <select id="inv-guild"></select>
+        <input id="inv-uses" type="number" value="1" min="1" max="100" style="width:110px" title="max uses">
+        <input id="inv-hours" type="number" value="168" min="1" style="width:130px" title="expires in hours">
+        <button class="btn primary" id="b-createinv">Create</button>
+      </div>
+    </div>
+    <div class="card admin-only hidden">
+      <h2>Invites</h2>
+      <table><thead><tr>
+        <th>Code</th><th>Guild</th><th>Uses</th><th>Expires</th><th>Status</th><th></th>
+      </tr></thead><tbody id="invites-body"></tbody></table>
+    </div>
+    <div class="card not-admin"><span class="muted">Sign in on the Accounts tab first.</span></div>
+  </section>
+
+  <!-- ---------------------------------------------------------- channels -->
+  <section id="tab-channels" class="hidden">
+    <div class="card admin-only hidden">
+      <h2>Create</h2>
+      <div class="row">
+        <select id="ch-guild"></select>
+        <input id="ch-name" placeholder="channel-name">
+        <select id="ch-kind"><option value="TEXT">Text</option><option value="VOICE">Voice</option></select>
+        <button class="btn primary" id="b-createch">Add channel</button>
+        <span class="muted">|</span>
+        <input id="g-name" placeholder="new guild name" style="width:170px">
+        <button class="btn" id="b-createguild">Add guild</button>
+      </div>
+    </div>
+    <div class="card admin-only hidden">
+      <h2>Guilds and channels</h2>
+      <div id="channels-body"></div>
+    </div>
+    <div class="card not-admin"><span class="muted">Sign in on the Accounts tab first.</span></div>
+  </section>
+
+  <!-- -------------------------------------------------------------- logs -->
+  <section id="tab-logs" class="hidden">
+    <div class="card">
+      <h2>Server output
+        <button class="btn" id="b-clearlogs" style="float:right;margin-top:-6px">Clear</button>
+      </h2>
+      <div id="logs"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let token = localStorage.getItem('token') || '';
+let me = null, guilds = [];
+
+function toast(msg, bad = false) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = bad ? 'bad' : '';
+  t.style.display = 'block';
+  clearTimeout(t._h);
+  t._h = setTimeout(() => (t.style.display = 'none'), 4200);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: 'Bearer ' + token } : {}),
+      ...(opts.headers || {}),
+    },
+  });
+  const text = await r.text();
+  let data; try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!r.ok) throw new Error(data.message || data.error || ('HTTP ' + r.status));
+  return data;
+}
+
+/* ------------------------------------------------------------------ tabs */
+document.querySelectorAll('nav button').forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll('nav button').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    document.querySelectorAll('main > section').forEach((s) => s.classList.add('hidden'));
+    $('#tab-' + b.dataset.tab).classList.remove('hidden');
+    if (b.dataset.tab === 'users') loadUsers();
+    if (b.dataset.tab === 'invites') loadInvites();
+    if (b.dataset.tab === 'channels') loadChannels();
+  };
+});
+
+/* ---------------------------------------------------------------- status */
+async function poll() {
+  try {
+    const s = await (await fetch('/sv/status')).json();
+    const up = s.server.listening;
+    $('#d-server').className = 'dot ' + (up ? 'on' : 'off');
+    $('#t-server').textContent = up
+      ? `server up · :${s.server.port}` + (s.server.uptimeSeconds != null ? ` · ${fmtUptime(s.server.uptimeSeconds)}` : '')
+      : 'server stopped';
+    $('#d-db').className = 'dot ' + (s.database.listening ? 'on' : 'off');
+    $('#t-db').textContent = s.database.listening
+      ? `database up · :${s.database.port}` : 'database down';
+    $('#d-lk').className = 'dot ' + (s.livekit.listening ? 'on' : 'off');
+    $('#t-lk').textContent = s.livekit.listening
+      ? `voice up · :${s.livekit.port}`
+      : (s.livekit.installed === false ? 'voice: no binary' : 'voice down');
+    $('#b-lk-start').disabled = s.livekit.listening || s.livekit.installed === false;
+    if (s.database.service) $('#db-svc').textContent = s.database.service;
+
+    $('#b-kill-server').disabled = !up;
+    $('#b-kill-livekit').disabled = !s.livekit.listening;
+    $('#b-db-stop').disabled = s.database.serviceState === 'stopped';
+    $('#b-db-start').disabled = s.database.serviceState === 'running';
+
+    $('#b-start').disabled = up;
+    $('#b-stop').disabled = !s.server.managed;
+    $('#b-restart').disabled = !s.server.managed;
+
+    let d = '';
+    if (s.server.managed) d = `pid ${s.server.pid}`;
+    else if (up) d = 'running, but not started by this console — stop it in its own terminal to manage it here';
+    else if (s.server.lastExit) d = `last exit: code ${s.server.lastExit.code}`;
+    $('#proc-detail').textContent = d;
+  } catch {
+    $('#t-server').textContent = 'console unreachable';
+  }
+}
+function fmtUptime(s) {
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+/* --------------------------------------------------------------- process */
+const act = async (url, label) => {
+  try {
+    const r = await (await fetch(url, { method: 'POST' })).json();
+    // Voice failing is worth saying out loud: the server is up, so nothing else
+    // on the page looks wrong, and calls silently will not connect.
+    const voice = r.livekit && !r.livekit.ok ? ' — voice: ' + r.livekit.error : '';
+    toast(r.ok ? label + ' ok' + voice : (r.error || 'failed'), !r.ok || Boolean(voice));
+  } catch (e) { toast(String(e.message), true); }
+  poll();
+};
+$('#b-start').onclick   = () => act('/sv/server/start', 'start');
+$('#b-stop').onclick    = () => act('/sv/server/stop', 'stop');
+$('#b-restart').onclick = () => act('/sv/server/restart', 'restart');
+
+/* Acts on whatever holds the port, not just this console's own child. */
+const actNote = async (url, confirmText) => {
+  if (confirmText && !confirm(confirmText)) return;
+  try {
+    const r = await (await fetch(url, { method: 'POST' })).json();
+    toast(r.note || r.error || (r.ok ? 'done' : 'failed'), !r.ok);
+  } catch (e) { toast(String(e.message), true); }
+  poll();
+};
+$('#b-kill-server').onclick  = () => actNote('/sv/kill/server');
+$('#b-lk-start').onclick     = () => actNote('/sv/livekit/start');
+$('#b-kill-livekit').onclick = () => actNote('/sv/kill/livekit');
+$('#b-db-stop').onclick      = () => actNote('/sv/database/stop',
+  'Stop PostgreSQL? Anything still connected to it will start failing.');
+$('#b-db-start').onclick     = () => actNote('/sv/database/start');
+$('#b-kill-all').onclick     = () => actNote('/sv/kill/all',
+  'Stop the chat server, LiveKit and the database?');
+
+for (const [id, task] of [['b-build','build'],['b-migrate','migrate'],['b-seed','seed'],['b-generate','generate']]) {
+  $('#' + id).onclick = async () => {
+    const btn = $('#' + id); const old = btn.textContent;
+    btn.disabled = true; btn.textContent = 'running…';
+    try {
+      const r = await (await fetch('/sv/task/' + task, { method: 'POST' })).json();
+      toast(r.ok ? task + ' finished' : task + ' failed — see Logs', !r.ok);
+    } catch (e) { toast(String(e.message), true); }
+    btn.disabled = false; btn.textContent = old;
+  };
+}
+
+/* ------------------------------------------------------------------ auth */
+function setAdminUi(isAdmin) {
+  document.querySelectorAll('.admin-only').forEach(e => e.classList.toggle('hidden', !isAdmin));
+  document.querySelectorAll('.not-admin').forEach(e => e.classList.toggle('hidden', isAdmin));
+  $('#login-card').classList.toggle('hidden', isAdmin);
+  $('#signout').style.display = isAdmin ? '' : 'none';
+  $('#who').classList.toggle('hidden', !isAdmin);
+  if (isAdmin && me) $('#who').textContent = 'signed in as ' + (me.username || me.id);
+}
+
+$('#b-login').onclick = async () => {
+  try {
+    const r = await api('/api/login', { method: 'POST', body: JSON.stringify({
+      username: $('#li-user').value.trim(), password: $('#li-pass').value }) });
+    if (!r.token) throw new Error('No token returned.');
+    token = r.token; localStorage.setItem('token', token);
+    $('#li-pass').value = '';
+    await afterLogin();
+  } catch (e) { toast(e.message, true); }
+};
+$('#signout').onclick = () => {
+  token = ''; me = null; localStorage.removeItem('token');
+  setAdminUi(false); $('#stats').textContent = 'Sign in to view.'; toast('signed out');
+};
+
+async function afterLogin() {
+  me = await api('/api/me');
+  try {
+    await api('/api/admin/stats');           // proves the ADMIN role
+    setAdminUi(true);
+    await loadGuilds(); await loadUsers(); await loadStats();
+    toast('signed in as ' + me.username);
+  } catch {
+    setAdminUi(false);
+    toast('That account is not an admin.', true);
+  }
+}
+
+/* ----------------------------------------------------------------- stats */
+async function loadStats() {
+  try {
+    const s = await api('/api/admin/stats');
+    $('#stats').innerHTML = [
+      ['users','Accounts'],['online','Online'],['messages','Messages'],
+      ['channels','Channels'],['invites','Invites'],
+    ].map(([k,l]) => `<span class="stat"><b>${s[k]}</b><span>${l}</span></span>`).join('')
+      + `<div class="hint">node ${s.nodeVersion} · up ${fmtUptime(s.uptimeSeconds)}</div>`;
+  } catch { $('#stats').textContent = 'Unavailable — is the server running?'; }
+}
+
+/* ----------------------------------------------------------------- users */
+async function loadGuilds() {
+  guilds = await api('/api/admin/guilds');
+  const opts = guilds.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
+  for (const id of ['#nu-guild', '#inv-guild', '#ch-guild']) $(id).innerHTML = opts;
+}
+
+async function loadUsers() {
+  if (!token) return;
+  try {
+    const users = await api('/api/admin/users');
+    $('#users-body').innerHTML = users.map(u => {
+      const m = u.memberships[0];
+      return `<tr>
+        <td class="mono">${esc(u.username || '')}</td>
+        <td>${esc(u.displayName || '')}</td>
+        <td><span class="tag ${m?.role === 'ADMIN' ? 'admin' : ''}">${m?.role || '—'}</span></td>
+        <td>${u.online ? '<span class="tag on">online</span>' : '<span class="tag">offline</span>'}</td>
+        <td class="muted">${new Date(u.createdAt).toLocaleDateString()}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="btn" data-pw="${u.id}">Password</button>
+          <button class="btn" data-role="${u.id}" data-guild="${m?.guildId || ''}" data-cur="${m?.role || ''}">
+            ${m?.role === 'ADMIN' ? 'Demote' : 'Promote'}</button>
+          <button class="btn danger" data-del="${u.id}" data-name="${esc(u.username || '')}">Delete</button>
+        </td></tr>`;
+    }).join('');
+    wireUserButtons();
+  } catch (e) { /* not signed in yet */ }
+}
+
+function wireUserButtons() {
+  document.querySelectorAll('[data-pw]').forEach(b => b.onclick = async () => {
+    const pw = prompt('New password (8+ characters):');
+    if (!pw) return;
+    try { await api(`/api/admin/users/${b.dataset.pw}/password`, { method:'POST', body: JSON.stringify({ password: pw }) });
+      toast('password changed — their sessions were signed out'); }
+    catch (e) { toast(e.message, true); }
+  });
+  document.querySelectorAll('[data-role]').forEach(b => b.onclick = async () => {
+    const next = b.dataset.cur === 'ADMIN' ? 'MEMBER' : 'ADMIN';
+    try { await api(`/api/admin/users/${b.dataset.role}`, { method:'PATCH',
+      body: JSON.stringify({ role: next, guildId: b.dataset.guild }) });
+      toast('role set to ' + next); loadUsers(); }
+    catch (e) { toast(e.message, true); }
+  });
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    if (!confirm(`Delete ${b.dataset.name}? Their messages go too. This cannot be undone.`)) return;
+    try { await api('/api/admin/users/' + b.dataset.del, { method:'DELETE' });
+      toast('account deleted'); loadUsers(); loadStats(); }
+    catch (e) { toast(e.message, true); }
+  });
+}
+
+$('#b-createuser').onclick = async () => {
+  try {
+    await api('/api/admin/users', { method:'POST', body: JSON.stringify({
+      username: $('#nu-user').value.trim(),
+      password: $('#nu-pass').value,
+      displayName: $('#nu-name').value.trim() || undefined,
+      role: $('#nu-role').value,
+      guildId: $('#nu-guild').value,
+    })});
+    $('#nu-user').value = $('#nu-pass').value = $('#nu-name').value = '';
+    toast('account created'); loadUsers(); loadStats();
+  } catch (e) { toast(e.message, true); }
+};
+
+/* --------------------------------------------------------------- invites */
+async function loadInvites() {
+  if (!token) return;
+  try {
+    const inv = await api('/api/admin/invites');
+    $('#invites-body').innerHTML = inv.map(i => `<tr>
+      <td><code>${i.code}</code> <button class="btn" data-copy="${i.code}" style="padding:2px 8px">copy</button></td>
+      <td>${esc(i.guildName)}</td>
+      <td>${i.uses}/${i.maxUses}</td>
+      <td class="muted">${i.expiresAt ? new Date(i.expiresAt).toLocaleString() : 'never'}</td>
+      <td>${i.usable ? '<span class="tag on">usable</span>'
+                     : `<span class="tag bad">${i.revokedAt ? 'revoked' : (i.uses >= i.maxUses ? 'used up' : 'expired')}</span>`}</td>
+      <td style="text-align:right">${i.usable ? `<button class="btn danger" data-revoke="${i.id}">Revoke</button>` : ''}</td>
+    </tr>`).join('');
+    document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => {
+      navigator.clipboard.writeText(b.dataset.copy); toast('copied ' + b.dataset.copy);
+    });
+    document.querySelectorAll('[data-revoke]').forEach(b => b.onclick = async () => {
+      try { await api(`/api/admin/invites/${b.dataset.revoke}/revoke`, { method:'POST' });
+        toast('revoked'); loadInvites(); } catch (e) { toast(e.message, true); }
+    });
+  } catch (e) {}
+}
+
+$('#b-createinv').onclick = async () => {
+  try {
+    const r = await api(`/api/guilds/${$('#inv-guild').value}/invites`, { method:'POST',
+      body: JSON.stringify({ maxUses: Number($('#inv-uses').value), expiresInHours: Number($('#inv-hours').value) }) });
+    toast('invite created: ' + r.code); loadInvites();
+  } catch (e) { toast(e.message, true); }
+};
+
+/* -------------------------------------------------------------- channels */
+async function loadChannels() {
+  if (!token) return;
+  try {
+    await loadGuilds();
+    $('#channels-body').innerHTML = guilds.map(g => `
+      <div style="margin-bottom:18px">
+        <div style="margin-bottom:7px"><b>${esc(g.name)}</b>
+          <span class="muted">· ${g.memberCount} member(s)</span></div>
+        <table><tbody>${g.channels.map(c => `<tr>
+          <td style="width:26px" class="muted">${c.kind === 'VOICE' ? '🔊' : '#'}</td>
+          <td class="mono">${esc(c.name)}</td>
+          <td><span class="tag">${c.kind}</span></td>
+          <td class="muted">pos ${c.position}</td>
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn" data-ren="${c.id}" data-name="${esc(c.name)}">Rename</button>
+            <button class="btn danger" data-delch="${c.id}" data-name="${esc(c.name)}">Delete</button>
+          </td></tr>`).join('')}</tbody></table>
+      </div>`).join('');
+
+    document.querySelectorAll('[data-ren]').forEach(b => b.onclick = async () => {
+      const name = prompt('New channel name:', b.dataset.name);
+      if (!name) return;
+      try { await api('/api/admin/channels/' + b.dataset.ren, { method:'PATCH', body: JSON.stringify({ name }) });
+        toast('renamed'); loadChannels(); } catch (e) { toast(e.message, true); }
+    });
+    document.querySelectorAll('[data-delch]').forEach(b => b.onclick = async () => {
+      if (!confirm(`Delete #${b.dataset.name}? Every message in it is deleted too, permanently.`)) return;
+      try { await api('/api/admin/channels/' + b.dataset.delch, { method:'DELETE' });
+        toast('channel deleted'); loadChannels(); } catch (e) { toast(e.message, true); }
+    });
+  } catch (e) {}
+}
+
+$('#b-createch').onclick = async () => {
+  try {
+    await api(`/api/admin/guilds/${$('#ch-guild').value}/channels`, { method:'POST',
+      body: JSON.stringify({ name: $('#ch-name').value.trim(), kind: $('#ch-kind').value }) });
+    $('#ch-name').value = ''; toast('channel created'); loadChannels();
+  } catch (e) { toast(e.message, true); }
+};
+$('#b-createguild').onclick = async () => {
+  const name = $('#g-name').value.trim(); if (!name) return;
+  try { await api('/api/admin/guilds', { method:'POST', body: JSON.stringify({ name }) });
+    $('#g-name').value = ''; toast('guild created'); loadChannels(); } catch (e) { toast(e.message, true); }
+};
+
+/* ------------------------------------------------------------------ logs */
+let logSeen = 0;
+async function pollLogs() {
+  try {
+    const r = await (await fetch('/sv/logs?since=' + logSeen)).json();
+    if (r.total < logSeen) { logSeen = 0; $('#logs').innerHTML = ''; }
+    if (r.lines.length) {
+      const box = $('#logs');
+      const stuck = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+      box.insertAdjacentHTML('beforeend', r.lines.map(l =>
+        `<div class="lg-${l.stream}">${l.at.slice(11,19)} ${esc(l.line)}</div>`).join(''));
+      logSeen = r.total;
+      if (stuck) box.scrollTop = box.scrollHeight;
+    }
+  } catch {}
+}
+$('#b-clearlogs').onclick = async () => {
+  await fetch('/sv/logs/clear', { method: 'POST' });
+  logSeen = 0; $('#logs').innerHTML = '';
+};
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+/* ------------------------------------------------------------------ boot */
+setAdminUi(false);
+poll(); setInterval(poll, 2500);
+pollLogs(); setInterval(pollLogs, 1200);
+if (token) afterLogin().catch(() => { token=''; localStorage.removeItem('token'); setAdminUi(false); });
+</script>
+</body>
+</html>

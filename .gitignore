@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+*.tsbuildinfo
+
+# Secrets and local config
+.env
+.env*.local
+.vscode/
+
+# Prisma generates its client into the source tree
+apps/server/src/generated/
+
+# Uploads live on disk next to the server
+data/
+
+# Packaged installers and build staging (100 MB+, rebuilt from source)
+release/
+apps/desktop/release/
+
+# The live LiveKit config: holds this deployment's real API key pair.
+# Committed as livekit.example.yaml instead; copy it and fill in a pair.
+infra/livekit/livekit.yaml
+
+# Downloaded binaries, not committed
+infra/livekit/bin/
+*.zip
+*.exe
+
+# Logs
+*.log
+npm-debug.log*

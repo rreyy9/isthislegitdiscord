@@ -1,0 +1,23 @@
+{
+  "name": "isthislegit",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @isthislegit/server",
+    "build": "npm run build --workspace @isthislegit/shared && npm run build --workspace @isthislegit/server",
+    "db:migrate": "npm run db:migrate --workspace @isthislegit/server",
+    "db:studio": "npm run db:studio --workspace @isthislegit/server",
+    "db:generate": "npm run db:generate --workspace @isthislegit/server",
+    "console": "npm start --workspace @isthislegit/console"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "vite": "^7.3.6"
+  }
+}

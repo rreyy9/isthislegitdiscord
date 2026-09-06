@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--
+  blob: is in img-src because attachments are fetched with the auth token and
+  turned into object URLs -- an <img src> cannot carry an Authorization header,
+  and a token in a query string ends up in logs.
+
+  frame-src is exactly the two YouTube origins and nothing else, so a pasted
+  link cannot frame anything it likes. The player is only ever loaded after
+  someone clicks play; until then a message shows a still image.
+-->
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self'; connect-src 'self' http://localhost:3000 http://127.0.0.1:3000 ws://localhost:3000 ws://127.0.0.1:3000 http: ws:; img-src 'self' data: blob: http: https:; style-src 'self' 'unsafe-inline'; frame-src https://www.youtube-nocookie.com https://www.youtube.com;">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>isthislegit</title>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="./main.tsx"></script>
+</body>
+</html>
