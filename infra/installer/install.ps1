@@ -50,6 +50,22 @@ param(
     # reason.
     [switch] $NonInteractive,
 
+    # Update an install that is already here, instead of configuring a fresh
+    # one. The payload next to this script is staged rather than live, and only
+    # the components whose contents actually changed are moved into place --
+    # with the services that read them stopped for as short a time as that
+    # takes, and the ones that read nothing that changed left running. See "the
+    # update path" below.
+    #
+    # The NSIS installer passes this when it finds an existing install. Passing
+    # it by hand against a box that has never been installed fails early and
+    # says so, rather than half-configuring one.
+    [switch] $Update,
+
+    # Seconds to wait for /api/health after starting the server back up. Past
+    # this the update is treated as failed and rolled back.
+    [int] $HealthTimeout = 90,
+
     # Print every step without changing anything.
     [switch] $DryRun
 )
@@ -192,6 +208,428 @@ Say "  node $nodeVersion"
 $elevated = Test-Elevated
 if ($elevated) { Say "  running elevated" } else { Warn "  not elevated -- Postgres setup and boot registration will be skipped" }
 
+# ========================================================== the update path
+#
+# Everything below, down to the "end of the update path" marker, runs instead
+# of the fresh install rather than before it, and then exits.
+#
+# The shape of it:
+#
+#   1. diff the payload's manifest against the one this install recorded, and
+#      work out the shortest list of components that actually have to move;
+#   2. do everything expensive -- unpack, verify, decide -- with the server
+#      still serving. The NSIS installer has already unpacked into
+#      $InstallDir\.update by the time this runs;
+#   3. stop only the services that read something that changed;
+#   4. rename directories into place. On one volume that is a metadata
+#      operation, so the stop window is a service restart and not a 617 MB
+#      copy;
+#   5. migrate, start, and wait for /api/health;
+#   6. put the previous version back if that never comes.
+#
+# What this cannot undo is a migration: Prisma has no down migrations, so a
+# rollback restores the code against an already-migrated database. That is only
+# safe while migrations stay additive -- new nullable columns and new tables,
+# with drops left to a later release once no version still running reads them.
+
+if ($Update) {
+
+    Step "Updating an existing install"
+
+    # --------------------------------------- what changed, and what did not
+
+    $payloadManifestPath   = Join-Path $here 'payload.json'
+    $installedManifestPath = Join-Path $InstallDir 'installed.json'
+
+    if (-not (Test-Path $payloadManifestPath)) {
+        throw "There is no payload.json next to this script. This payload was built before the installer tracked components -- rebuild it with the current build-server-installer.ps1, or install it as a fresh install without -Update."
+    }
+    if (-not (Test-Path (Join-Path $serverDir 'dist\main.js'))) {
+        throw "$InstallDir does not hold an install of this server (no server\dist\main.js). Run without -Update."
+    }
+
+    $payloadManifest = Get-Content $payloadManifestPath -Raw | ConvertFrom-Json
+
+    $installedHashes  = @{}
+    $installedVersion = '(unrecorded)'
+    if (Test-Path $installedManifestPath) {
+        $installed = Get-Content $installedManifestPath -Raw | ConvertFrom-Json
+        $installedVersion = $installed.version
+        foreach ($p in $installed.components.PSObject.Properties) {
+            $installedHashes[$p.Name] = $p.Value.hash
+        }
+    } else {
+        Warn "  no installed.json -- this install predates component tracking."
+        Warn "  Everything in the payload is replaced this once; the next update will be short."
+    }
+
+    Say "  installed    $installedVersion"
+    Say "  payload      $($payloadManifest.version)"
+    Say "  staged in    $here"
+
+    # What each component means for the running services. Anything not named
+    # here restarts the chat server: it reads most of the payload, so it is the
+    # answer that is wrong in the harmless direction if a component is added to
+    # the build script and not to this table.
+    #
+    #   Restart   which service has to come down and back up
+    #   Migrate   a change here means new migrations shipped
+    #   Stage     do not overwrite the installed copy; write it alongside
+    #   WhenIdle  only replace it while this process is not running
+    $policy = @{
+        'server-dist'    = @{ Restart = 'server' }
+        'server-prisma'  = @{ Restart = 'server'; Migrate = $true }
+        'server-deps'    = @{ Restart = 'server' }
+        'shared'         = @{ Restart = 'server' }
+
+        # The console is a plain Node script the admin app spawns. Its files are
+        # read at startup and held open by nothing afterwards, so they can be
+        # replaced under a running one; it picks the new copy up when the app is
+        # next opened. Stopping it here would kill the supervisor the operator
+        # is most likely watching this update through.
+        'console'        = @{ Restart = 'none'; Note = 'the admin app picks it up next time it is opened' }
+
+        # Restarting LiveKit drops every call in progress, which is why the
+        # binary is hashed apart from anything else: it moves only when someone
+        # deliberately bumps it, so most updates never touch voice at all.
+        'livekit-bin'    = @{ Restart = 'livekit' }
+
+        # start.ps1, and only start.ps1 -- livekit.yaml is not tracked, see the
+        # build script. The scheduled task runs the binary directly and never
+        # reads this, so replacing it changes nothing until somebody starts
+        # LiveKit by hand. Dropping every call in progress to pick up a script
+        # that is not in the running path would be a poor trade.
+        'livekit-config' = @{ Restart = 'none'; Note = 'used only for starting LiveKit by hand; nothing was restarted for it' }
+
+        'caddy-bin'      = @{ Restart = 'caddy' }
+
+        # The installed Caddyfile is this deployment's, and may have been edited
+        # on the box. Overwriting it could change the hostnames the server is
+        # reached on, so the new one is written beside it and left to a human.
+        'caddy-config'   = @{ Restart = 'none'; Stage = $true; Note = 'written as Caddyfile.new; the live one is untouched' }
+
+        # 319 MB of Electron, locked while the admin app is open, and in nobody's
+        # serving path. Skipped rather than waited for.
+        'app'            = @{ Restart = 'none'; WhenIdle = 'isthislegit Server'; Note = 'replaced only while the admin app is closed' }
+
+        'scripts'        = @{ Restart = 'none' }
+    }
+
+    $changed   = New-Object System.Collections.Generic.List[object]
+    $sameCount = 0
+    $sameBytes = [long] 0
+
+    foreach ($p in $payloadManifest.components.PSObject.Properties) {
+        $name = $p.Name
+        if ($installedHashes[$name] -eq $p.Value.hash) {
+            $sameCount++
+            $sameBytes += [long] $p.Value.bytes
+            continue
+        }
+
+        $rule = $policy[$name]
+        if (-not $rule) {
+            Warn "  $name is not in this script's policy table -- assuming it needs the chat server restarted."
+            $rule = @{ Restart = 'server' }
+        }
+
+        $changed.Add([pscustomobject] @{
+            Name     = $name
+            Paths    = @($p.Value.paths)
+            Bytes    = [long] $p.Value.bytes
+            Restart  = $rule.Restart
+            Migrate  = [bool] $rule.Migrate
+            Stage    = [bool] $rule.Stage
+            WhenIdle = $rule.WhenIdle
+            Note     = $rule.Note
+        })
+    }
+
+    Say ""
+    if ($changed.Count -eq 0) {
+        Say "Nothing in this payload differs from what is installed." 'Green'
+        Say "  No service was stopped."
+        if (-not $DryRun) { Copy-Item $payloadManifestPath $installedManifestPath -Force }
+        Write-Host ""
+        exit 0
+    }
+
+    Say "  replacing:"
+    foreach ($c in $changed) {
+        $suffix = if ($c.Note) { "  -- $($c.Note)" } else { "  restart: $($c.Restart)" }
+        Say ("    {0,-15} {1,7:N1} MB{2}" -f $c.Name, ($c.Bytes / 1MB), $suffix)
+    }
+    if ($sameCount -gt 0) {
+        Say ("  unchanged, not unpacked and not restarted: {0} components, {1:N0} MB" -f $sameCount, ($sameBytes / 1MB))
+    }
+
+    # Migrations run when the schema component moved, which is the same thing as
+    # "this release shipped new migrations". Asking Prisma instead would mean a
+    # round trip to the database to learn what the build already knows.
+    $needsMigrate = (@($changed | Where-Object { $_.Migrate }).Count -gt 0) -or -not (Test-Path $installedManifestPath)
+
+    # Restarting is keyed off the components, so a payload that only moves the
+    # admin app never stops anything.
+    $toRestart = @($changed | ForEach-Object { $_.Restart } | Where-Object { $_ -ne 'none' } | Sort-Object -Unique)
+
+    $migrateLabel = if ($needsMigrate) { 'yes' } else { 'no -- the schema did not change' }
+    $restartLabel = if ($toRestart) { $toRestart -join ', ' } else { 'nothing' }
+
+    Say ""
+    Say "  migrations   $migrateLabel"
+    Say "  restarting   $restartLabel"
+
+    if ((Split-Path -Qualifier $here) -ne (Split-Path -Qualifier $InstallDir)) {
+        Warn ""
+        Warn "  The payload is on $(Split-Path -Qualifier $here) and the install is on $(Split-Path -Qualifier $InstallDir)."
+        Warn "  Across volumes a move is a copy, so the services stay down for the"
+        Warn "  length of it rather than for a restart. Stage under $InstallDir instead."
+    }
+
+    if ($DryRun) {
+        Write-Host ""
+        Warn "Dry run finished. Nothing was stopped, moved or migrated."
+        Write-Host ""
+        exit 0
+    }
+
+    # ------------------------------------------------------------ machinery
+
+    $rollbackDir = Join-Path $InstallDir '.rollback'
+    if (Test-Path $rollbackDir) { Remove-Item $rollbackDir -Recurse -Force }
+    New-Item -ItemType Directory -Path $rollbackDir -Force | Out-Null
+
+    $moved = New-Object System.Collections.Generic.List[object]
+
+    function Get-PortOwner([int] $port) {
+        try {
+            @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop |
+                Select-Object -ExpandProperty OwningProcess -Unique)
+        } catch {
+            @()
+        }
+    }
+
+    # Stopping one of the three services, whichever way it happens to have been
+    # started.
+    #
+    # The scheduled task is only half of it. The operator console spawns the
+    # server, LiveKit and Caddy as its own children (apps/console/src/main.mjs),
+    # so on a box where someone pressed Start in the admin app there is no task
+    # running to stop, and the process holding server\dist open is a child of
+    # the console. Ending the task alone there leaves the files locked, and the
+    # rename below fails with an access denied that reads as a permissions
+    # problem rather than as a process nobody stopped.
+    #
+    # So: ask the task to end, wait for the port to go quiet, and only then take
+    # whatever still holds it by force.
+    function Stop-Managed([string] $task, [int] $port, [string] $label, [int] $graceSeconds = 20) {
+        if (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+        }
+
+        $deadline = (Get-Date).AddSeconds($graceSeconds)
+        while ((Get-Date) -lt $deadline -and (Get-PortOwner $port)) { Start-Sleep -Milliseconds 200 }
+
+        $owners = Get-PortOwner $port
+        if ($owners) {
+            Say "    $label is still on port $port -- stopping pid $($owners -join ', ')"
+            foreach ($owner in $owners) { Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue }
+            $deadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $deadline -and (Get-PortOwner $port)) { Start-Sleep -Milliseconds 200 }
+        }
+
+        if (Get-PortOwner $port) {
+            throw "$label is still listening on port $port. Nothing has been changed yet -- stop it and run this again."
+        }
+        Say "    stopped $label"
+    }
+
+    function Start-Managed([string] $task, [string] $label) {
+        if (-not (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue)) {
+            Warn "    there is no $task task -- start $label yourself"
+            return
+        }
+        Start-ScheduledTask -TaskName $task
+        Say "    started $label"
+    }
+
+    function Wait-Healthy([string] $url, [int] $timeoutSeconds) {
+        $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            try {
+                if ((Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) { return $true }
+            } catch {
+                # Not up yet, or not coming up at all. The loop decides which.
+            }
+            # A second between tries, not a tight loop: ThrottlerGuard is
+            # registered globally (apps/server/src/app.module.ts) and a hammered
+            # /api/health answers 429, which is indistinguishable here from a
+            # server that never came up.
+            Start-Sleep -Seconds 1
+        }
+        return $false
+    }
+
+    # Directories are moved, files are copied. The move is the point -- within
+    # one volume it is a rename, and that is what keeps the stop window to the
+    # length of a restart instead of the length of a 193 MB copy. Files are
+    # copied because install.ps1 is one of them, and a script cannot be renamed
+    # out from under itself while it runs.
+    function Move-Component([string] $relPath, [bool] $stageOnly) {
+        $live   = Join-Path $InstallDir $relPath
+        $staged = Join-Path $here $relPath
+
+        if (-not (Test-Path $staged)) {
+            Warn "    $relPath is in the manifest but not in the payload -- skipped"
+            return
+        }
+
+        if ($stageOnly) {
+            Copy-Item $staged "$live.new" -Recurse -Force
+            Say "    $relPath -> $relPath.new"
+            return
+        }
+
+        $saved = Join-Path $rollbackDir $relPath
+        New-Item -ItemType Directory -Path (Split-Path -Parent $saved) -Force | Out-Null
+
+        $hadLive = Test-Path $live
+        if ($hadLive) { Move-Item $live $saved -Force }
+
+        $parent = Split-Path -Parent $live
+        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+
+        if ((Get-Item $staged -Force).PSIsContainer) {
+            Move-Item $staged $live -Force
+        } else {
+            Copy-Item $staged $live -Force
+        }
+
+        $moved.Add([pscustomobject] @{ Live = $live; Saved = $saved; HadLive = $hadLive })
+        Say "    $relPath"
+    }
+
+    # Newest first, so a half-finished swap unwinds in the order it was made.
+    function Undo-Moves {
+        for ($i = $moved.Count - 1; $i -ge 0; $i--) {
+            $m = $moved[$i]
+            try {
+                if (Test-Path $m.Live) { Remove-Item $m.Live -Recurse -Force }
+                if ($m.HadLive) { Move-Item $m.Saved $m.Live -Force }
+            } catch {
+                Warn "    could not restore $($m.Live) -- $($_.Exception.Message)"
+            }
+        }
+    }
+
+    $installedPort = Get-EnvValue $envPath 'PORT'
+    if (-not $installedPort) { $installedPort = $Port }
+    $healthUrl = "http://127.0.0.1:$installedPort/api/health"
+
+    $ports = @{ server = [int] $installedPort; livekit = 7880; caddy = 443 }
+    $tasks = @{ server = 'isthislegit-server'; livekit = 'isthislegit-livekit'; caddy = 'isthislegit-caddy' }
+
+    # ------------------------------------------------------ the short window
+
+    $startedAt = Get-Date
+
+    try {
+        if ($toRestart) {
+            Step "Stopping"
+            foreach ($svc in $toRestart) { Stop-Managed $tasks[$svc] $ports[$svc] $svc }
+        }
+
+        Step "Swapping components into place"
+        foreach ($c in $changed) {
+            if ($c.WhenIdle -and (Get-Process -Name $c.WhenIdle -ErrorAction SilentlyContinue)) {
+                Warn "    $($c.Name) skipped -- $($c.WhenIdle) is running. Close it and run the installer again."
+                continue
+            }
+            foreach ($relPath in $c.Paths) { Move-Component $relPath $c.Stage }
+        }
+
+        if ($needsMigrate) {
+            Step "Applying migrations"
+            Push-Location $serverDir
+            try {
+                & npx --no-install prisma migrate deploy
+                if ($LASTEXITCODE -ne 0) { throw "prisma migrate deploy failed (exit $LASTEXITCODE)" }
+            } finally { Pop-Location }
+        }
+
+        if ($toRestart) {
+            Step "Starting"
+            foreach ($svc in $toRestart) { Start-Managed $tasks[$svc] $svc }
+        }
+
+        if ($toRestart -contains 'server') {
+            Step "Waiting for the server"
+            Say "  $healthUrl"
+            if (-not (Wait-Healthy $healthUrl $HealthTimeout)) {
+                throw "the server did not answer /api/health within $HealthTimeout seconds"
+            }
+            Say "  healthy"
+        }
+    } catch {
+        $reason = $_.Exception.Message
+        Write-Host ""
+        Warn "The update failed: $reason"
+        Warn "Putting the previous version back."
+
+        foreach ($svc in $toRestart) {
+            try { Stop-Managed $tasks[$svc] $ports[$svc] $svc 10 } catch { Warn "    $($_.Exception.Message)" }
+        }
+        Undo-Moves
+        foreach ($svc in $toRestart) { Start-Managed $tasks[$svc] $svc }
+
+        Write-Host ""
+        Warn "Rolled back to $installedVersion. The install is as it was, with one exception:"
+        Warn "any migration that ran is still applied -- Prisma has no down migrations."
+        Warn "installed.json was not changed, so running this installer again retries the same update."
+        Write-Host ""
+        throw "update failed and was rolled back: $reason"
+    }
+
+    $downSeconds = [math]::Round(((Get-Date) - $startedAt).TotalSeconds, 1)
+
+    # Only now, once the server has answered, is the new manifest the truth.
+    Copy-Item $payloadManifestPath $installedManifestPath -Force
+    if ($elevated) {
+        New-Item -Path 'HKLM:\Software\isthislegit\server' -Force | Out-Null
+        Set-ItemProperty -Path 'HKLM:\Software\isthislegit\server' -Name 'Version' -Value $payloadManifest.version
+    }
+
+    # Outside the window on purpose: deleting the old node_modules is thousands
+    # of files, and there is no reason for the server to be down for it.
+    Step "Cleaning up"
+    try {
+        Remove-Item $rollbackDir -Recurse -Force -ErrorAction Stop
+        Say "  removed $rollbackDir"
+    } catch {
+        Warn "  could not remove $rollbackDir -- delete it by hand. $($_.Exception.Message)"
+    }
+
+    Write-Host ""
+    Say "Updated $installedVersion -> $($payloadManifest.version)." 'Green'
+    Write-Host ""
+    Write-Host "  services were down for $downSeconds seconds"
+    Write-Host "  restarted    $restartLabel"
+    if ($sameCount -gt 0) {
+        Write-Host ("  left alone   {0} components, {1:N0} MB" -f $sameCount, ($sameBytes / 1MB))
+    }
+    if ($toRestart -notcontains 'livekit') {
+        Write-Host "  voice        untouched -- calls in progress were not interrupted"
+    }
+    foreach ($c in $changed) {
+        if ($c.Note) { Write-Host "  $($c.Name): $($c.Note)" }
+    }
+    Write-Host ""
+    exit 0
+}
+
+# ==================================================== end of the update path
+
 if (-not $LanIp) {
     # Suggest the interface that has a default gateway, not simply the first
     # IPv4. A dev box carries VirtualBox, Hyper-V and link-local addresses as
@@ -230,15 +668,39 @@ if (Test-Path $envPath) {
 # copy would be a folder onto itself.
 $inPlace = ($here.TrimEnd('\')) -ieq ($InstallDir.TrimEnd('\'))
 
+# Within one volume a move is a rename, and the payload is more than thirty
+# thousand files. The NSIS installer now unpacks into $InstallDir\.update
+# instead of straight into $InstallDir -- it has to, so that an update can stage
+# a new version beside the running one -- and that would have made every fresh
+# install pay for a second full copy of 617 MB. Renaming instead costs nothing.
+$sameVolume = (Split-Path -Qualifier $here) -ieq (Split-Path -Qualifier $InstallDir)
+$verb = if ($sameVolume) { 'move' } else { 'copy' }
+
 if ($inPlace) {
     Say "  payload is already in place -- nothing to copy"
-} elseif (-not (Would "copy server, shared, console, livekit and caddy")) {
+} elseif (-not (Would "$verb server, shared, console, livekit, caddy and app into place")) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     foreach ($folder in @('server', 'shared', 'console', 'livekit', 'caddy', 'app')) {
         $src = Join-Path $here $folder
-        if (Test-Path $src) { Copy-Item $src $InstallDir -Recurse -Force }
+        if (-not (Test-Path $src)) { continue }
+        if ($sameVolume) {
+            # Move-Item will not merge onto a folder that is already there, and
+            # a fresh install run over an old one has to end up with the new
+            # tree rather than the union of both. .env is put back below, from
+            # the copy taken above.
+            $dest = Join-Path $InstallDir $folder
+            if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+            Move-Item $src $dest -Force
+        } else {
+            Copy-Item $src $InstallDir -Recurse -Force
+        }
     }
-    foreach ($file in @('allow-lan.ps1', 'start-all.ps1', 'README.txt')) {
+    # These are copied whichever volume they are on. install.ps1 is the script
+    # running right now, which cannot be renamed out from under itself, and
+    # payload.json is wanted in both places -- here to be read at the end of
+    # this run, and in the install dir as the baseline the next update diffs
+    # against.
+    foreach ($file in @('allow-lan.ps1', 'start-all.ps1', 'README.txt', 'install.ps1', 'payload.json')) {
         $src = Join-Path $here $file
         if (Test-Path $src) { Copy-Item $src $InstallDir -Force }
     }
@@ -626,6 +1088,29 @@ if ($AllowLan) {
 }
 
 # ---------------------------------------------------------------------- done
+
+# ------------------------------------------------- 7. record what is installed
+
+# The baseline the next update diffs against: without it, an update has nothing
+# to compare the incoming payload with and has to replace all 617 MB and restart
+# every service, voice included.
+#
+# Written last, and only on a run that got this far. A half-finished install
+# that claimed a component was in place would send the next update straight past
+# the one thing it needed to fix.
+if (-not $DryRun) {
+    $manifestSource = Join-Path $InstallDir 'payload.json'
+    if (-not (Test-Path $manifestSource)) { $manifestSource = Join-Path $here 'payload.json' }
+    if (Test-Path $manifestSource) {
+        Copy-Item $manifestSource (Join-Path $InstallDir 'installed.json') -Force
+    } else {
+        Warn ""
+        Warn "This payload has no payload.json, so nothing recorded what is installed."
+        Warn "The next update will replace everything and restart every service,"
+        Warn "including LiveKit. Rebuild the installer with the current"
+        Warn "build-server-installer.ps1 to get short updates."
+    }
+}
 
 Write-Host ""
 if ($DryRun) { Warn "Dry run finished. Nothing was changed." } else { Say "Installed." 'Green' }

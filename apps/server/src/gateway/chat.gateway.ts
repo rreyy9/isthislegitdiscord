@@ -1,4 +1,5 @@
 import { Inject, Logger } from '@nestjs/common';
+import type { OnApplicationShutdown } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
@@ -32,7 +33,11 @@ interface SocketData {
   cors: { origin: true, credentials: true },
 })
 export class ChatGateway
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+  implements
+    OnGatewayInit,
+    OnGatewayConnection,
+    OnGatewayDisconnect,
+    OnApplicationShutdown
 {
   @WebSocketServer() server: Server;
   private readonly log = new Logger(ChatGateway.name);
@@ -49,6 +54,29 @@ export class ChatGateway
     private readonly permissions: PermissionService,
     private readonly prisma: PrismaService,
   ) {}
+
+  /**
+   * Say on the way out that this is a restart, not the server falling over.
+   *
+   * The installer stops the server for a few seconds while it swaps the new
+   * version in, and clients reconnect on their own inside that. The difference
+   * this makes is only to what they show while they wait -- "updating" instead
+   * of "offline" -- but that is the difference between an update nobody
+   * mentions and ten people asking at once whether the server is down.
+   *
+   * Emitted synchronously and to everyone: there is no time here for a round
+   * trip, and no reason to care whether it arrived. A client that misses it,
+   * or is too old to listen for it, reconnects exactly as it did before.
+   *
+   * This only runs when the process is given the chance -- see the note on
+   * enableShutdownHooks in main.ts. On Windows a forced kill skips it, which
+   * is a quieter version of today's behaviour rather than a regression.
+   */
+  onApplicationShutdown(signal?: string) {
+    if (!this.server) return;
+    this.log.log(`shutting down (${signal ?? 'no signal'}) -- telling clients`);
+    this.server.emit('server:restarting', { signal: signal ?? null });
+  }
 
   /**
    * Authentication belongs here, not in handleConnection: Socket.IO awaits

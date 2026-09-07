@@ -42,6 +42,18 @@ async function bootstrap() {
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true }));
 
+  // Run the teardown Nest already has on the way out: PrismaService closes its
+  // pool, VoiceService clears its timers, and ChatGateway tells everyone still
+  // connected that this is a restart rather than the server falling over.
+  //
+  // Windows caveat, because it decides how much this is worth: a process ended
+  // with `taskkill /F`, or by Stop-ScheduledTask, is terminated outright and
+  // none of this runs. It fires on Ctrl+C and on a plain `taskkill` without
+  // /F, which is what the installer tries first before it resorts to force.
+  // Where it does not fire, clients see an ordinary disconnect and reconnect
+  // on their own, which is what they did before this existed.
+  app.enableShutdownHooks();
+
   const port = Number(process.env.PORT ?? 3000);
   await app.listen(port, '0.0.0.0');
 

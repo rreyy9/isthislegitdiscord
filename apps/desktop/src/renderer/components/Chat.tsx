@@ -193,6 +193,14 @@ export function Chat({
   const [messages, setMessages] = useState<Msg[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>('connecting');
+  /**
+   * The server said it was going down to be updated. Kept apart from `status`
+   * rather than added to it as a fourth value: the connection really is
+   * disconnected and then connecting, every consumer of that should carry on
+   * treating it that way, and the only thing this changes is the word shown
+   * next to the dot while it happens.
+   */
+  const [serverRestarting, setServerRestarting] = useState(false);
   const [draft, setDraft] = useState('');
   const [typingUsers, setTypingUsers] = useState<Record<string, number>>({});
   /** Occupants of every voice channel, from the server's LiveKit webhooks. */
@@ -713,7 +721,13 @@ export function Chat({
     })();
 
     connectSocket({
-      onStatus: setStatus,
+      onStatus: (s) => {
+        setStatus(s);
+        // Cleared on the way back up, so the label says "updating" only for
+        // the gap the update itself caused and not for the next one.
+        if (s === 'connected') setServerRestarting(false);
+      },
+      onServerRestarting: () => setServerRestarting(true),
       onMessage: (m) => {
         // Recorded for every channel, not just the open one: that is what
         // makes the unread dot appear on a channel you are not looking at.
@@ -2008,7 +2022,13 @@ export function Chat({
           )}
           <div className={'status-dot ' + status} title={status} />
           <span className="status-label">
-            {status === 'connected' ? 'live' : status === 'connecting' ? 'reconnecting…' : 'offline'}
+            {status === 'connected'
+              ? 'live'
+              : serverRestarting
+                ? 'updating…'
+                : status === 'connecting'
+                  ? 'reconnecting…'
+                  : 'offline'}
           </span>
 
           {pinsOpen && activeChannelObj && (

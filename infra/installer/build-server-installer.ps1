@@ -67,6 +67,74 @@ function Invoke-Step([string] $label, [string] $workingDir, [string] $exe, [stri
     }
 }
 
+# The payload manifest.
+#
+# An update only has to touch the parts of the payload that actually changed,
+# and it can only know which those are if the build says so. Roughly five of
+# the six hundred megabytes below move in a typical release -- the compiled
+# server, shared, the console -- while node_modules, the LiveKit binary and the
+# 300 MB admin app sit still for months. Unpacking all of it over a running
+# server, and restarting every service afterwards, is the difference between an
+# update measured in seconds and one measured in minutes, with every voice call
+# dropped for no reason.
+#
+# One SHA256 per component, over the file list and the file contents, in a
+# stable order. Content and not timestamps: an npm install rewrites every mtime
+# without changing a byte, and that would mark 193 MB as changed every build.
+#
+# Streamed into a single hash rather than Get-FileHash per file -- there are
+# more than thirty thousand of them, and the per-call overhead is the whole
+# cost at that count.
+function Get-ComponentHash([string] $root, [string[]] $paths) {
+    $files = New-Object System.Collections.Generic.List[IO.FileInfo]
+    foreach ($p in $paths) {
+        $full = Join-Path $root $p
+        if (-not (Test-Path $full)) { continue }
+        $item = Get-Item $full -Force
+        if ($item.PSIsContainer) {
+            foreach ($f in Get-ChildItem $full -Recurse -File -Force) { $files.Add($f) }
+        } else {
+            $files.Add($item)
+        }
+    }
+    if ($files.Count -eq 0) { return $null }
+
+    $prefix = $root.TrimEnd('\') + '\'
+    # Lower-cased so the hash does not move with a casing change Windows itself
+    # does not distinguish, and sorted so it does not move with directory order.
+    $sorted = $files | Sort-Object { $_.FullName.Substring($prefix.Length).ToLowerInvariant() }
+
+    $sha    = [Security.Cryptography.SHA256]::Create()
+    $buffer = New-Object byte[] 1048576
+    $bytes  = [long] 0
+    try {
+        foreach ($f in $sorted) {
+            $rel  = $f.FullName.Substring($prefix.Length).ToLowerInvariant()
+            $head = [Text.Encoding]::UTF8.GetBytes("$rel $($f.Length)`n")
+            $null = $sha.TransformBlock($head, 0, $head.Length, $null, 0)
+
+            $stream = [IO.File]::OpenRead($f.FullName)
+            try {
+                while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $null = $sha.TransformBlock($buffer, 0, $read, $null, 0)
+                }
+            } finally { $stream.Dispose() }
+            $bytes += $f.Length
+        }
+        $null = $sha.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+        return [ordered] @{
+            hash  = ([BitConverter]::ToString($sha.Hash) -replace '-', '').ToLowerInvariant()
+            files = $sorted.Count
+            bytes = $bytes
+            # Recorded so install.ps1 does not need its own copy of the layout.
+            # A second copy is a second thing to get wrong, and getting it wrong
+            # here means an update that copies a folder nothing reads and leaves
+            # the one that matters behind.
+            paths = @($paths)
+        }
+    } finally { $sha.Dispose() }
+}
+
 # ------------------------------------------------------------------ 0. context
 
 $serverPkgPath = Join-Path $repo 'apps\server\package.json'
@@ -437,6 +505,31 @@ PowerShell:
 Add -DryRun to see what it would do without touching anything, and -NoStartup
 to skip the start-on-boot registration. Re-running keeps your database, your
 .env and your LiveKit keys.
+
+Updating an install that is already here
+    Run the setup.exe again. It notices the existing install and updates it
+    instead of asking the questions over: the payload is unpacked beside the
+    running server, only the components whose contents actually changed are
+    swapped in, and only the services that read them are restarted. In a
+    typical release that is the chat server for a few seconds and nothing
+    else -- calls in progress are not interrupted, because the LiveKit binary
+    has not moved.
+
+    If the server does not answer /api/health afterwards, the previous version
+    is put back and the update reports the failure. A migration that has
+    already run stays applied: Prisma has no down migrations, so migrations in
+    this project have to be additive.
+
+    installed.json records what is here and is what the next update compares
+    against. Do not delete it -- without it an update has to replace all of it
+    and restart everything, voice included.
+
+    To do the same thing by hand from a zip, unpack it somewhere on the same
+    volume as the install and run:
+
+        powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -DryRun
+
+    -DryRun prints exactly what would be replaced and restarted, and stops.
 "@
 $readme | Set-Content (Join-Path $staging 'README.txt') -Encoding ASCII
 
@@ -484,6 +577,80 @@ if ($leaks.Count -gt 0) {
 }
 Say "  clean -- no live key pair in the payload"
 
+# --------------------------------------------------------- 5c. payload manifest
+
+# Written last, so it describes the tree that is actually about to be compiled
+# in, and read by install.ps1 on the target to work out what an update has to
+# replace. See Get-ComponentHash above for why this exists at all.
+#
+# The component names are the contract between this script and install.ps1's
+# $componentPolicy table, which maps each one to the service that has to be
+# restarted when it moves. Adding a component here without adding it there
+# means it is copied and nothing is restarted to pick it up.
+Say ""
+Say "Hashing the payload"
+
+$components = [ordered] @{
+    # The compiled server. Moves every release, and it is 1 MB.
+    'server-dist'    = @('server\dist')
+
+    # Schema and migration history. Its own component because a change here is
+    # the one that means migrations have to run.
+    'server-prisma'  = @('server\prisma', 'server\prisma7.config.ts')
+
+    # 193 MB that moves only on a dependency bump.
+    'server-deps'    = @('server\node_modules', 'server\package.json', 'server\package-lock.json')
+
+    'shared'         = @('shared')
+    'console'        = @('console')
+
+    # The LiveKit binary, apart from its config: restarting LiveKit drops every
+    # call in progress, so it is worth knowing that the 54 MB did not move and
+    # the restart can be skipped.
+    'livekit-bin'    = @('livekit\bin')
+
+    # livekit.yaml is deliberately NOT here. install.ps1 rewrites it on the
+    # target with that deployment's generated key pair and LAN address, so the
+    # installed copy never matches the shipped template and never should --
+    # hashing it would report a change on every update and then overwrite the
+    # keys the server signs its voice tokens with.
+    'livekit-config' = @('livekit\start.ps1')
+
+    'caddy-bin'      = @('caddy\bin')
+
+    # The Caddyfile does ship for real (it carries hostnames, not secrets), but
+    # an operator may have edited the installed one. install.ps1 stages a
+    # changed Caddyfile beside the live one rather than over it.
+    'caddy-config'   = @('caddy\Caddyfile', 'caddy\start.ps1')
+
+    # 319 MB of Electron that cannot be overwritten while the admin app is open.
+    'app'            = @('app')
+
+    'scripts'        = @('install.ps1', 'allow-lan.ps1', 'start-all.ps1', 'README.txt')
+}
+
+$manifest = [ordered] @{
+    version    = $version
+    builtAt    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    components = [ordered] @{}
+}
+
+foreach ($name in $components.Keys) {
+    $entry = Get-ComponentHash $staging $components[$name]
+    if (-not $entry) {
+        # A component left out on purpose (-NoServerApp, -NoCaddyBinary and so
+        # on). Absent from the manifest means "this build says nothing about
+        # it", which install.ps1 reads as leave the installed copy alone --
+        # not as "delete it".
+        Say "  $name  (not in this payload)" 'DarkGray'
+        continue
+    }
+    $manifest.components[$name] = $entry
+    Say ("  {0,-15} {1}  {2,6} files  {3,7:N1} MB" -f $name, $entry.hash.Substring(0, 12), $entry.files, ($entry.bytes / 1MB))
+}
+
+$manifest | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $staging 'payload.json') -Encoding UTF8
+
 Say ""
 Say "Compiling the installer"
 Say "  solid LZMA over ~$((Get-ChildItem $staging -Recurse -File | Measure-Object).Count) files -- this is the slow part"
@@ -491,7 +658,14 @@ Say "  solid LZMA over ~$((Get-ChildItem $staging -Recurse -File | Measure-Objec
 if (Test-Path $exePath) { Remove-Item $exePath -Force }
 
 $nsi = Join-Path $here 'server-installer.nsi'
-& $makensis '/V3' "/DPAYLOAD=$staging" "/DVERSION=$version" "/DVERSION4=$version4" "/DOUTFILE=$exePath" $nsi
+# Unpacked size, rounded up and with a little headroom. The installer refuses
+# to start if the target volume has less than this free -- it unpacks beside the
+# install rather than over it, so an update needs room for two copies at once,
+# and running out halfway through one is the failure that would leave a stopped
+# server and a half-written tree.
+$payloadMb = [math]::Ceiling(((Get-ChildItem $staging -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB) * 1.1)
+
+& $makensis '/V3' "/DPAYLOAD=$staging" "/DVERSION=$version" "/DVERSION4=$version4" "/DOUTFILE=$exePath" "/DPAYLOADMB=$payloadMb" $nsi
 if ($LASTEXITCODE -ne 0) { throw "makensis failed (exit $LASTEXITCODE)" }
 if (-not (Test-Path $exePath)) { throw "makensis reported success but $exePath does not exist." }
 

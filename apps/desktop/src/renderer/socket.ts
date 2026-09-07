@@ -75,6 +75,18 @@ export interface SocketEvents {
    * why new features arrive as new events rather than changes to old ones.
    */
   onUpdateAvailable: (p: { version: string }) => void;
+  /**
+   * The server is on its way down to be updated, and will be back in a few
+   * seconds. Arrives immediately before the disconnect, not instead of it --
+   * the reconnect that follows is the ordinary one, and everything already
+   * wired to `onStatus` and `onReconnected` behaves exactly as it does for any
+   * other gap. All this changes is what the status line says while it waits.
+   *
+   * Not guaranteed: a server that is killed outright never sends it. Treat it
+   * as an explanation when it turns up rather than as the thing that tells you
+   * the connection dropped.
+   */
+  onServerRestarting: () => void;
   onStatus: (status: 'connected' | 'disconnected' | 'connecting') => void;
   onReconnected: () => void;
 }
@@ -121,6 +133,7 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('typing:changed', events.onTyping);
   socket.on('voice:participants', events.onVoiceParticipants);
   socket.on('client:update-available', events.onUpdateAvailable);
+  socket.on('server:restarting', () => events.onServerRestarting());
 
   return socket;
 }
