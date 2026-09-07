@@ -18,6 +18,7 @@ import { FilesInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import {
   EditMessageInput,
+  MAX_PINS_PER_CHANNEL,
   MessageHistoryQuery,
   SendMessageInput,
   type Message,
@@ -27,6 +28,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuthGuard, CurrentUser, type SessionUser } from '../auth/auth.guard';
 import { PermissionService } from '../auth/permission.guard';
 import { ChatGateway } from '../gateway/chat.gateway';
+import { MentionsService } from '../mentions/mentions.service';
 import { ZodPipe } from '../common/zod.pipe';
 import { newId } from '../common/ids';
 import {
@@ -50,6 +52,11 @@ const withAuthor = {
       height: true,
     },
   },
+  // Who the message tagged. Read from the rows rather than re-parsed out of
+  // the text, because the rows are the validated answer -- a `<@id>` naming
+  // somebody who is not in the guild was never stored and must not come back
+  // out of history looking like it was.
+  mentions: { select: { userId: true } },
 } as const;
 
 function toDto(row: any): Message {
@@ -67,6 +74,8 @@ function toDto(row: any): Message {
     editedAt: row.editedAt ? row.editedAt.toISOString() : null,
     deletedAt: row.deletedAt ? row.deletedAt.toISOString() : null,
     clientNonce: row.clientNonce ?? null,
+    pinnedAt: row.pinnedAt ? row.pinnedAt.toISOString() : null,
+    mentions: (row.mentions ?? []).map((m: any) => m.userId),
     attachments: (row.attachments ?? []).map((a: any) => ({
       id: a.id,
       fileName: a.fileName,
@@ -88,6 +97,7 @@ export class MessagesController {
     private readonly prisma: PrismaService,
     private readonly permissions: PermissionService,
     private readonly gateway: ChatGateway,
+    private readonly mentions: MentionsService,
   ) {}
 
   /**
@@ -124,6 +134,39 @@ export class MessagesController {
   }
 
   /**
+   * The pinned messages in this channel, newest post first.
+   *
+   * Ordered by message id rather than by when it was pinned: the list is a
+   * reading list, and the thing people look for in it is *when it was said*.
+   * Pinning something from last March would otherwise put it at the top of a
+   * list whose next entry is from this morning.
+   *
+   * Not paged. `MAX_PINS_PER_CHANNEL` is what makes that safe -- the cap is
+   * low enough that the whole list is one query, and that is most of the
+   * reason for having a cap at all.
+   */
+  @Get('pinned')
+  async pinned(
+    @CurrentUser() user: SessionUser,
+    @Param('channelId') channelId: string,
+  ): Promise<Message[]> {
+    if (!(await this.permissions.canInChannel(user.id, channelId, 'channel.read'))) {
+      throw new ForbiddenException('No access to that channel.');
+    }
+
+    const rows = await this.prisma.message.findMany({
+      // A deleted message takes its pin with it. The row survives for the
+      // audit trail; nothing should be able to bring it back onto a board that
+      // everyone in the channel reads.
+      where: { channelId, deletedAt: null, pinnedAt: { not: null } },
+      include: withAuthor,
+      orderBy: { id: 'desc' },
+      take: MAX_PINS_PER_CHANNEL,
+    });
+    return rows.map(toDto);
+  }
+
+  /**
    * Takes JSON as it always did, and multipart when there are files.
    *
    * Upload and send are one request on purpose. The alternative — upload
@@ -157,7 +200,9 @@ export class MessagesController {
     }
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
-      select: { kind: true },
+      // The name is for the notification a tag raises: it has to say which
+      // channel, and the person being tagged may never have opened it.
+      select: { kind: true, name: true },
     });
     if (!channel) throw new NotFoundException('No such channel.');
     if (channel.kind !== 'TEXT') {
@@ -202,8 +247,20 @@ export class MessagesController {
       include: withAuthor,
     });
 
-    const dto = toDto(row);
+    // Resolved after the row exists, because a mention is a row that points at
+    // a message: there is nothing to hang it off until the message is saved.
+    const { pinged } = await this.mentions.sync(
+      row.id,
+      channelId,
+      row.content,
+      user.id,
+    );
+
+    const dto = { ...toDto(row), mentions: pinged };
     this.gateway.broadcastMessage(dto);
+    // After the broadcast, so that anyone with the channel open has already
+    // been given the message their notification is about.
+    this.gateway.notifyMentions(dto, pinged, channel.name);
     return dto;
   }
 
@@ -253,8 +310,27 @@ export class MessagesController {
       include: withAuthor,
     });
 
-    const dto = toDto(row);
+    // An edit can add a name that was not there before, and somebody tagged by
+    // the edit has to hear about it -- typing a name, realising you forgot the
+    // @, and fixing it is how half of all tags get written. Only the ones the
+    // edit added are notified, so correcting a typo does not ping the room
+    // again.
+    const { pinged, newlyPinged } = await this.mentions.sync(
+      row.id,
+      channelId,
+      content,
+      user.id,
+    );
+
+    const dto = { ...toDto(row), mentions: pinged };
     this.gateway.broadcastMessageUpdated(dto);
+    if (newlyPinged.length > 0) {
+      const channel = await this.prisma.channel.findUnique({
+        where: { id: channelId },
+        select: { name: true },
+      });
+      this.gateway.notifyMentions(dto, newlyPinged, channel?.name ?? '');
+    }
     return dto;
   }
 
@@ -295,6 +371,88 @@ export class MessagesController {
     });
 
     this.gateway.broadcastMessageDeleted(id, channelId);
+    return { ok: true };
+  }
+
+  /* ---------------------------------------------------------------- pins */
+
+  /**
+   * Pin a message. Admins only — a pin is the one thing in a channel that
+   * everybody is shown whether they asked or not, so it is a moderator's
+   * decision in the same way an announcement is.
+   */
+  @Post(':id/pin')
+  async pin(
+    @CurrentUser() user: SessionUser,
+    @Param('channelId') channelId: string,
+    @Param('id') id: string,
+  ): Promise<Message> {
+    if (!(await this.permissions.canInChannel(user.id, channelId, 'message.pin'))) {
+      throw new ForbiddenException('Only an admin can pin messages.');
+    }
+
+    const existing = await this.prisma.message.findUnique({
+      where: { id },
+      include: withAuthor,
+    });
+    if (!existing || existing.channelId !== channelId || existing.deletedAt) {
+      throw new NotFoundException('No such message.');
+    }
+    // Already pinned: hand it back untouched rather than re-stamping it. Two
+    // admins clicking at once should not move anything, and `pinnedAt` is a
+    // record of when it went up.
+    if (existing.pinnedAt) return toDto(existing);
+
+    const pinned = await this.prisma.message.count({
+      where: { channelId, deletedAt: null, pinnedAt: { not: null } },
+    });
+    if (pinned >= MAX_PINS_PER_CHANNEL) {
+      throw new BadRequestException(
+        `This channel already has ${MAX_PINS_PER_CHANNEL} pinned messages. Unpin one first.`,
+      );
+    }
+
+    const row = await this.prisma.message.update({
+      where: { id },
+      data: { pinnedAt: new Date(), pinnedById: user.id },
+      include: withAuthor,
+    });
+
+    const dto = toDto(row);
+    this.gateway.broadcastPinChanged(channelId, id, dto.pinnedAt);
+    return dto;
+  }
+
+  /** Unpin. Same permission: what an admin put up, an admin takes down. */
+  @Delete(':id/pin')
+  async unpin(
+    @CurrentUser() user: SessionUser,
+    @Param('channelId') channelId: string,
+    @Param('id') id: string,
+  ) {
+    if (!(await this.permissions.canInChannel(user.id, channelId, 'message.pin'))) {
+      throw new ForbiddenException('Only an admin can unpin messages.');
+    }
+
+    const existing = await this.prisma.message.findUnique({
+      where: { id },
+      select: { id: true, channelId: true, pinnedAt: true },
+    });
+    if (!existing || existing.channelId !== channelId) {
+      throw new NotFoundException('No such message.');
+    }
+    // Not pinned: say so quietly, so two admins clicking at once do not both
+    // see an error for something that ended up the way they wanted.
+    if (!existing.pinnedAt) return { ok: true };
+
+    await this.prisma.message.update({
+      where: { id },
+      // `pinnedById` goes too. It says who pinned the thing that is pinned,
+      // and once nothing is, keeping it would only ever mislead.
+      data: { pinnedAt: null, pinnedById: null },
+    });
+
+    this.gateway.broadcastPinChanged(channelId, id, null);
     return { ok: true };
   }
 }

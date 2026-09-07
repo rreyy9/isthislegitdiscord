@@ -7,6 +7,7 @@ export type Action =
   | 'channel.manage'
   | 'voice.join'
   | 'message.moderate'
+  | 'message.pin'
   | 'member.moderate'
   | 'member.kick'
   | 'member.role'
@@ -16,6 +17,12 @@ export type Action =
 const ADMIN_ONLY: ReadonlySet<Action> = new Set<Action>([
   'channel.manage',
   'message.moderate',
+  // Pinning is its own action rather than part of moderating, because it is
+  // the opposite of one: moderation takes a message away, a pin puts it in
+  // front of everybody. Separate names are what let the two rules move apart
+  // later -- letting members pin is a plausible setting, letting them delete
+  // each other's messages is not.
+  'message.pin',
   'member.moderate',
   'member.kick',
   'member.role',

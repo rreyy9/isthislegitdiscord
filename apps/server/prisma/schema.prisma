@@ -37,6 +37,7 @@ model User {
   attachments Attachment[]
   bans        GuildBan[]         @relation("BannedUser")
   bansIssued  GuildBan[]         @relation("BanIssuer")
+  mentions    MessageMention[]
 
   @@map("user")
 }
@@ -166,11 +167,53 @@ model Message {
   // Echoed back to the sender so an optimistic copy can be de-duplicated.
   clientNonce String?
 
+  // A pin is two nullable columns on the message rather than a join table,
+  // because a message is pinned at most once and the pin has no life of its
+  // own: unpinning is not an event anyone wants a record of, and deleting the
+  // message must take the pin with it -- which here it does, for free.
+  pinnedAt   DateTime?
+  // Who pinned it. A plain id, like `deletedById`: it is an audit note read by
+  // a person looking into something, not something the app joins on.
+  pinnedById String?
+
   attachments Attachment[]
+  mentions    MessageMention[]
 
   // Ids are UUIDv7, so id order is chronological order: this one index serves
   // the cursor pagination in both directions.
   @@index([channelId, id])
+  // "The pins in this channel" -- asked every time the list is opened, and
+  // otherwise a scan of every message the channel has ever held.
+  @@index([channelId, pinnedAt])
+}
+
+/**
+ * One person tagged in one message.
+ *
+ * The markers are already in `Message.content`, so this table stores nothing
+ * that could not be recovered by reading every message ever sent -- which is
+ * the point. "How many unread tags do I have in each channel" is asked on
+ * every launch and every read, and against the text it is a full scan with a
+ * LIKE in it. Here it is one index.
+ *
+ * `channelId` is copied down from the message for the same reason: the query
+ * is per channel, and joining Message to get there would undo the index.
+ * Messages never move between channels, so the copy cannot go stale.
+ */
+model MessageMention {
+  id        String  @id
+  messageId String
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channelId String
+
+  // Tagging someone twice in one message is one tag; the unique constraint is
+  // what makes re-resolving an edit safe to run as a delete and a re-insert.
+  @@unique([messageId, userId])
+  // Ids are UUIDv7, so "unread" is `messageId > lastReadMessageId` and this
+  // index answers it without touching Message at all.
+  @@index([userId, channelId, messageId])
 }
 
 model Attachment {

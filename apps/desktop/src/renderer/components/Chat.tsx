@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
   setToken,
@@ -10,6 +10,18 @@ import {
 } from '../api';
 import { MessageContent } from './MessageContent';
 import {
+  applyMention,
+  matchUsers,
+  mentionName,
+  mentionQuery,
+  parseMentionIds,
+  toMarkup,
+  toPlain,
+  type MentionQuery,
+  type MentionUser,
+} from '../mention-utils';
+import { playPing } from '../ping';
+import {
   connectSocket,
   disconnectSocket,
   joinChannel,
@@ -20,6 +32,7 @@ import {
 import { bridge } from '../bridge';
 import { noteUpdateAvailable } from '../updates';
 import { useVoice, type VoiceSettings } from '../voice';
+import type { NotificationSettings } from '../../preload';
 import {
   ScreenPicker,
   ScreenStage,
@@ -63,6 +76,12 @@ function dayLabel(iso: string) {
 }
 const sameDay = (a: string, b: string) =>
   new Date(a).toDateString() === new Date(b).toDateString();
+/**
+ * "Today at 14:32", "12 March at 09:10". The pin board is read out of order
+ * by definition — the whole list is old messages — so every row there has to
+ * carry its own date rather than lean on a separator above it.
+ */
+const stamp = (iso: string) => `${dayLabel(iso)} at ${timeOf(iso)}`;
 
 /**
  * An indefinite mute is stored as a date in the year 9999, so that every check
@@ -160,6 +179,25 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const [reads, setReads] = useState<Record<string, string>>({});
   /** Newest message id seen per channel, so unread is a comparison of two ids. */
   const [latest, setLatest] = useState<Record<string, string>>({});
+  /**
+   * channelId -> how many unread tags it holds. Kept apart from `reads`
+   * because the two say different things: a channel with new messages is worth
+   * a look eventually, and a channel where somebody has said your name is
+   * worth a look now. One is a dot; this one is a number.
+   */
+  const [mentionCounts, setMentionCounts] = useState<Record<string, number>>({});
+  /** What the app may do when somebody tags you. Persisted in settings.json. */
+  const [notifications, setNotifications] = useState<NotificationSettings>({
+    mentions: true,
+    sound: true,
+  });
+  /**
+   * The tag being typed in the composer, and which row of the list is
+   * selected. Null whenever the popup is closed, which is most of the time.
+   */
+  const [mentionPicker, setMentionPicker] = useState<
+    (MentionQuery & { index: number }) | null
+  >(null);
   /** The message currently open for editing, and its working copy. */
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
@@ -191,6 +229,24 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   } | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [showBans, setShowBans] = useState(false);
+  /**
+   * The pin board: whether it is open, and what is on it.
+   *
+   * Fetched when it is opened rather than on every channel switch. The icon in
+   * the header is there whether or not anything is pinned — the same way
+   * Discord's is — so nothing on screen depends on knowing the answer before
+   * somebody asks for it, and the switch costs one query less.
+   */
+  const [pinsOpen, setPinsOpen] = useState(false);
+  const [pins, setPins] = useState<MessageDto[] | null>(null);
+  const [pinsError, setPinsError] = useState<string | null>(null);
+  /**
+   * Bumped whenever the board is known to be stale — a pin, an unpin, or
+   * somebody else's. State rather than a call, because the socket handlers are
+   * registered once and a loader captured there would be frozen on the channel
+   * that happened to be open at the time.
+   */
+  const [pinsVersion, setPinsVersion] = useState(0);
   /** Set when the server says we were kicked or banned; the app stops here. */
   const [removed, setRemoved] = useState<{
     kind: 'kick' | 'ban';
@@ -209,6 +265,27 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   }, [voice.channelId]);
 
   const msgsRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  /**
+   * Ids chosen from the tag list while writing this message.
+   *
+   * The draft holds names, not ids — it is a plain textarea — so the ids are
+   * worked out again on the way out. That is unambiguous except when two
+   * people answer to the same string, and this is what settles it: the one
+   * actually clicked wins. A ref rather than state because nothing on screen
+   * depends on it, and it is cleared with the draft.
+   */
+  const pickedRef = useRef<Set<string>>(new Set());
+  /**
+   * The exact draft and caret a pick just produced.
+   *
+   * Completing a tag leaves the caret just past "@John Smith ", and walking
+   * back from there finds an `@` followed by a name that matches perfectly —
+   * so the list would reopen on the tag that was just finished. Anything typed
+   * afterwards changes the text or moves the caret, and the list is free
+   * again.
+   */
+  const justPickedRef = useRef<{ text: string; caret: number } | null>(null);
   const activeChannelRef = useRef<string | null>(null);
   const lastSeenIdRef = useRef<string | null>(null);
   const typingSentRef = useRef(false);
@@ -223,6 +300,16 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const saveTimerRef = useRef<number | null>(null);
 
   activeChannelRef.current = activeChannel;
+  /**
+   * The socket handlers are registered once, on mount, so anything they read
+   * has to be read through a ref or it is frozen at whatever it was then —
+   * and these are switches somebody flips while the app is running.
+   */
+  const notificationsRef = useRef(notifications);
+  notificationsRef.current = notifications;
+  /** Same reason: a tag arriving has to resolve names against the live list. */
+  const membersRef = useRef<MemberDto[]>(members);
+  membersRef.current = members;
 
   const activeChannelObj = guilds
     .flatMap((g) => g.channels)
@@ -238,17 +325,82 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const myMutedUntil = myMember?.mutedUntil ?? null;
   const iAmMuted = Boolean(myMutedUntil && new Date(myMutedUntil) > new Date());
 
+  /* ---------------------------------------------------------- mentions */
+
+  /** Everyone who can be tagged: the member list, in the shape the helpers use. */
+  const mentionUsers = useMemo<MentionUser[]>(
+    () => members.map((m) => m.user),
+    [members],
+  );
+
+  /**
+   * A `<@id>` to the name to draw for it.
+   *
+   * Resolved at draw time rather than baked into the message, which is the
+   * whole reason ids travel on the wire: somebody renames themselves and every
+   * message that ever tagged them says the new name, with nothing rewritten.
+   *
+   * Memoised on the member list because it runs once per tag per message on
+   * every render of the list.
+   */
+  const lookupMention = useMemo(() => {
+    const byId = new Map(members.map((m) => [m.user.id, m.user]));
+    return (id: string) => {
+      const user = byId.get(id);
+      if (!user) return null;
+      return { name: mentionName(user), self: id === me.id };
+    };
+  }, [members, me.id]);
+
+  /** One tagged id back to the person, for turning markers into names. */
+  const lookupUser = useCallback(
+    (id: string): MentionUser | null =>
+      members.find((m) => m.user.id === id)?.user ?? null,
+    [members],
+  );
+
+  /** What is in the tag list right now, for the query being typed. */
+  const mentionMatches = useMemo(
+    () => (mentionPicker ? matchUsers(mentionUsers, mentionPicker.query) : []),
+    [mentionPicker, mentionUsers],
+  );
+
   /* ------------------------------------------------------ initial + socket */
 
   useEffect(() => {
     void bridge.getSettings().then((s) => {
       setVoiceSettings(s.voice);
+      setNotifications(s.notifications);
       setLastVoiceChannelId(s.lastVoiceChannelId);
       setLastTextChannelId(s.lastTextChannelId);
       positionsRef.current = s.chatPositions;
       setSettingsReady(true);
     });
   }, []);
+
+  /** Clicking a notification takes you to the message it was about. */
+  useEffect(
+    () => bridge.onNotificationActivate(({ channelId }) => setActiveChannel(channelId)),
+    [],
+  );
+
+  /**
+   * The number on the dock or launcher icon, where the OS draws one.
+   *
+   * Every unread tag across every channel, because that is what an icon badge
+   * means everywhere else: not "something happened", but "this many things are
+   * waiting for you".
+   */
+  useEffect(() => {
+    const total = Object.values(mentionCounts).reduce((a, b) => a + b, 0);
+    void bridge.setBadgeCount(total);
+  }, [mentionCounts]);
+
+  async function updateNotifications(patch: Partial<NotificationSettings>) {
+    const next = { ...notifications, ...patch };
+    setNotifications(next);
+    await bridge.setSettings({ notifications: next });
+  }
 
   /** Persisted in main's settings.json, and applied to a live call at once. */
   async function updateVoiceSettings(patch: Partial<VoiceSettings>) {
@@ -314,6 +466,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
       // until the next person joined or left.
       await loadVoiceState();
       await loadReads(gs);
+      await loadMentions();
     })();
 
     connectSocket({
@@ -354,8 +507,34 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
         ),
       // Deleted messages are removed outright rather than tombstoned: history
       // filters them server-side too, so a reload would not bring them back.
-      onMessageDeleted: ({ id }) =>
-        setMessages((prev) => prev.filter((x) => x.id !== id)),
+      onMessageDeleted: ({ id }) => {
+        setMessages((prev) => prev.filter((x) => x.id !== id));
+        // A deleted message is off the board too. The server already filters
+        // it out of the list; this is what takes it off the one on screen.
+        setPins((prev) => prev?.filter((x) => x.id !== id) ?? prev);
+      },
+      onPinChanged: ({ channelId, messageId, pinnedAt }) => {
+        if (channelId !== activeChannelRef.current) return;
+        setMessages((prev) =>
+          prev.map((x) => (x.id === messageId ? { ...x, pinnedAt } : x)),
+        );
+        // The board is re-asked for rather than patched: an unpin removes a
+        // row this client may never have had, and a pin adds one that may be a
+        // thousand messages further back than anything loaded.
+        setPinsVersion((v) => v + 1);
+      },
+      onMention: ({ message, channelName }) => {
+        // The badge counts what is still unread. A tag in the channel that is
+        // open is not: `onMessage` marks it read as it arrives, so counting it
+        // here would light a number that the next render immediately clears.
+        if (message.channelId !== activeChannelRef.current) {
+          setMentionCounts((prev) => ({
+            ...prev,
+            [message.channelId]: (prev[message.channelId] ?? 0) + 1,
+          }));
+        }
+        announceMention(message, channelName);
+      },
       onMemberUpdated: ({ userId, mutedUntil }) =>
         setMembers((prev) =>
           prev.map((m) => (m.user.id === userId ? { ...m, mutedUntil } : m)),
@@ -393,6 +572,11 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
         void loadMembers();
         void loadVoiceState();
         void loadReads();
+        // Tags that arrived while the socket was down produced no event, so
+        // the counts are re-asked for rather than repaired.
+        void loadMentions();
+        // Same for pins: an event missed while offline cannot be replayed.
+        setPinsVersion((v) => v + 1);
       },
     });
 
@@ -480,6 +664,39 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     return () => window.removeEventListener('click', close);
   }, [accountMenu]);
 
+  // And for the pin board, which is a popover under the header like the rest.
+  useEffect(() => {
+    if (!pinsOpen) return;
+    const close = () => setPinsOpen(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [pinsOpen]);
+
+  /**
+   * Fetch the board while it is open — on opening it, on switching channel
+   * with it open, and whenever `pinsVersion` says it has gone stale.
+   *
+   * The old list is left on screen until the new one lands, so a pin arriving
+   * while somebody is reading does not blank the panel under them.
+   */
+  useEffect(() => {
+    if (!pinsOpen || !activeChannel) return;
+    let cancelled = false;
+    setPinsError(null);
+    (async () => {
+      try {
+        const rows = await api.pins(activeChannel);
+        if (!cancelled) setPins(rows);
+      } catch (e: any) {
+        if (cancelled) return;
+        setPinsError(e?.message ?? 'Could not load the pinned messages.');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pinsOpen, activeChannel, pinsVersion]);
+
   // Errors from a refused action are worth reading, not worth keeping.
   useEffect(() => {
     if (!banner) return;
@@ -529,6 +746,10 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     setTypingUsers({});
     setHasNew(false);
     clearPending();
+    // The board belongs to the channel it was opened from, so it closes with
+    // it rather than hanging over the next one showing the wrong pins.
+    setPinsOpen(false);
+    setPins(null);
     (async () => {
       const anchor = positionsRef.current[activeChannel] ?? null;
       const page = await api.history(activeChannel);
@@ -610,6 +831,59 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     }
   }
 
+  /** Unread tags per channel, straight from the server. */
+  async function loadMentions() {
+    try {
+      const rows = await api.mentions();
+      setMentionCounts(Object.fromEntries(rows.map((r) => [r.channelId, r.count])));
+    } catch {
+      /* the badge is cosmetic; never break chat over it */
+    }
+  }
+
+  /**
+   * Somebody said your name: make it known.
+   *
+   * Three things happen, and they are deliberately separate. The sound plays
+   * whenever tags are audible at all, including for the channel on screen —
+   * that is the point of a ping, and it is the half people actually react to.
+   * The OS notification is held back for a message you are not already looking
+   * at, because a toast about something two inches away is only ever noise.
+   * Whether either is allowed is a setting, since the one thing worse than a
+   * missed tag is one that cannot be switched off.
+   *
+   * The text is the message, trimmed. Notifying without saying what was said
+   * makes people open the app to find out, which is the opposite of the job.
+   */
+  function announceMention(message: MessageDto, channelName: string) {
+    const settings = notificationsRef.current;
+    if (settings.sound) playPing();
+    if (!settings.mentions) return;
+
+    // Already in front of them: the message is on screen and the window has
+    // focus, so there is nothing left to tell them.
+    const looking =
+      message.channelId === activeChannelRef.current && document.hasFocus();
+    if (looking) return;
+
+    const who = message.author.displayName || message.author.username;
+    // The body is what the toast shows, so tags in it are rendered as names
+    // rather than as the ids they travel as.
+    const body = toPlain(message.content, (id) => {
+      const user = membersRef.current.find((m) => m.user.id === id)?.user;
+      return user ?? null;
+    }).trim();
+
+    void bridge.notifyMention({
+      title: `${who} in #${channelName}`,
+      // An image with no caption is still worth a notification; saying so
+      // beats an empty toast.
+      body: body || 'Sent an attachment',
+      channelId: message.channelId,
+      messageId: message.id,
+    });
+  }
+
   /** Tell the server how far we have read, and stop the dot locally at once. */
   async function markRead(channelId: string, messageId: string) {
     setReads((prev) =>
@@ -617,6 +891,14 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
         ? { ...prev, [channelId]: messageId }
         : prev,
     );
+    // Reading a channel is what clears its tags, and it is always the newest
+    // loaded message that gets marked — so there is nothing left above the
+    // marker to still be waiting.
+    setMentionCounts((prev) => {
+      if (!prev[channelId]) return prev;
+      const { [channelId]: _read, ...rest } = prev;
+      return rest;
+    });
     try {
       await api.markRead(channelId, messageId);
     } catch {
@@ -836,7 +1118,10 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   /* ------------------------------------------------------------- sending */
 
   async function send() {
-    const content = draft.trim();
+    // Names become ids here, once, on the way out. The textarea has held plain
+    // text the whole time it was being written, which is what keeps the
+    // composer a textarea; see mention-utils.ts.
+    const content = toMarkup(draft, mentionUsers, pickedRef.current).trim();
     const files = pending.map((p) => p.file);
     // A pasted screenshot with nothing typed is a perfectly good message.
     if ((!content && files.length === 0) || !activeChannel) return;
@@ -855,12 +1140,18 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
       editedAt: null,
       deletedAt: null,
       clientNonce: nonce,
+      // The server will validate these; this is only so the optimistic copy
+      // draws the same pills as the echo that replaces it. Your own id cannot
+      // be in it -- tagging yourself is not a tag.
+      mentions: parseMentionIds(content).filter((id) => id !== me.id),
       attachments: [],
       previews: pending.map((p) => p.preview),
       pending: true,
     };
     setMessages((prev) => [...prev, optimistic]);
     setDraft('');
+    pickedRef.current = new Set();
+    setMentionPicker(null);
     // Previews are shown from the optimistic copy until the echo replaces it.
     const previews = pending.map((p) => p.preview);
     setPending([]);
@@ -889,8 +1180,53 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     }
   }
 
-  function onDraftChange(v: string) {
+  /**
+   * Open, move or close the tag list from wherever the caret now is.
+   *
+   * Driven by the caret rather than by the last keystroke, so it behaves the
+   * same whether the `@` was typed, pasted, or arrived at with an arrow key.
+   * The selected row resets to the top on every change: after another
+   * character the old row is answering a question nobody asked any more.
+   */
+  function syncMentionPicker(text: string, caret: number) {
+    const done = justPickedRef.current;
+    if (done && done.text === text && done.caret === caret) {
+      setMentionPicker(null);
+      return;
+    }
+    justPickedRef.current = null;
+
+    const query = mentionQuery(text, caret);
+    // Nothing matching closes it. That is what stops an "@" in ordinary prose
+    // from leaving a popup hanging over the rest of the sentence.
+    if (!query || matchUsers(mentionUsers, query.query, 1).length === 0) {
+      setMentionPicker(null);
+      return;
+    }
+    setMentionPicker({ ...query, index: 0 });
+  }
+
+  /** Put the chosen name in the draft and remember whose it was. */
+  function chooseMention(user: MentionUser) {
+    if (!mentionPicker) return;
+    const next = applyMention(draft, mentionPicker, user);
+    pickedRef.current.add(user.id);
+    justPickedRef.current = next;
+    setDraft(next.text);
+    setMentionPicker(null);
+    // React has not written the new value yet, so the caret is placed after it
+    // has -- otherwise it lands at the end of the old text.
+    requestAnimationFrame(() => {
+      const box = composerRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(next.caret, next.caret);
+    });
+  }
+
+  function onDraftChange(v: string, caret: number) {
     setDraft(v);
+    syncMentionPicker(v, caret);
     if (!activeChannel) return;
     if (v && !typingSentRef.current) {
       typingSentRef.current = true;
@@ -915,7 +1251,9 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
 
   function beginEdit(m: Msg) {
     setEditingId(m.id);
-    setEditDraft(m.content);
+    // The edit box shows names, the same as the composer does. Editing a
+    // message should not mean editing around a row of ids.
+    setEditDraft(toPlain(m.content, (id) => lookupUser(id)));
   }
 
   function cancelEdit() {
@@ -924,7 +1262,10 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   }
 
   async function saveEdit(m: Msg) {
-    const content = editDraft.trim();
+    // Back to markers, the same conversion `send` does. Compared against the
+    // stored content afterwards, so re-saving an untouched message with tags
+    // in it is still recognised as no change.
+    const content = toMarkup(editDraft, mentionUsers).trim();
     if (content === m.content) return cancelEdit();
     // Emptying a message is how Discord users delete one, so treat it that way
     // rather than bouncing it off the server's "cannot be empty".
@@ -974,6 +1315,52 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
         }
       },
     });
+  }
+
+  /* ----------------------------------------------------------------- pins */
+
+  /**
+   * Refused server-side too; this only decides what the hover row offers. A
+   * pin is the one thing in a channel everybody is shown whether they asked
+   * for it or not, which is why it is an admin's call.
+   */
+  const canPin = (m: Msg) =>
+    iAmAdmin && !m.pending && activeChannelObj?.kind === 'TEXT';
+
+  /**
+   * Pin or unpin, from the hover row or from the board itself.
+   *
+   * Takes a message rather than an id because the board holds messages that
+   * are not in `messages` at all — pinning something from March and then
+   * unpinning it from the panel touches nothing in the list, and the map below
+   * is simply a no-op in that case.
+   */
+  async function togglePin(m: MessageDto) {
+    const wasPinned = Boolean(m.pinnedAt);
+    // Flip it here first; the socket echo confirms it a moment later.
+    setMessages((prev) =>
+      prev.map((x) =>
+        x.id === m.id
+          ? { ...x, pinnedAt: wasPinned ? null : new Date().toISOString() }
+          : x,
+      ),
+    );
+    if (wasPinned) setPins((prev) => prev?.filter((x) => x.id !== m.id) ?? prev);
+
+    try {
+      if (wasPinned) await api.unpinMessage(m.channelId, m.id);
+      else await api.pinMessage(m.channelId, m.id);
+    } catch (e: any) {
+      setMessages((prev) =>
+        prev.map((x) =>
+          x.id === m.id ? { ...x, pinnedAt: m.pinnedAt ?? null } : x,
+        ),
+      );
+      setBanner(e?.message ?? 'Could not change that pin.');
+    }
+    // Either way: on success to pick up what the server actually stored, and
+    // on failure to put back the row that was removed optimistically.
+    setPinsVersion((v) => v + 1);
   }
 
   /* ----------------------------------------------------------- moderation */
@@ -1048,21 +1435,35 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           {guilds.map((g) => (
             <div key={g.id}>
               <div className="sb-section">Text</div>
-              {g.channels.filter((c) => c.kind === 'TEXT').map((c) => (
-                <div
-                  key={c.id}
-                  className={
-                    'chan' +
-                    (c.id === activeChannel ? ' active' : '') +
-                    (isUnread(c.id) ? ' unread' : '')
-                  }
-                  onClick={() => setActiveChannel(c.id)}
-                >
-                  <span className="hash">#</span>
-                  {c.name}
-                  {isUnread(c.id) && <span className="unread-dot" />}
-                </div>
-              ))}
+              {g.channels.filter((c) => c.kind === 'TEXT').map((c) => {
+                const pings = mentionCounts[c.id] ?? 0;
+                return (
+                  <div
+                    key={c.id}
+                    className={
+                      'chan' +
+                      (c.id === activeChannel ? ' active' : '') +
+                      (isUnread(c.id) || pings > 0 ? ' unread' : '')
+                    }
+                    onClick={() => setActiveChannel(c.id)}
+                  >
+                    <span className="hash">#</span>
+                    {c.name}
+                    {/* The number wins over the dot: both say "unread", and
+                        only one of them says somebody wants you. */}
+                    {pings > 0 ? (
+                      <span
+                        className="ping-badge"
+                        title={`${pings} message${pings === 1 ? '' : 's'} mentioning you`}
+                      >
+                        {pings > 99 ? '99+' : pings}
+                      </span>
+                    ) : (
+                      isUnread(c.id) && <span className="unread-dot" />
+                    )}
+                  </div>
+                );
+              })}
               {g.channels.some((c) => c.kind === 'VOICE') && (
                 <>
                   <div className="sb-section">Voice</div>
@@ -1166,10 +1567,39 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
             {activeChannelObj?.kind === 'VOICE' ? '🔊' : '#'}
           </span>
           {activeChannelObj?.name ?? '—'}
+          {/* Always there, whether or not anything is pinned: an icon that
+              came and went with the board's contents would be a control
+              nobody could learn the position of. */}
+          {activeChannelObj?.kind === 'TEXT' && (
+            <button
+              className={'pin-btn' + (pinsOpen ? ' on' : '')}
+              title="Pinned messages"
+              onClick={(e) => {
+                // Or the window listener that closes it would see this very
+                // click and shut it again on the way up.
+                e.stopPropagation();
+                setPinsOpen((open) => !open);
+              }}
+            >
+              📌
+            </button>
+          )}
           <div className={'status-dot ' + status} title={status} />
           <span className="status-label">
             {status === 'connected' ? 'live' : status === 'connecting' ? 'reconnecting…' : 'offline'}
           </span>
+
+          {pinsOpen && activeChannelObj && (
+            <PinsPanel
+              channelName={activeChannelObj.name}
+              pins={pins}
+              error={pinsError}
+              canPin={iAmAdmin}
+              onUnpin={(m) => void togglePin(m)}
+              onClose={() => setPinsOpen(false)}
+              lookupMention={lookupMention}
+            />
+          )}
         </div>
 
         {banner && <div className="banner">{banner}</div>}
@@ -1213,13 +1643,34 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                         <span>{dayLabel(m.createdAt)}</span>
                       </div>
                     )}
-                    <div className={'msg' + (grouped ? ' grouped' : '') + (m.pending ? ' pending' : '')}>
+                    <div
+                      className={
+                        'msg' +
+                        (grouped ? ' grouped' : '') +
+                        (m.pending ? ' pending' : '') +
+                        // Tinted, with a bar down the side. Scrolling back
+                        // through an evening, this is what makes the message
+                        // that was about you findable without reading them all.
+                        //
+                        // Optional, because a server older than this feature
+                        // sends no such field, and a client that assumed it
+                        // would throw on every message in the list rather than
+                        // quietly go without the highlight.
+                        (m.mentions?.includes(me.id) ? ' mentions-me' : '')
+                      }
+                    >
                       {grouped ? (
                         <div className="avatar spacer" />
                       ) : (
                         <div className="avatar">{initials(m.author.displayName || m.author.username)}</div>
                       )}
                       <div className="msg-body">
+                        {/* Above the author line, not inside it: a grouped
+                            message has no author line, and the mark still has
+                            to say which message it is about. */}
+                        {m.pinnedAt && (
+                          <div className="pinned-mark">📌 Pinned</div>
+                        )}
                         {!grouped && (
                           <div className="msg-head">
                             <span className="msg-author">{m.author.displayName || m.author.username}</span>
@@ -1254,6 +1705,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                               content={m.content}
                               attachments={m.attachments}
                               edited={Boolean(m.editedAt)}
+                              lookupMention={lookupMention}
                             />
                             {/* Our own pasted images, shown before the server echo. */}
                             {m.previews?.map((url) => (
@@ -1262,24 +1714,36 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                           </>
                         )}
                       </div>
-                      {editingId !== m.id && (canEdit(m) || canDelete(m)) && (
-                        <div className="msg-actions">
-                          {canEdit(m) && (
-                            <button title="Edit" onClick={() => beginEdit(m)}>
-                              ✎
-                            </button>
-                          )}
-                          {canDelete(m) && (
-                            <button
-                              className="danger"
-                              title={m.author.id === me.id ? 'Delete' : 'Delete as admin'}
-                              onClick={() => askDelete(m)}
-                            >
-                              🗑
-                            </button>
-                          )}
-                        </div>
-                      )}
+                      {editingId !== m.id &&
+                        (canEdit(m) || canPin(m) || canDelete(m)) && (
+                          <div className="msg-actions">
+                            {canPin(m) && (
+                              <button
+                                className={m.pinnedAt ? 'on' : undefined}
+                                title={m.pinnedAt ? 'Unpin' : 'Pin to channel'}
+                                onClick={() => void togglePin(m)}
+                              >
+                                📌
+                              </button>
+                            )}
+                            {canEdit(m) && (
+                              <button title="Edit" onClick={() => beginEdit(m)}>
+                                ✎
+                              </button>
+                            )}
+                            {canDelete(m) && (
+                              <button
+                                className="danger"
+                                title={
+                                  m.author.id === me.id ? 'Delete' : 'Delete as admin'
+                                }
+                                onClick={() => askDelete(m)}
+                              >
+                                🗑
+                              </button>
+                            )}
+                          </div>
+                        )}
                     </div>
                   </div>
                 );
@@ -1329,7 +1793,18 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
               ))}
             </div>
           )}
+          {mentionPicker && mentionMatches.length > 0 && (
+            <MentionPicker
+              matches={mentionMatches}
+              index={mentionPicker.index}
+              onHover={(i) =>
+                setMentionPicker((prev) => (prev ? { ...prev, index: i } : prev))
+              }
+              onPick={chooseMention}
+            />
+          )}
           <textarea
+            ref={composerRef}
             rows={1}
             value={draft}
             placeholder={
@@ -1344,10 +1819,53 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
             disabled={
               !activeChannelObj || activeChannelObj.kind !== 'TEXT' || iAmMuted
             }
-            onChange={(e) => onDraftChange(e.target.value)}
+            onChange={(e) => onDraftChange(e.target.value, e.target.selectionStart)}
             onPaste={onPaste}
-            onBlur={stopTyping}
+            // Moving the caret with the mouse or the arrow keys can land in or
+            // out of a half-typed tag, so the list is re-checked from wherever
+            // the caret ended up rather than only when the text changes.
+            onSelect={(e) => {
+              const box = e.currentTarget;
+              if (document.activeElement === box) {
+                syncMentionPicker(box.value, box.selectionStart);
+              }
+            }}
+            onBlur={() => {
+              stopTyping();
+              setMentionPicker(null);
+            }}
             onKeyDown={(e) => {
+              // While the list is open it owns the keys that move around it,
+              // and nothing else: every other key still types.
+              if (mentionPicker && mentionMatches.length > 0) {
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  const step = e.key === 'ArrowDown' ? 1 : -1;
+                  setMentionPicker((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          // Wraps, so holding one arrow key cannot strand the
+                          // selection at an end of a short list.
+                          index:
+                            (prev.index + step + mentionMatches.length) %
+                            mentionMatches.length,
+                        }
+                      : prev,
+                  );
+                  return;
+                }
+                if (e.key === 'Enter' || e.key === 'Tab') {
+                  e.preventDefault();
+                  chooseMention(mentionMatches[mentionPicker.index]);
+                  return;
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setMentionPicker(null);
+                  return;
+                }
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 void send();
@@ -1496,8 +2014,10 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
       {showSettings && (
         <SettingsModal
           settings={voiceSettings}
+          notifications={notifications}
           voice={voice}
           onChange={(patch) => void updateVoiceSettings(patch)}
+          onNotificationsChange={(patch) => void updateNotifications(patch)}
           onClose={() => setShowSettings(false)}
         />
       )}
@@ -1534,12 +2054,153 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   );
 }
 
+/**
+ * The list that opens when you type `@`.
+ *
+ * Sits in the composer's own box rather than at the caret. A popup that
+ * follows the caret needs the text measured to know where that is, which for a
+ * textarea means rendering a mirror of it off-screen — a lot of machinery for
+ * a box that is two lines tall, where the caret is never far from the left.
+ *
+ * `onMouseDown` rather than `onClick`, because clicking here blurs the
+ * textarea and the blur closes the list: the click would land on nothing.
+ */
+function MentionPicker({
+  matches,
+  index,
+  onHover,
+  onPick,
+}: {
+  matches: MentionUser[];
+  index: number;
+  onHover: (index: number) => void;
+  onPick: (user: MentionUser) => void;
+}) {
+  return (
+    <div className="mention-picker">
+      <div className="mention-picker-head">Members</div>
+      {matches.map((user, i) => (
+        <button
+          key={user.id}
+          className={'mention-row' + (i === index ? ' on' : '')}
+          onMouseEnter={() => onHover(i)}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            onPick(user);
+          }}
+        >
+          <div className="avatar tiny">{initials(mentionName(user))}</div>
+          <span className="mention-row-name">{mentionName(user)}</span>
+          {/* Only when it says something the name does not, which is how you
+              tell two people apart who have picked the same display name. */}
+          {user.displayName && user.displayName !== user.username && (
+            <span className="mention-row-handle">{user.username}</span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** One of our own pasted images, shown until the server echo replaces it. */
 function PreviewImage({ url }: { url: string }) {
   const { imageProps } = useImageActions();
   return (
     <div className="attach">
       <img src={url} alt="" {...imageProps({ src: url, name: 'image' })} />
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------- pin board */
+
+/**
+ * The pinned messages in one channel, as a popover under the header.
+ *
+ * A popover rather than a modal because it is a reference, not a decision:
+ * people open it to check what was agreed, glance, and carry on typing. A
+ * modal would dim the channel behind it and demand to be dismissed, which is
+ * the wrong shape for something read mid-sentence.
+ *
+ * Newest post first, and every row stamped with the date it was *posted* —
+ * not the date it was pinned. What people look for on a board is when the
+ * thing was said; pinning last March's message this morning must not put it
+ * above a message from an hour ago.
+ */
+function PinsPanel({
+  channelName,
+  pins,
+  error,
+  canPin,
+  onUnpin,
+  onClose,
+  lookupMention,
+}: {
+  channelName: string;
+  /** Null until the first load lands; the panel opens before its contents do. */
+  pins: MessageDto[] | null;
+  error: string | null;
+  /** Whether this user may take things off the board. Admins only. */
+  canPin: boolean;
+  onUnpin: (m: MessageDto) => void;
+  onClose: () => void;
+  lookupMention: (id: string) => { name: string; self: boolean } | null;
+}) {
+  return (
+    // The click guard is what keeps the panel open while it is being used:
+    // the window listener that closes it treats every other click as "away".
+    <div className="pins-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="pins-head">
+        <span>Pinned messages</span>
+        <button className="pins-x" title="Close" onClick={onClose}>
+          ×
+        </button>
+      </div>
+      <div className="pins-body">
+        {error && <div className="banner">{error}</div>}
+        {!pins && !error && <div className="hint">Loading…</div>}
+        {pins?.length === 0 && (
+          <div className="pins-empty">
+            <div className="pins-empty-mark">📌</div>
+            <div>Nothing is pinned in #{channelName} yet.</div>
+            {canPin && (
+              <div className="hint">
+                Hover a message and use the pin button to put it here.
+              </div>
+            )}
+          </div>
+        )}
+        {pins?.map((m) => (
+          <div className="pin-row" key={m.id}>
+            <div className="avatar">
+              {initials(m.author.displayName || m.author.username)}
+            </div>
+            <div className="pin-body">
+              <div className="msg-head">
+                <span className="msg-author">
+                  {m.author.displayName || m.author.username}
+                </span>
+                <span className="msg-time">{stamp(m.createdAt)}</span>
+              </div>
+              <MessageContent
+                content={m.content}
+                attachments={m.attachments}
+                edited={Boolean(m.editedAt)}
+                lookupMention={lookupMention}
+              />
+            </div>
+            {canPin && (
+              <button
+                className="pin-unpin"
+                title="Unpin"
+                onClick={() => onUnpin(m)}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

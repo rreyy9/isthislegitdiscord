@@ -168,7 +168,27 @@ export interface MessageDto {
   editedAt: string | null;
   deletedAt: string | null;
   clientNonce: string | null;
+  /**
+   * Who this message tagged, as user ids, resolved and validated by the
+   * server. Never contains the author: tagging yourself is not a tag.
+   *
+   * Absent from a server older than the feature, which is the one direction
+   * this app's compatibility rules do not otherwise cover -- they are written
+   * for an old client against a new server. Read it with `?.`.
+   */
+  mentions?: string[];
+  /**
+   * When an admin pinned this message, or null. Optional for the same reason
+   * `mentions` is: a server older than the feature sends no such field, and
+   * this client has to draw the message anyway.
+   */
+  pinnedAt?: string | null;
   attachments: AttachmentDto[];
+}
+/** Unread tags in one channel. Absent from the list when there are none. */
+export interface ChannelMentionsDto {
+  channelId: string;
+  count: number;
 }
 export interface ChannelReadDto {
   channelId: string;
@@ -279,6 +299,25 @@ export const api = {
       method: 'DELETE',
     }),
 
+  /* --------------------------------------------------------------- pins */
+
+  /**
+   * The pinned messages in a channel, newest post first and never paged —
+   * the server caps how many a channel may hold, which is most of the point
+   * of the cap. Asked for when the list is opened rather than on every
+   * channel switch: the icon in the header is always there regardless.
+   */
+  pins: (channelId: string) =>
+    request<MessageDto[]>(`/api/channels/${channelId}/messages/pinned`),
+  pinMessage: (channelId: string, id: string) =>
+    request<MessageDto>(`/api/channels/${channelId}/messages/${id}/pin`, {
+      method: 'POST',
+    }),
+  unpinMessage: (channelId: string, id: string) =>
+    request<{ ok: boolean }>(`/api/channels/${channelId}/messages/${id}/pin`, {
+      method: 'DELETE',
+    }),
+
   /* --------------------------------------------------------- moderation */
 
   /** `durationMinutes: null` mutes indefinitely. */
@@ -308,6 +347,12 @@ export const api = {
     }),
 
   reads: () => request<ChannelReadDto[]>('/api/reads'),
+  /**
+   * Unread tags per channel. Its own call rather than part of `reads`, which
+   * moves every time the reader scrolls — this moves only when somebody says
+   * your name.
+   */
+  mentions: () => request<ChannelMentionsDto[]>('/api/mentions'),
   markRead: (channelId: string, lastReadMessageId: string) =>
     request<ChannelReadDto>(`/api/channels/${channelId}/read`, {
       method: 'POST',

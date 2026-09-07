@@ -35,6 +35,16 @@ export interface VoiceSettings {
   rejoinLastChannel: boolean;
 }
 
+/**
+ * What the app may do when somebody tags you. Both default on: a ping that
+ * arrives silently did not work. Both are switches, because the only thing
+ * worse than a missed ping is one that cannot be turned off.
+ */
+export interface NotificationSettings {
+  mentions: boolean;
+  sound: boolean;
+}
+
 export interface Settings {
   serverUrl: string;
   /** The voice channel this client was in when it last stopped, if any. */
@@ -48,6 +58,15 @@ export interface Settings {
    */
   chatPositions: Record<string, string>;
   voice: VoiceSettings;
+  notifications: NotificationSettings;
+}
+
+/** One tag, on its way to the OS. See main/notifications.ts. */
+export interface MentionNotice {
+  title: string;
+  body: string;
+  channelId: string;
+  messageId: string;
 }
 
 export interface ScreenSource {
@@ -108,6 +127,35 @@ const bridge = {
     ipcRenderer.on('update:state', handler);
     return () => {
       ipcRenderer.off('update:state', handler);
+    };
+  },
+
+  /* ------------------------------------------------------ notifications */
+
+  /**
+   * Raise an OS notification and get the taskbar noticed.
+   *
+   * Whether a tag deserves one is decided in the renderer, which is the only
+   * side that knows which channel is on screen — a ping for the message you
+   * are reading is noise. Main does the parts a renderer cannot: the toast,
+   * the flashing taskbar button, and raising the window on a click.
+   */
+  notifyMention: (notice: MentionNotice): Promise<boolean> =>
+    ipcRenderer.invoke('notify:mention', notice),
+  /** Unread tags, for the dock or launcher icon where the OS draws one. */
+  setBadgeCount: (count: number): Promise<boolean> =>
+    ipcRenderer.invoke('notify:badge', count),
+  /** Somebody clicked a notification: go to that message. */
+  onNotificationActivate: (
+    cb: (target: { channelId: string; messageId: string }) => void,
+  ): (() => void) => {
+    const handler = (
+      _e: unknown,
+      target: { channelId: string; messageId: string },
+    ) => cb(target);
+    ipcRenderer.on('notification:activate', handler);
+    return () => {
+      ipcRenderer.off('notification:activate', handler);
     };
   },
 

@@ -77,6 +77,15 @@ Content-Type: application/json
 ### Delete a message (author, or an admin of the guild)
 DELETE {{host}}/api/channels/{{channel}}/messages/PASTE_MESSAGE_ID
 
+### Pin a message (admins only)
+POST {{host}}/api/channels/{{channel}}/messages/PASTE_MESSAGE_ID/pin
+
+### The pinned messages in this channel, newest post first
+GET {{host}}/api/channels/{{channel}}/messages/pinned
+
+### Unpin (admins only)
+DELETE {{host}}/api/channels/{{channel}}/messages/PASTE_MESSAGE_ID/pin
+
 ### Create an invite (admins only)
 @guild = {{guilds.response.body.0.id}}
 POST {{host}}/api/guilds/{{guild}}/invites

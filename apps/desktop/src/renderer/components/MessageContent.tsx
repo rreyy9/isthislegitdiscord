@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { attachmentUrl, type AttachmentDto } from '../api';
 import { IMAGE_EXT_RE, URL_RE, youtubeId, youtubeStart } from '../link-utils';
+import { MENTION_RE } from '../mention-utils';
 import { useImageActions } from './ImageViewer';
 
 /**
  * Turning message text into something worth looking at.
  *
  * Deliberately not a markdown renderer. Message text is written by other
- * people, and the whole job here is done by splitting on a URL pattern and
+ * people, and the whole job here is done by splitting on a pattern and
  * building React elements — so there is no path by which message content
  * becomes markup. No dangerouslySetInnerHTML anywhere in this file.
  */
@@ -157,6 +158,45 @@ function Unrenderable({ what }: { what: string }) {
 /** The types this build knows how to put on screen. */
 const RENDERABLE = /^image\/(png|jpeg|gif|webp)$/i;
 
+/* ------------------------------------------------------------ mentions */
+
+/**
+ * One tag, drawn as a pill.
+ *
+ * The name is looked up at the moment of drawing rather than read out of the
+ * message, which is the entire reason the wire format carries an id: somebody
+ * changes their display name and every message that ever tagged them says the
+ * new one, with nothing rewritten and no migration.
+ */
+function Mention({ name, self }: { name: string; self: boolean }) {
+  return <span className={'mention' + (self ? ' self' : '')}>@{name}</span>;
+}
+
+/**
+ * A tag naming somebody this client cannot identify — usually a member who has
+ * since been removed. Named rather than left as raw `<@…>`, which is an id and
+ * tells the reader nothing, and not hidden, which would quietly rewrite what
+ * was said.
+ */
+function UnknownMention() {
+  return (
+    <span className="mention unknown" title="This account is no longer here">
+      @unknown
+    </span>
+  );
+}
+
+/**
+ * Both patterns in one pass.
+ *
+ * Two passes would mean the second one walking over text the first has already
+ * turned into elements — the classic way a link inside a name, or a name
+ * inside a link, comes out mangled. One alternation means every character
+ * belongs to exactly one token. Group 1 is the mention's id; the URL half
+ * captures nothing, so its presence is what tells the two apart.
+ */
+const TOKEN_RE = new RegExp(`${URL_RE.source}|${MENTION_RE.source}`, 'gi');
+
 /* ------------------------------------------------------------- content */
 
 /** Links open in the real browser, never inside the app window. */
@@ -167,28 +207,54 @@ function openExternal(url: string) {
   };
 }
 
+/** How a `<@id>` becomes a name, supplied by whoever has the member list. */
+export interface MentionLookup {
+  (id: string): { name: string; self: boolean } | null;
+}
+
 export function MessageContent({
   content,
   attachments,
   edited = false,
+  lookupMention,
 }: {
   content: string;
   attachments: AttachmentDto[];
   /** Adds the small "(edited)" mark, inline at the end of the text. */
   edited?: boolean;
+  /**
+   * Resolves a tagged id to a name. Omitted — as it is in the update banner
+   * and anywhere else without a member list — tags draw as "@unknown" rather
+   * than as raw markers.
+   */
+  lookupMention?: MentionLookup;
 }) {
   const parts: React.ReactNode[] = [];
   const embeds: React.ReactNode[] = [];
   let last = 0;
   let key = 0;
 
-  for (const match of content.matchAll(URL_RE)) {
-    const url = match[0];
+  for (const match of content.matchAll(TOKEN_RE)) {
+    const whole = match[0];
+    const mentionId = match[1];
     const at = match.index ?? 0;
 
     if (at > last) parts.push(content.slice(last, at));
-    last = at + url.length;
+    last = at + whole.length;
 
+    if (mentionId !== undefined) {
+      const who = lookupMention?.(mentionId) ?? null;
+      parts.push(
+        who ? (
+          <Mention key={`m${key++}`} name={who.name} self={who.self} />
+        ) : (
+          <UnknownMention key={`m${key++}`} />
+        ),
+      );
+      continue;
+    }
+
+    const url = whole;
     parts.push(
       <a key={`l${key++}`} className="link" href={url} onClick={openExternal(url)}>
         {url}

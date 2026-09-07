@@ -169,12 +169,87 @@ button { font-family: inherit; cursor: pointer; }
 .chat-head {
   padding: 13px 18px; border-bottom: 1px solid var(--line); font-weight: 600;
   display: flex; align-items: center; gap: 8px; min-height: 48px;
+  /* The pin board hangs off this, so the header is what it is measured
+     against — no viewport arithmetic, and it moves with the column. */
+  position: relative;
 }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; margin-left: auto; }
 .status-dot.connected { background: var(--ok); }
 .status-dot.connecting { background: var(--warn); }
 .status-dot.disconnected { background: var(--bad); }
 .status-label { font-size: 11.5px; color: var(--dim); font-weight: 400; }
+
+/* ------------------------------------------------------------ pin board */
+
+/* Beside the channel name rather than out by the status dot: it belongs to
+   the channel, and that is where the eye looks for it. */
+.pin-btn {
+  background: none; border: none; color: var(--faint); font-size: 13px;
+  line-height: 1; padding: 4px 5px; border-radius: 5px;
+  /* The emoji is drawn a shade above the text baseline it sits next to. */
+  filter: grayscale(1); opacity: .75;
+}
+.pin-btn:hover { background: var(--panel2); opacity: 1; filter: none; }
+.pin-btn.on { background: var(--panel2); opacity: 1; filter: none; }
+
+/* Anchored under the button, not centred on the screen: a board is read
+   mid-sentence and then dismissed, which is a popover, not a modal. */
+.pins-panel {
+  position: absolute; top: calc(100% + 6px); left: 12px; z-index: 40;
+  width: 420px; max-height: 62vh; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  font-weight: 400; font-size: 14px;
+}
+.pins-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 10px 11px 14px; border-bottom: 1px solid var(--line);
+  font-weight: 600; font-size: 13px;
+}
+.pins-x {
+  margin-left: auto; background: none; border: none; color: var(--dim);
+  font-size: 18px; line-height: 1; padding: 0 6px; border-radius: 5px;
+}
+.pins-x:hover { background: var(--panel2); color: var(--text); }
+.pins-body { overflow-y: auto; padding: 6px; }
+.pins-panel .hint { color: var(--faint); font-size: 11.5px; line-height: 1.45; }
+.pins-panel > .pins-body > .hint { padding: 14px; text-align: center; }
+.pins-panel .banner { margin: 6px 6px 8px; }
+/* Smaller than in the message list: the panel is 420px wide and the avatar is
+   only there to say who, not to be looked at. */
+.pins-panel .avatar { width: 30px; height: 30px; font-size: 12px; }
+
+.pin-row {
+  position: relative; display: flex; gap: 10px; padding: 9px 10px;
+  border-radius: 8px;
+}
+.pin-row:hover { background: var(--panel2); }
+.pin-row + .pin-row { border-top: 1px solid var(--line); }
+.pin-body { min-width: 0; flex: 1; }
+/* Images on the board are thumbnails: the panel is 420px wide and a full-size
+   screenshot would be the only thing in it. */
+.pin-body .attach, .pin-body .embed-img, .pin-body .yt { max-width: 240px; }
+.pin-unpin {
+  align-self: flex-start; background: none; border: none; color: var(--faint);
+  font-size: 17px; line-height: 1; padding: 0 4px; border-radius: 5px;
+  visibility: hidden;
+}
+.pin-row:hover .pin-unpin { visibility: visible; }
+.pin-unpin:hover { background: var(--bad); color: #fff; }
+
+.pins-empty {
+  text-align: center; color: var(--dim); padding: 26px 20px 30px;
+  font-size: 13px;
+}
+.pins-empty-mark { font-size: 26px; filter: grayscale(1); opacity: .6; margin-bottom: 8px; }
+.pins-empty .hint { margin-top: 6px; }
+
+/* On the message itself, above the author line — a grouped message has no
+   author line, and the mark still has to say which message it is about. */
+.pinned-mark {
+  color: var(--faint); font-size: 11px; font-weight: 600;
+  letter-spacing: .2px; margin-bottom: 1px;
+}
 
 /* The wrapper exists so the jump button can be pinned to the bottom of the
    message area: inside .msgs it would scroll away with the messages. */
@@ -358,6 +433,59 @@ button { font-family: inherit; cursor: pointer; }
 }
 .chan.active .unread-dot { background: #fff; }
 
+/* A count, not a dot. Both mean "unread"; only this one means somebody is
+   waiting on you, which is why it is red and why it carries a number. */
+.ping-badge {
+  margin-left: auto; flex: none; min-width: 17px; height: 17px;
+  padding: 0 5px; border-radius: 9px; background: var(--bad); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 17px; text-align: center;
+}
+
+/* ------------------------------------------------------------- mentions */
+.mention {
+  background: rgba(91, 141, 239, .16); color: #a8c2f7;
+  border-radius: 4px; padding: 0 3px; font-weight: 500;
+  /* Selectable with the rest of the message: copying a line that tags someone
+     should copy the name, not skip a hole where it was. */
+  user-select: text;
+}
+/* Your own name, which is the one the eye is looking for. */
+.mention.self { background: rgba(210, 153, 34, .22); color: #f0c674; }
+.mention.unknown { background: var(--panel2); color: var(--faint); }
+
+/* A message that names you, marked so it is findable in a long scroll-back
+   without reading every line. */
+.msg.mentions-me {
+  background: rgba(210, 153, 34, .07);
+  box-shadow: inset 2px 0 0 var(--warn);
+  border-radius: 0 4px 4px 0;
+  padding-left: 8px; margin-left: -8px;
+}
+
+/* The list that opens on "@". Inside the composer box rather than at the
+   caret: measuring a textarea's caret means rendering a mirror of it, which is
+   a lot of machinery for a box two lines tall. */
+.mention-picker {
+  margin-bottom: 6px; max-height: 232px; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  padding: 4px; box-shadow: 0 -6px 20px rgba(0, 0, 0, .35);
+}
+.mention-picker-head {
+  color: var(--faint); font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .4px; padding: 5px 8px 4px; font-weight: 600;
+}
+.mention-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: none; color: var(--text); text-align: left;
+  padding: 5px 8px; border-radius: 6px; font-size: 13.5px;
+}
+/* One highlight for both keyboard and mouse: hovering moves the selection, so
+   there is never a hovered row and a selected row disagreeing about which one
+   Enter would take. */
+.mention-row.on { background: var(--accent-dim); }
+.mention-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-row-handle { margin-left: auto; color: var(--faint); font-size: 11.5px; }
+
 /* A rule with the date sitting in it, rather than a floating label: the line
    is what actually separates the days at a glance. */
 .day-sep {
@@ -430,6 +558,8 @@ button { font-family: inherit; cursor: pointer; }
 }
 .msg-actions button:hover { background: var(--panel2); color: var(--text); }
 .msg-actions button.danger:hover { background: var(--bad); color: #fff; }
+/* Already pinned: the button unpins, and says so by staying lit. */
+.msg-actions button.on { background: var(--panel2); color: var(--text); }
 
 .edited { color: var(--faint); font-size: 11px; }
 

@@ -19,7 +19,7 @@ goes direct to the box; only signalling and the HTTP API go through the proxy.
 - [Running it](#running-it) · [The two installers](#the-two-installers)
 - [Updating the client](#updating-the-client) · [Older clients](#older-clients)
 - [Configuration](#configuration) · [Going public](#going-public) · [Database](#database) · [Retention](#retention)
-- [Voice quality](#voice-quality) · [API](#api)
+- [Voice quality](#voice-quality) · [Mentions](#mentions) · [Pinned messages](#pinned-messages) · [API](#api)
 - [Decisions worth not re-litigating](#decisions-worth-not-re-litigating)
 - [Bugs that cost real time](#bugs-that-cost-real-time)
 - [What is left](#what-is-left)
@@ -774,6 +774,117 @@ candidate works.
 
 ---
 
+## Mentions
+
+Type `@` in the composer and a list of members opens. Arrow keys move, Enter or Tab
+picks, Escape closes, and the list narrows as you type — display name or handle, and
+names with spaces work because the search does not stop at one. Whoever you tag gets a
+desktop notification, a sound, a red count on the channel in the sidebar, and their
+message highlighted when they open it.
+
+**Tags travel as ids, not names.** Message text stores `<@userId>`; the client resolves
+it to a name at the moment it draws the message. That is the whole reason for the
+format: somebody changes their display name and every message that ever tagged them says
+the new one, with nothing rewritten and no migration. Storing the typed name would leave
+old messages tagging a string that now belongs to nobody — or worse, to whoever has
+since taken it.
+
+**The composer is still a plain textarea.** It holds names, exactly as they read, and
+the conversion to markers happens once on the way out (`renderer/mention-utils.ts`,
+pure and tested the same way `link-utils.ts` is). A rich editor would carry the ids
+invisibly and need no conversion, but it would also mean re-implementing selection, undo
+and paste. Two people who answer to the same string are settled by which one you clicked
+in the list; type the name by hand and the tie breaks the same way every time.
+
+**An id in the text is a claim, not a fact.** Anyone can type angle brackets, so the
+server checks every id against the guild before it stores or notifies anything. A marker
+naming somebody who is not a member is left in the text and tags nobody — it draws as
+`@unknown` rather than as a raw id, since hiding it would quietly rewrite what was said.
+Tagging yourself is not a tag: nothing is stored and nothing is sent.
+
+**Notifications go per user, not per channel.** `mention:new` is emitted to the
+`user:<id>` room, because a client only joins the room for the channel on screen — which
+is exactly the case a tag has to reach past. The message rides along, so the toast can
+say what was said without fetching a channel that client has never opened. The sound
+plays whenever tags are audible at all, including for the channel you are looking at;
+the OS notification is held back for a message already in front of you. Both are
+switches under Settings → Notifications, because the only thing worse than a missed ping
+is one that cannot be turned off.
+
+**Unread tags are a table, not a text search.** `MessageMention` stores nothing that
+could not be recovered by reading every message ever sent — it is an index. "How many
+unread tags in each channel" is asked on every launch and after every read, and against
+the text that is a full scan with a `LIKE` in it. Unread is `messageId >
+lastReadMessageId` and nothing else: ids are UUIDv7, so id order is time order and no
+timestamp is involved. Editing a message re-resolves its tags and notifies only the
+people the edit *added*, so fixing a typo does not ping the room twice.
+
+**On Windows, toasts need an identity.** They are addressed to an AppUserModelID, and
+one that does not match an installed Start Menu shortcut is dropped silently — no error,
+no toast. The installed build uses its own id; a build run from source borrows
+Electron's, which has a shortcut. This is the whole explanation for "notifications do
+not work on Windows", and it is set in `main/notifications.ts` before the first window.
+
+The migration adds one table. After pulling this, run:
+
+```bash
+npm run db:migrate
+```
+
+---
+
+## Pinned messages
+
+An admin hovers a message and clicks the pin. It gets a small **Pinned** mark in the
+channel, and a pin icon sits beside the channel name in the header — always, whether or
+not anything is pinned yet. Clicking it opens the board: every pinned message in that
+channel, newest post first, each stamped with when it was *posted*. Admins can take one
+off from the board itself; everybody can read it.
+
+**Pinning is an admin action, reading is not.** It is the one thing in a channel that
+everybody is shown whether they asked for it or not, which makes it the same kind of
+decision as an announcement. It has its own permission (`message.pin`) rather than
+riding on `message.moderate`, because the two are opposites — moderation takes a message
+away, a pin puts it in front of the room — and separate names are what let the rules
+move apart later. Letting members pin is a plausible setting; letting them delete each
+other's messages is not.
+
+**Two nullable columns on `Message`, not a join table.** A message is pinned at most
+once and the pin has no life of its own: nobody wants a record of an unpin, and deleting
+a message has to take its pin with it — which this way it does, with no cascade to
+write. `pinnedById` is a plain id like `deletedById`: an audit note for somebody looking
+into it later, not something the app joins on.
+
+**Ordered by when it was said, not by when it was pinned.** A board is a reading list,
+and what people look for on it is the message, so pinning last March's thread this
+morning must not land it above something from an hour ago. Sorting by id gives that for
+free — ids are UUIDv7 — and it is why the panel stamps every row with its own date
+rather than leaning on a separator.
+
+**Fifty per channel.** A board of two hundred messages is just the channel again, which
+is the real argument; the useful side effect is that the whole list is one unpaged query
+with a bounded answer. Hitting the cap says so and asks for one to come off first.
+
+**A deleted message is off the board.** The pin columns survive on the tombstone, but
+both the list query and every client filter on `deletedAt` — nothing an admin removed
+should come back on the one list everybody reads.
+
+**`pin:changed` goes to the channel room.** Unlike a deletion, which is broadcast to
+everyone because a client caches messages for channels it is not looking at, a pin only
+changes what is drawn for the channel on screen — and that is the one room a client
+joins. The event carries the state, not the message: everyone in that room already has
+it, and anyone scrolled too far back to have it asks for the board when they open it.
+The board is re-fetched rather than patched, since an unpin can remove a row this client
+never had and a pin can add one a thousand messages further back.
+
+The migration adds two columns and an index. After pulling this, run:
+
+```bash
+npm run db:migrate
+```
+
+---
+
 ## API
 
 | Method | Route | Notes |
@@ -789,6 +900,9 @@ candidate works.
 | POST | `/api/channels/:id/messages` | Broadcasts over Socket.IO |
 | PATCH | `/api/channels/:id/messages/:msgId` | Edit — the author only, never an admin |
 | DELETE | `/api/channels/:id/messages/:msgId` | Delete — the author, or a guild admin |
+| GET | `/api/channels/:id/messages/pinned` | The pin board, newest post first. Capped, never paged |
+| POST | `/api/channels/:id/messages/:msgId/pin` | Pin — admins only |
+| DELETE | `/api/channels/:id/messages/:msgId/pin` | Unpin — admins only |
 | POST | `/api/guilds/:id/invites` | Admins only |
 | POST | `/api/guilds/:id/members/:userId/mute` | `{ durationMinutes }`, null for indefinite |
 | POST | `/api/guilds/:id/members/:userId/kick` | Removed; can return with a new invite |
@@ -796,6 +910,7 @@ candidate works.
 | GET/DELETE | `/api/guilds/:id/bans[/:userId]` | List and lift |
 | POST | `/api/channels/:id/voice-token` | LiveKit token, voice channels only |
 | GET | `/api/voice/state` | Who is in which voice channel, right now |
+| GET | `/api/mentions` | Unread tags per channel, for the sidebar badges |
 | POST | `/api/livekit/webhook` | Called by LiveKit, not by clients; JWT-signed |
 | — | `/api/auth/*` | Better Auth's own routes |
 | — | `/api/admin/*` | Stats, users, invites, guilds, channels, messages — ADMIN role |

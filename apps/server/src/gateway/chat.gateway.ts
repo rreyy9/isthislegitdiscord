@@ -256,6 +256,26 @@ export class ChatGateway
   }
 
   /**
+   * Tell people they have been tagged.
+   *
+   * Sent per user rather than to the channel room, and that is the entire
+   * point: a client joins the room for the one channel it has open, so
+   * `message:new` reaches nobody who is looking somewhere else — which is
+   * precisely who a tag is for. The `user:` room covers every window they have
+   * open, so a tag lights up on both their machines.
+   *
+   * The whole message rides along so the client can put the text in a
+   * notification without fetching a channel it has never opened. The author is
+   * dropped by the caller, not here: what counts as tagging yourself is a
+   * question about the message, not about sockets.
+   */
+  notifyMentions(message: Message, userIds: string[], channelName: string) {
+    for (const userId of userIds) {
+      this.server.to(`user:${userId}`).emit('mention:new', { message, channelName });
+    }
+  }
+
+  /**
    * Deletion goes to everyone, not just the channel room: a client only joins
    * the room for the channel it is looking at, and a message deleted in
    * another channel still has to disappear from whatever that client has
@@ -263,6 +283,24 @@ export class ChatGateway
    */
   broadcastMessageDeleted(id: string, channelId: string) {
     this.server.emit('message:deleted', { id, channelId });
+  }
+
+  /**
+   * A message was pinned or unpinned.
+   *
+   * The channel room, not everyone: the pin marker and the pin list are both
+   * drawn for the channel on screen, and a client only joins the room for that
+   * one. Unlike a deletion, nothing a client holds elsewhere goes wrong by not
+   * hearing this.
+   */
+  broadcastPinChanged(
+    channelId: string,
+    messageId: string,
+    pinnedAt: string | null,
+  ) {
+    this.server
+      .to(`channel:${channelId}`)
+      .emit('pin:changed', { channelId, messageId, pinnedAt });
   }
 
   broadcastMemberUpdated(

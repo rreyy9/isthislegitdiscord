@@ -27,6 +27,22 @@ export interface SocketEvents {
     kind: 'kick' | 'ban';
     reason: string | null;
   }) => void;
+  /**
+   * Somebody tagged you. Delivered per user rather than per channel, which is
+   * the point — it has to arrive for a channel this client is not looking at,
+   * and `onMessage` only ever fires for the one it is.
+   */
+  onMention: (p: { message: MessageDto; channelName: string }) => void;
+  /**
+   * A message in the open channel was pinned or unpinned. Per channel rather
+   * than per user: a pin only changes what is drawn for the channel on screen,
+   * which is the one room this client is in.
+   */
+  onPinChanged: (p: {
+    channelId: string;
+    messageId: string;
+    pinnedAt: string | null;
+  }) => void;
   onPresence: (p: { userId: string; online: boolean }) => void;
   onTyping: (p: { channelId: string; userId: string; typing: boolean }) => void;
   onVoiceParticipants: (p: { channelId: string; userIds: string[] }) => void;
@@ -73,7 +89,9 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('message:updated', events.onMessageUpdated);
   socket.on('message:deleted', events.onMessageDeleted);
   socket.on('member:updated', events.onMemberUpdated);
+  socket.on('mention:new', events.onMention);
   socket.on('moderation:removed', events.onRemoved);
+  socket.on('pin:changed', events.onPinChanged);
   socket.on('presence:changed', events.onPresence);
   socket.on('typing:changed', events.onTyping);
   socket.on('voice:participants', events.onVoiceParticipants);

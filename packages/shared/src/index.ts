@@ -64,8 +64,89 @@ export const Message = z.object({
   /** Echoed back so a client can match its optimistic copy and drop the duplicate. */
   clientNonce: z.string().nullable(),
   attachments: z.array(Attachment),
+  /**
+   * Who this message tagged, resolved by the server from the `<@id>` markers
+   * in `content`.
+   *
+   * Sent rather than left for the client to re-parse because the server has
+   * already had to work it out: it checks every id against the guild before
+   * storing it, so this is the validated list and the text is only a claim.
+   * The author is never in it -- tagging yourself is not a tag.
+   */
+  mentions: z.array(z.string()),
+  /**
+   * When an admin pinned this message, or null. A field on the message rather
+   * than a separate list, because that is what it is -- one message is pinned
+   * or it is not, and every place that already carries a message (history, the
+   * socket echo, the pin list itself) then carries its pin state for free.
+   */
+  pinnedAt: z.string().nullable(),
 });
 export type Message = z.infer<typeof Message>;
+
+/* -------------------------------------------------------------- pins */
+
+/**
+ * How many messages one channel may hold pinned.
+ *
+ * A cap rather than none, and a low one on purpose: the list is meant to be
+ * the handful of things worth reading before you say anything, and a pin board
+ * of two hundred messages is just the channel again. Discord settles on fifty
+ * for the same reason, and fifty is also small enough that the list is one
+ * query with no paging.
+ */
+export const MAX_PINS_PER_CHANNEL = 50;
+
+/* ---------------------------------------------------------------- mentions */
+
+/**
+ * A tag, on the wire.
+ *
+ * Message text carries `<@userId>`, not the name that was typed. Names are the
+ * one thing about a person that changes -- somebody sets a nicer display name
+ * and every message that ever tagged them would otherwise be tagging a string
+ * that now belongs to nobody, or worse, to someone else who has since taken
+ * it. The id never moves, so the client resolves it against the member list at
+ * the moment it draws the message and a rename rewrites history for free.
+ *
+ * The angle brackets are not decoration: `@` alone appears in ordinary text
+ * (email addresses, "@ 3pm"), and a delimiter with a closing half is what lets
+ * a name containing spaces be one token.
+ */
+export const MENTION_RE = /<@([A-Za-z0-9_-]{1,64})>/g;
+
+/** The marker for one user id. The only place the format is written down. */
+export function mentionRef(userId: string): string {
+  return `<@${userId}>`;
+}
+
+/**
+ * Every id tagged in a piece of text, in order, without repeats.
+ *
+ * Used by the server to work out who to notify; the ids are unvalidated at
+ * this point, because anyone can type angle brackets. Whether they name a real
+ * member of the guild is a database question, and the server asks it before it
+ * stores or notifies anything.
+ */
+export function parseMentionIds(content: string): string[] {
+  const seen = new Set<string>();
+  // The regex is module-level and global, so `matchAll` is what keeps this
+  // reentrant -- `exec` in a loop would share `lastIndex` between callers.
+  for (const m of content.matchAll(MENTION_RE)) seen.add(m[1]);
+  return [...seen];
+}
+
+/**
+ * Unread tags, per channel. Separate from the unread dot on purpose: a channel
+ * with new messages is worth a look eventually, and a channel where somebody
+ * has said your name is worth a look now. Discord draws one as a dot and the
+ * other as a number, and it is the number people actually respond to.
+ */
+export const ChannelMentions = z.object({
+  channelId: z.string(),
+  count: z.number().int(),
+});
+export type ChannelMentions = z.infer<typeof ChannelMentions>;
 
 /* ------------------------------------------------------------- http inputs */
 
@@ -504,6 +585,40 @@ export interface ServerToClientEvents {
     guildId: string;
     kind: 'kick' | 'ban';
     reason: string | null;
+  }) => void;
+  /**
+   * Somebody tagged you.
+   *
+   * Sent to `user:<id>` rather than to the channel room, because that is the
+   * whole point of a tag: it has to reach you in a channel you are not looking
+   * at, which is exactly the case `message:new` cannot cover -- a client only
+   * joins the room for the channel on screen.
+   *
+   * Carries the message so the client can raise a notification with the text
+   * in it without going back to the server for a channel it has never opened.
+   */
+  'mention:new': (payload: {
+    message: Message;
+    /** For the notification's title; the client may not know this channel. */
+    channelName: string;
+  }) => void;
+  /**
+   * A message in this channel was pinned or unpinned.
+   *
+   * Sent to the channel room, which is exactly the reach it needs: the pin
+   * marker and the pin list are both drawn for the channel on screen, and a
+   * client only joins the room for that one. Nothing off-screen changes when
+   * somebody pins something, so there is nobody else to tell.
+   *
+   * Carries the state rather than the message: every client in that room
+   * already has the message, and the ones that do not -- scrolled far back --
+   * ask for the pin list when they open it.
+   */
+  'pin:changed': (payload: {
+    channelId: string;
+    messageId: string;
+    /** ISO date when it was pinned, null when it was just unpinned. */
+    pinnedAt: string | null;
   }) => void;
   'presence:changed': (payload: { userId: string; online: boolean }) => void;
   'typing:changed': (payload: {

@@ -16,6 +16,7 @@ import { AdminController } from './admin/admin.controller';
 import { ModerationController } from './moderation/moderation.controller';
 import { StorageModule } from './storage/storage.module';
 import { UpdatesModule } from './updates/updates.module';
+import { MentionsModule } from './mentions/mentions.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { UpdatesModule } from './updates/updates.module';
     VoiceModule,
     StorageModule,
     UpdatesModule,
+    MentionsModule,
   ],
   controllers: [
     AppController,

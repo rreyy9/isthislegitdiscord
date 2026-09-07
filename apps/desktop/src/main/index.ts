@@ -18,6 +18,11 @@ import {
   type PttBinding,
 } from './voice-main';
 import { registerUpdater } from './updater';
+import {
+  clearAttention,
+  registerNotifications,
+  setNotificationIdentity,
+} from './notifications';
 
 /**
  * Main process. Deliberately small: no mTLS in this build, so the renderer can
@@ -64,6 +69,20 @@ interface VoiceSettings {
   rejoinLastChannel: boolean;
 }
 
+/**
+ * What the app is allowed to do when somebody tags you.
+ *
+ * Both default on, because a tag that arrives silently is a tag that did not
+ * work — but both are switches, because the one thing worse than missing a
+ * ping is one you cannot turn off.
+ */
+interface NotificationSettings {
+  /** Raise an OS notification and flash the taskbar. */
+  mentions: boolean;
+  /** Play the short two-tone blip. Independent: some people want one, not both. */
+  sound: boolean;
+}
+
 interface Settings {
   serverUrl: string;
   /**
@@ -81,6 +100,7 @@ interface Settings {
    */
   chatPositions: Record<string, string>;
   voice: VoiceSettings;
+  notifications: NotificationSettings;
 }
 
 const defaultSettings: Settings = {
@@ -88,6 +108,7 @@ const defaultSettings: Settings = {
   lastVoiceChannelId: null,
   lastTextChannelId: null,
   chatPositions: {},
+  notifications: { mentions: true, sound: true },
   voice: {
     inputDeviceId: null,
     outputDeviceId: null,
@@ -156,6 +177,10 @@ function loadSettings(): Settings {
       voice: {
         ...defaultSettings.voice,
         ...knownVoiceKeys(migrateVoice(stored.voice)),
+      },
+      notifications: {
+        ...defaultSettings.notifications,
+        ...(stored.notifications ?? {}),
       },
     };
   } catch {
@@ -226,6 +251,10 @@ function createWindow() {
     if (mainWindow === win) mainWindow = null;
   });
 
+  // Looking at the window is the answer to "somebody wants your attention",
+  // so the flashing stops there rather than on a timer.
+  win.on('focus', () => clearAttention(win));
+
   // A link in a message is a URL a friend typed. Handing it to the OS browser
   // keeps it out of this window entirely -- otherwise `window.open` spawns an
   // Electron BrowserWindow with no address bar, which is both a bad way to
@@ -268,6 +297,7 @@ ipcMain.handle('settings:set', (_e, patch: Partial<Settings>) => {
     // at a time, and it has no business forgetting the others.
     chatPositions: { ...current.chatPositions, ...(patch.chatPositions ?? {}) },
     voice: { ...current.voice, ...(patch.voice ?? {}) },
+    notifications: { ...current.notifications, ...(patch.notifications ?? {}) },
   });
   return loadSettings();
 });
@@ -341,6 +371,10 @@ app.whenReady().then(() => {
 
   registerScreenShare(() => mainWindow);
   registerUpdater(() => mainWindow);
+  // Before the first window, because on Windows the identity has to be set
+  // before anything tries to raise a toast.
+  setNotificationIdentity();
+  registerNotifications(() => mainWindow);
   const ptt = registerPushToTalk(() => mainWindow);
   // The global hook keeps the process alive if it is never stopped.
   app.on('before-quit', () => ptt.stopHook());

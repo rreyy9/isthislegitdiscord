@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Track } from 'livekit-client';
-import type { ScreenSource } from '../../preload';
+import type { NotificationSettings, ScreenSource } from '../../preload';
 import { bridge } from '../bridge';
 import {
   listAudioDevices,
@@ -235,7 +235,7 @@ function InputMeter({
   );
 }
 
-type Section = 'devices' | 'input' | 'behaviour';
+type Section = 'devices' | 'input' | 'notifications' | 'behaviour';
 
 /**
  * The nav down the left. Every section carries a sentence saying what it is
@@ -254,6 +254,11 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
     blurb: 'What gets sent, and when. Push-to-talk, sensitivity, and what the microphone does to your voice before anyone hears it.',
   },
   {
+    id: 'notifications',
+    label: 'Notifications',
+    blurb: 'What happens when somebody tags you by name.',
+  },
+  {
     id: 'behaviour',
     label: 'Behaviour',
     blurb: 'What the app does on its own when you open it.',
@@ -262,13 +267,17 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
 
 export function SettingsModal({
   settings,
+  notifications,
   voice,
   onChange,
+  onNotificationsChange,
   onClose,
 }: {
   settings: VoiceSettings;
+  notifications: NotificationSettings;
   voice: Voice;
   onChange: (patch: Partial<VoiceSettings>) => void;
+  onNotificationsChange: (patch: Partial<NotificationSettings>) => void;
   onClose: () => void;
 }) {
   const [section, setSection] = useState<Section>('devices');
@@ -517,6 +526,43 @@ export function SettingsModal({
                   )}
                 </section>
               </>
+            )}
+
+            {section === 'notifications' && (
+              <section className="set-group">
+                <h4>When someone tags you</h4>
+                <label className="row-label">
+                  <input
+                    type="checkbox"
+                    checked={notifications.mentions}
+                    onChange={(e) =>
+                      onNotificationsChange({ mentions: e.target.checked })
+                    }
+                  />
+                  Show a desktop notification
+                </label>
+                <label className="row-label">
+                  <input
+                    type="checkbox"
+                    checked={notifications.sound}
+                    onChange={(e) =>
+                      onNotificationsChange({ sound: e.target.checked })
+                    }
+                  />
+                  Play a sound
+                </label>
+                <div className="hint">
+                  Only for messages that name you — everything else stays a
+                  quiet unread mark. The notification is held back for a message
+                  already on screen in a window you are looking at; the sound is
+                  not, since that is the half people react to.
+                </div>
+                <div className="hint">
+                  Nothing here can override the operating system. If notifications
+                  are switched off for this app in Windows settings, the taskbar
+                  button still flashes and the sound still plays.
+                </div>
+              </section>
             )}
 
             {section === 'behaviour' && (
