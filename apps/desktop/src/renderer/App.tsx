@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api, getToken, initApi, setToken, type Me } from './api';
 import { Login } from './components/Login';
 import { Chat } from './components/Chat';
@@ -36,6 +36,19 @@ export function App() {
     void resolveSession();
   }, []);
 
+  /**
+   * Your own profile, changed from the settings screen or from another machine
+   * signed in as you. Held up here because it is what `me` is: Chat draws from
+   * it, and re-fetching /api/me to learn what this app just saved would be a
+   * round trip to be told something it was already handed.
+   *
+   * Stable, because Chat hands it to the socket handlers and a new identity
+   * every render would tear the socket down and rebuild it every render.
+   */
+  const onMeChanged = useCallback((me: Me) => {
+    setState((prev) => (prev.phase === 'chat' ? { phase: 'chat', me } : prev));
+  }, []);
+
   if (state.phase === 'loading') {
     return <div className="login-wrap"><div className="empty">Loading…</div></div>;
   }
@@ -51,7 +64,11 @@ export function App() {
   // them is somewhere under here.
   return (
     <ImageViewerProvider>
-      <Chat me={state.me} onSignOut={() => setState({ phase: 'login' })} />
+      <Chat
+        me={state.me}
+        onMeChanged={onMeChanged}
+        onSignOut={() => setState({ phase: 'login' })}
+      />
       <UpdateBanner updates={updates} />
     </ImageViewerProvider>
   );

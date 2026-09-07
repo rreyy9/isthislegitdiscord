@@ -14,9 +14,11 @@ import { AttachmentsController } from './attachments/attachments.controller';
 import { ReadsController } from './reads/reads.controller';
 import { AdminController } from './admin/admin.controller';
 import { ModerationController } from './moderation/moderation.controller';
+import { ProfileController } from './profile/profile.controller';
 import { StorageModule } from './storage/storage.module';
 import { UpdatesModule } from './updates/updates.module';
 import { MentionsModule } from './mentions/mentions.module';
+import { ChannelsModule } from './channels/channels.module';
 
 @Module({
   imports: [
@@ -31,6 +33,7 @@ import { MentionsModule } from './mentions/mentions.module';
     StorageModule,
     UpdatesModule,
     MentionsModule,
+    ChannelsModule,
   ],
   controllers: [
     AppController,
@@ -41,6 +44,7 @@ import { MentionsModule } from './mentions/mentions.module';
     ReadsController,
     AdminController,
     ModerationController,
+    ProfileController,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

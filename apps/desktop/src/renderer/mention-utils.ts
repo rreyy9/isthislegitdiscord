@@ -46,6 +46,12 @@ export interface MentionUser {
   id: string;
   username: string;
   displayName: string | null;
+  /**
+   * Optional because the interesting part of a MentionUser is the name: the
+   * picker draws a picture beside it when there is one, and a caller that only
+   * has ids and names is still a perfectly good MentionUser.
+   */
+  image?: string | null;
 }
 
 /** What a person is called. Display name if they set one, handle otherwise. */

@@ -192,11 +192,10 @@ export class MessagesController {
     body: Omit<SendMessageInput, 'channelId'>,
     @UploadedFiles() files?: Express.Multer.File[],
   ): Promise<Message> {
+    // Membership is the whole test. A mute is not checked here on purpose: it
+    // takes away the microphone, not the keyboard.
     if (!(await this.permissions.canInChannel(user.id, channelId, 'channel.write'))) {
-      const until = await this.permissions.mutedUntilInChannel(user.id, channelId);
-      throw new ForbiddenException(
-        until ? 'You are muted in this server.' : 'No access to that channel.',
-      );
+      throw new ForbiddenException('No access to that channel.');
     }
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
@@ -289,13 +288,8 @@ export class MessagesController {
     if (existing.authorId !== user.id) {
       throw new ForbiddenException('You can only edit your own messages.');
     }
-    // Being muted stops you editing too, or a mute would just mean rewriting
-    // the last thing you said over and over.
     if (!(await this.permissions.canInChannel(user.id, channelId, 'channel.write'))) {
-      const until = await this.permissions.mutedUntilInChannel(user.id, channelId);
-      throw new ForbiddenException(
-        until ? 'You are muted in this server.' : 'No access to that channel.',
-      );
+      throw new ForbiddenException('No access to that channel.');
     }
 
     const content = body.content.trim();

@@ -30,13 +30,19 @@ const ADMIN_ONLY: ReadonlySet<Action> = new Set<Action>([
 ]);
 
 /**
- * What a mute actually takes away. Reading and listening stay: a mute is
- * "you cannot say anything", not "you are gone" — that is what a kick is for.
+ * No action is denied by a mute, and that is the rule rather than an omission.
+ *
+ * A mute takes away the microphone and nothing else — see `MuteMemberInput` in
+ * the shared package. It used to be listed here as denying `channel.write` and
+ * `voice.join`, which meant a muted person was thrown out of the call, refused
+ * entry back, and unable to type: three punishments delivered under one name,
+ * none of which anybody asks for when they say "mute them". Voice enforces the
+ * real one where it belongs, on the LiveKit participant, so there is nothing
+ * left for this table to say.
+ *
+ * The mute state is still read here, via `mutedUntilInGuild` and
+ * `mutedUntilInChannel`, because voice needs to know it at join time.
  */
-const DENIED_WHILE_MUTED: ReadonlySet<Action> = new Set<Action>([
-  'channel.write',
-  'voice.join',
-]);
 
 export interface Membership {
   role: 'ADMIN' | 'MEMBER';
@@ -68,7 +74,6 @@ export class PermissionService {
     const member = await this.membership(userId, guildId);
     if (!member) return false;
     if (ADMIN_ONLY.has(action) && member.role !== 'ADMIN') return false;
-    if (DENIED_WHILE_MUTED.has(action) && isMuted(member)) return false;
     return true;
   }
 
@@ -81,14 +86,24 @@ export class PermissionService {
     return this.canInGuild(userId, channel.guildId, action);
   }
 
-  /** When the caller needs to explain *why*, not just that it was refused. */
+  /**
+   * When this person's microphone comes back, or null if it was never taken.
+   *
+   * A date rather than a boolean because the two callers both want to say so:
+   * the voice token puts it in front of the person it applies to, and the
+   * sweep that keeps LiveKit in step compares it against the clock.
+   */
+  async mutedUntilInGuild(userId: string, guildId: string): Promise<Date | null> {
+    const member = await this.membership(userId, guildId);
+    return isMuted(member) ? member!.mutedUntil : null;
+  }
+
   async mutedUntilInChannel(userId: string, channelId: string): Promise<Date | null> {
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
       select: { guildId: true },
     });
     if (!channel) return null;
-    const member = await this.membership(userId, channel.guildId);
-    return isMuted(member) ? member!.mutedUntil : null;
+    return this.mutedUntilInGuild(userId, channel.guildId);
   }
 }

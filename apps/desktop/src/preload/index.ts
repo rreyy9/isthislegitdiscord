@@ -45,10 +45,29 @@ export interface NotificationSettings {
   sound: boolean;
 }
 
+/**
+ * Where the window was when it last closed. Written by main and never by the
+ * renderer, which has no view of the desktop it would need to write it
+ * sensibly — it is here only because it is part of the settings object.
+ */
+export interface WindowBounds {
+  x: number | null;
+  y: number | null;
+  width: number;
+  height: number;
+  maximized: boolean;
+}
+
 export interface Settings {
   serverUrl: string;
+  window: WindowBounds;
   /** The voice channel this client was in when it last stopped, if any. */
   lastVoiceChannelId: string | null;
+  /**
+   * The voice channel an update took somebody out of, to be walked back into
+   * once the new build is up. See main/index.ts.
+   */
+  rejoinAfterUpdate: string | null;
   /** The text channel that was open when the app last closed. */
   lastTextChannelId: string | null;
   /**
@@ -86,10 +105,16 @@ export interface UpdateState {
     | 'available'
     | 'downloading'
     | 'ready'
+    /** Handed over to the installer; the app is on its way out. */
+    | 'installing'
     | 'error';
   version: string | null;
   percent: number;
   message: string | null;
+  /** True when installing will raise a UAC prompt. See main/updater.ts. */
+  elevates: boolean;
+  /** True while this client is in a voice channel. */
+  inCall: boolean;
 }
 
 const bridge = {
@@ -105,6 +130,12 @@ const bridge = {
   /** The running build, from app.getVersion(). */
   getVersion: (): Promise<string> => ipcRenderer.invoke('app:version'),
   /**
+   * True when the installer started this run, rather than a person. Used to
+   * confirm an update once, so a restart that worked says so.
+   */
+  launchedFromUpdate: (): Promise<boolean> =>
+    ipcRenderer.invoke('app:launched-from-update'),
+  /**
    * Point the updater at the server this client is signed in to and ask what
    * it has. The feed follows the address rather than the build, so one binary
    * serves a LAN deployment and the public one.
@@ -113,15 +144,46 @@ const bridge = {
     ipcRenderer.invoke('update:check', serverUrl),
   downloadUpdate: (): Promise<UpdateState> =>
     ipcRenderer.invoke('update:download'),
-  /** Restarts into the new version. Refused while a call is up. */
+  /**
+   * Restarts into the new version. Works from a call too: main leaves the
+   * channel on the way out and the new build walks back into it.
+   */
   installUpdate: (): Promise<boolean> => ipcRenderer.invoke('update:install'),
   updateState: (): Promise<UpdateState> => ipcRenderer.invoke('update:state'),
   /**
-   * Tell main whether a call is up, so it can refuse to restart into an
-   * update mid-conversation.
+   * Tell main whether a call is up. Not a veto: main uses it to leave the
+   * channel properly on the way into an update, and to say what a restart
+   * will do to the call before the button is pressed.
    */
   setInCall: (value: boolean): Promise<boolean> =>
     ipcRenderer.invoke('update:in-call', value),
+  /**
+   * Main, asking for the voice channel to be left before the process is taken
+   * away. The handler is expected to call `voiceLeftForUpdate` when it is out
+   * -- main waits for that, because being killed mid-call leaves a ghost in
+   * the room until the server times it out.
+   */
+  onLeaveVoiceForUpdate: (cb: () => void): (() => void) => {
+    const handler = () => cb();
+    ipcRenderer.on('update:leave-voice', handler);
+    return () => {
+      ipcRenderer.off('update:leave-voice', handler);
+    };
+  },
+  /** The answer to `onLeaveVoiceForUpdate`. */
+  voiceLeftForUpdate: (): Promise<boolean> =>
+    ipcRenderer.invoke('update:voice-left'),
+  /**
+   * Main, saying the install did not happen after all -- so whoever was taken
+   * out of a call for it is owed it back.
+   */
+  onRejoinVoiceAfterUpdate: (cb: () => void): (() => void) => {
+    const handler = () => cb();
+    ipcRenderer.on('update:rejoin-voice', handler);
+    return () => {
+      ipcRenderer.off('update:rejoin-voice', handler);
+    };
+  },
   onUpdateState: (cb: (state: UpdateState) => void): (() => void) => {
     const handler = (_e: unknown, state: UpdateState) => cb(state);
     ipcRenderer.on('update:state', handler);

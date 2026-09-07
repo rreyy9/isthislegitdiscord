@@ -14,6 +14,39 @@ body {
 input, textarea { font-family: inherit; user-select: text; }
 button { font-family: inherit; cursor: pointer; }
 
+/* ---------------------------------------------------------- scrollbars */
+/*
+ * Chromium's default scrollbar is a light-grey slab that belongs to a white
+ * page, and it appears on every list in the app -- channels, members, message
+ * history, the settings panes -- which made it the most visible thing in the
+ * window that had never been designed.
+ *
+ * These are the ::-webkit- pseudo-elements rather than the standard
+ * `scrollbar-width` / `scrollbar-color` pair, and the two cannot be combined:
+ * Chromium ignores the pseudo-elements entirely as soon as `scrollbar-color`
+ * is set anywhere up the tree. The pseudo-elements are the ones that can
+ * express a hover state, which is what makes a thin bar findable. Electron
+ * means Chromium is the only engine this has to satisfy.
+ */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+/* Transparent, not a colour: the track then takes whatever panel it is over,
+   and one rule is right in the sidebar, the message list and a modal alike. */
+::-webkit-scrollbar-track { background: transparent; }
+/*
+ * The border is transparent and clipped to the padding box, which is what
+ * insets the thumb from the edge without a second element to do it -- so the
+ * bar reads as 6px of thumb inside a 10px lane, and the full lane is still
+ * there to be grabbed.
+ */
+::-webkit-scrollbar-thumb {
+  background: var(--line); border-radius: 8px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:active { background: var(--dim); background-clip: padding-box; }
+/* Where a vertical and a horizontal bar meet; grey by default, and obvious. */
+::-webkit-scrollbar-corner { background: transparent; }
+
 /* --------------------------------------------------------------- login */
 .login-wrap { height: 100%; display: flex; align-items: center; justify-content: center; }
 .login {
@@ -51,7 +84,18 @@ button { font-family: inherit; cursor: pointer; }
 }
 .sb-scroll { overflow-y: auto; flex: 1; padding: 8px; }
 .sb-section { color: var(--faint); font-size: 11px; text-transform: uppercase;
-  letter-spacing: .5px; padding: 12px 8px 5px; font-weight: 600; }
+  letter-spacing: .5px; padding: 12px 8px 5px; font-weight: 600;
+  display: flex; align-items: center; justify-content: space-between; }
+/* Faint until the section is hovered: an admin knows it is there, and the rest
+   of the time a sidebar of channels is not a sidebar of buttons. */
+.sb-add {
+  background: none; border: 0; color: var(--faint); cursor: pointer;
+  font-size: 16px; line-height: 1; padding: 0 2px; opacity: 0;
+  transition: opacity .12s, color .12s;
+}
+.sb-section:hover .sb-add { opacity: 1; }
+.sb-add:hover { color: var(--text); }
+.sb-add:focus-visible { opacity: 1; }
 .chan {
   display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 6px;
   color: var(--dim); cursor: pointer; font-size: 14.5px;
@@ -296,7 +340,18 @@ button { font-family: inherit; cursor: pointer; }
 /* -------------------------------------------------------------- members */
 .mem { display: flex; align-items: center; gap: 9px; padding: 5px 8px; border-radius: 6px; }
 .mem .avatar { width: 30px; height: 30px; font-size: 12px; }
+/* The name and the last-seen line stack; min-width:0 is what lets the name
+   ellipsize instead of shoving the presence dot off the end of the row. */
+.mem-text { flex: 1; min-width: 0; }
 .mem .mname { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* --dim rather than --faint, which is what a line this size would otherwise
+   take: the only rows that draw it are offline ones, and those are already
+   at 45% opacity. Opacity multiplies down the tree, so a child cannot undo
+   it -- the colour has to start brighter instead. */
+.mem-seen {
+  font-size: 10.5px; color: var(--dim); line-height: 1.25; margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .mem.offline { opacity: .45; }
 .mem .pdot { width: 8px; height: 8px; border-radius: 50%; margin-left: auto; }
 .mem .pdot.on { background: var(--ok); }
@@ -345,6 +400,13 @@ button { font-family: inherit; cursor: pointer; }
   border: 1px dashed var(--line); border-radius: 5px; padding: 3px 6px; text-align: center;
 }
 .vp-ptt.live { color: var(--ok); border-color: var(--ok); border-style: solid; }
+/* An admin took the microphone. Warn-coloured rather than error-coloured:
+   nothing has gone wrong, and it is not a failure to be dismissed. */
+.vp-gagged {
+  margin-top: 6px; font-size: 11px; color: var(--warn);
+  border: 1px solid var(--warn); border-radius: 5px; padding: 3px 6px;
+  text-align: center;
+}
 .vp-buttons { display: flex; gap: 6px; margin-top: 8px; }
 .vp-buttons button {
   flex: 1; background: var(--panel2); border: 1px solid var(--line);
@@ -782,9 +844,100 @@ button { font-family: inherit; cursor: pointer; }
 }
 .upd-ready { border-color: var(--accent); }
 .upd-error { border-color: var(--bad); }
+.upd-done { border-color: var(--ok); }
 .upd-why { color: var(--dim); font-size: 12px; }
+/* A real bar rather than a bare percentage: a download that has stalled looks
+   identical to one that is slow when the only sign of it is a number. */
+.upd-bar {
+  flex: 1; min-width: 80px; height: 4px; border-radius: 3px;
+  background: var(--panel); overflow: hidden;
+}
+.upd-bar > span {
+  display: block; height: 100%; border-radius: 3px;
+  background: var(--accent); transition: width .2s linear;
+}
 .upd-go {
   background: var(--accent); border: 1px solid var(--accent); color: #fff;
   padding: 5px 12px; border-radius: 6px; font-size: 12.5px; white-space: nowrap;
 }
 .upd-go:hover { filter: brightness(1.1); }
+
+/* --------------------------------------------------------------- avatars */
+/* The picture fills the circle the initials would have sat in, so every size
+   the avatar is drawn at works without a second rule per size. */
+.avatar-img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+
+/* --------------------------------------------------------------- profile */
+.profile-name { display: flex; gap: 8px; margin-top: 11px; max-width: 420px; }
+.profile-name > input {
+  flex: 1; min-width: 0; background: var(--panel); border: 1px solid var(--line);
+  color: var(--text); padding: 7px 10px; border-radius: 6px; font-size: 13.5px;
+}
+.profile-name > input:focus { outline: none; border-color: var(--accent); }
+.profile-save {
+  flex: none; background: var(--accent); border: 1px solid var(--accent);
+  color: #fff; padding: 6px 16px; border-radius: 6px; font-size: 13px;
+}
+/* Nothing to save is the normal state of this button, so it has to look
+   settled rather than broken. */
+.profile-save:disabled { background: var(--panel2); border-color: var(--line); color: var(--faint); }
+
+.profile-avatar { display: flex; align-items: center; gap: 16px; margin-top: 12px; }
+.profile-avatar-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.profile-avatar-actions button {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  padding: 6px 14px; border-radius: 6px; font-size: 13px;
+}
+.profile-avatar-actions button:hover:not(:disabled) { background: var(--line); }
+.profile-avatar-actions button:disabled { color: var(--faint); }
+.profile-remove { color: var(--bad) !important; }
+
+.profile-msg { margin-top: 14px; font-size: 12.5px; }
+.profile-msg.bad { color: var(--bad); }
+.profile-msg.ok { color: var(--ok); }
+
+/* ------------------------------------------------------------ avatar crop */
+.modal.crop { width: 340px; padding: 16px 18px 18px; }
+/* The square is what gets uploaded; the ring over it is what will be seen.
+   Showing the corners rather than cropping them off is the difference between
+   "this is the picture" and "this is the picture, and here is the part of it
+   that shows". */
+.crop-stage {
+  position: relative; width: 256px; height: 256px; margin: 14px auto 0;
+  border-radius: 8px; overflow: hidden; background: var(--panel);
+  cursor: grab; touch-action: none;
+}
+.crop-stage:active { cursor: grabbing; }
+.crop-canvas { display: block; width: 256px; height: 256px; }
+.crop-mask {
+  position: absolute; inset: 0; pointer-events: none; border-radius: 8px;
+  box-shadow: inset 0 0 0 999px rgba(0,0,0,.55);
+  -webkit-mask: radial-gradient(circle at 50% 50%, transparent 127px, #000 128px);
+  mask: radial-gradient(circle at 50% 50%, transparent 127px, #000 128px);
+}
+.crop-zoom {
+  display: flex; align-items: center; gap: 10px; margin-top: 14px;
+  font-size: 12.5px; color: var(--dim);
+}
+.crop-zoom > .slider { flex: 1; }
+.crop-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.crop-actions button {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  padding: 6px 16px; border-radius: 6px; font-size: 13px;
+}
+.crop-go { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
+.crop-go:disabled { opacity: .6; }
+
+/* The name field in the channel dialog, with the # or speaker sitting inside
+   it the way it does in the sidebar -- so what is being typed looks like the
+   row it is going to become. */
+.channel-name-field {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 0 9px;
+}
+.channel-name-field .hash { color: var(--faint); font-size: 14px; }
+.channel-name-field input {
+  flex: 1; background: none; border: 0; outline: none;
+  color: var(--text); font: inherit; padding: 9px 0;
+}

@@ -330,6 +330,73 @@ if ($SkipDependencies) {
     Invoke-Step 'console: npm install --omit=dev' $consoleOut 'npm' @('install', '--omit=dev', '--no-audit', '--no-fund')
 }
 
+# ---------------------------------------------------------------- 4b. pruning
+
+# npm has just installed a correct tree. It is also close to three times larger
+# than the server needs, and every megabyte is paid for twice: once in the
+# download, and again unpacking it onto a fresh box.
+#
+# Two sources, both measured against this tree rather than guessed at:
+#
+#   The staged manifest carries prisma the CLI, so install.ps1 can apply
+#   migrations on the target. That one dependency also drags in Prisma Studio's
+#   React front end and `prisma dev`'s embedded Postgres-compiled-to-WASM,
+#   neither of which a server box will ever run. A runtime-only install of the
+#   same twenty dependencies is 149 MB. With the CLI it is 405 MB.
+#
+#   @prisma/client inlines a base64 WASM query compiler per database engine.
+#   The datasource is postgresql; the SQL Server, CockroachDB, MySQL and SQLite
+#   compilers are 52 MB of engines this schema cannot target.
+#
+# Nothing here is a judgement call about what looks unused. A clean
+# `npm install --omit=dev` of only the runtime dependencies installs none of
+# these packages at all -- they arrive with the CLI and leave with it. Verified
+# further by pruning a staged tree and re-running both halves: `prisma migrate
+# status` still loaded the config, the schema and the migration engine and got
+# as far as connecting, and the generated client still compiled and ran a query.
+# If a future Prisma moves something into this set, migrations fail loudly
+# during install rather than quietly at runtime, which is the failure mode to
+# want.
+
+if (-not $SkipDependencies) {
+    Say ""
+    Say "Pruning the staged tree"
+
+    $before = Get-ChildItem $serverOut -Recurse -File | Measure-Object -Property Length -Sum
+
+    # Whole packages nothing but `prisma studio` and `prisma dev` reach for.
+    # typescript is on the list because prisma7.config.ts is TypeScript, which
+    # reads as needing the compiler -- it does not. The config loader transpiles
+    # it with jiti, and `prisma migrate status` behaves identically without it.
+    $cliOnly = @(
+        '@prisma\studio-core', '@prisma\dev', '@electric-sql',
+        'react-dom', 'react', 'scheduler', 'elkjs', '@visx', 'remeda',
+        'typescript'
+    )
+    foreach ($name in $cliOnly) {
+        $path = Join-Path $serverOut "node_modules\$name"
+        if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+    }
+
+    # Query compilers for every engine except ours.
+    $runtimeDir = Join-Path $serverOut 'node_modules\@prisma\client\runtime'
+    if (Test-Path $runtimeDir) {
+        Get-ChildItem $runtimeDir -File -Filter 'query_compiler*' |
+            Where-Object { $_.Name -notlike '*postgresql*' } |
+            Remove-Item -Force
+    }
+
+    # Source maps. Nothing on the target reads them, and there are three
+    # thousand of them -- the unpack pays for that in file handles as much as
+    # in bytes.
+    Get-ChildItem (Join-Path $serverOut 'node_modules') -Recurse -File -Filter '*.map' |
+        Remove-Item -Force
+
+    $after   = Get-ChildItem $serverOut -Recurse -File | Measure-Object -Property Length -Sum
+    $savedMb = [math]::Round(($before.Sum - $after.Sum) / 1MB, 1)
+    Say "  removed $savedMb MB across $($before.Count - $after.Count) files"
+}
+
 # ------------------------------------------------------------------- 5. readme
 
 $readme = @"

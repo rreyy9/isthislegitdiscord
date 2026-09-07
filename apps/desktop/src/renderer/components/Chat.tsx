@@ -3,10 +3,12 @@ import {
   api,
   setToken,
   type BanDto,
+  type ChannelDto,
   type GuildDto,
   type MemberDto,
   type MessageDto,
   type Me,
+  type PublicUserDto,
 } from '../api';
 import { MessageContent } from './MessageContent';
 import {
@@ -40,6 +42,7 @@ import {
   UserVolumeMenu,
   VoicePanel,
 } from './Voice';
+import { Avatar } from './Avatar';
 import { useImageActions } from './ImageViewer';
 import { NetworkButton } from './NetworkStats';
 
@@ -52,9 +55,6 @@ type Status = 'connected' | 'disconnected' | 'connecting';
  */
 type Msg = MessageDto & { pending?: boolean; previews?: string[] };
 
-function initials(name: string) {
-  return name.slice(0, 2).toUpperCase();
-}
 function timeOf(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
@@ -89,11 +89,16 @@ const stamp = (iso: string) => `${dayLabel(iso)} at ${timeOf(iso)}`;
  */
 const isForever = (iso: string) => new Date(iso).getFullYear() > 9000;
 
+/**
+ * What a mute says. "Microphone", explicitly, every time it is written: the
+ * word "muted" on its own reads as "silenced everywhere", which is what this
+ * used to do and no longer does.
+ */
 function muteLabel(iso: string) {
-  if (isForever(iso)) return 'Muted indefinitely';
+  if (isForever(iso)) return 'Microphone muted indefinitely';
   const d = new Date(iso);
   const sameDayAsNow = d.toDateString() === new Date().toDateString();
-  return `Muted until ${
+  return `Microphone muted until ${
     sameDayAsNow
       ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : d.toLocaleString([], {
@@ -103,6 +108,48 @@ function muteLabel(iso: string) {
           minute: '2-digit',
         })
   }`;
+}
+
+/**
+ * How long ago somebody was last here, in the smallest number of characters
+ * that answers the question.
+ *
+ * Coarse on purpose, and coarser the further back it goes: under a name in a
+ * narrow column, "2h" is the whole of what anyone wants to know, and the exact
+ * minute of an absence three days old is noise. Anything past a week stops
+ * being a duration and becomes a date, because "23d" is not something people
+ * read as a length of time.
+ *
+ * `now` is passed in rather than read here so that every row in one render
+ * measures from the same instant, and so the caller controls how often the
+ * whole column re-renders.
+ */
+function lastSeenLabel(iso: string, now: number): string {
+  const seconds = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString([], { day: 'numeric', month: 'short' });
+}
+
+/**
+ * A clock that ticks once a minute.
+ *
+ * The member list draws durations, and a duration that was rendered once is
+ * wrong a minute later. A minute is also the resolution of the shortest label
+ * it produces, so nothing finer would show.
+ */
+function useMinuteClock(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(t);
+  }, []);
+  return now;
 }
 
 /** The menu is drawn against the viewport, so its box has to be known up front. */
@@ -128,9 +175,20 @@ interface Confirmation {
   run: () => Promise<void>;
 }
 
-export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
+export function Chat({
+  me,
+  onMeChanged,
+  onSignOut,
+}: {
+  me: Me;
+  /** Your own profile changed — here, or on another machine you are signed in on. */
+  onMeChanged: (me: Me) => void;
+  onSignOut: () => void;
+}) {
   const [guilds, setGuilds] = useState<GuildDto[]>([]);
   const [members, setMembers] = useState<MemberDto[]>([]);
+  /** Drives the "last seen" durations in the member list; see useMinuteClock. */
+  const now = useMinuteClock();
   const [activeChannel, setActiveChannel] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -157,6 +215,10 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const [settingsReady, setSettingsReady] = useState(false);
   /** The voice channel this client was in when it last stopped, if any. */
   const [lastVoiceChannelId, setLastVoiceChannelId] = useState<string | null>(
+    null,
+  );
+  /** A call an update interrupted, owed back on this launch. See below. */
+  const [rejoinAfterUpdate, setRejoinAfterUpdate] = useState<string | null>(
     null,
   );
   /** The text channel that was open when the app last closed, if any. */
@@ -227,6 +289,22 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     x: number;
     y: number;
   } | null>(null);
+  /**
+   * Admin only. Right-click menu on a channel row, and the dialog behind it.
+   * Creating and renaming share one dialog because they are the same form —
+   * a name, and for a new one the kind, which the section it was started from
+   * has already decided.
+   */
+  const [channelMenu, setChannelMenu] = useState<{
+    channel: ChannelDto;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [channelEdit, setChannelEdit] = useState<
+    | { mode: 'create'; guildId: string; kind: ChannelDto['kind'] }
+    | { mode: 'rename'; channel: ChannelDto }
+    | null
+  >(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [showBans, setShowBans] = useState(false);
   /**
@@ -255,14 +333,86 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   /** A refused moderation action, shown briefly rather than swallowed. */
   const [banner, setBanner] = useState<string | null>(null);
 
-  const voice = useVoice(voiceSettings);
+  /**
+   * Our own row in the member list is where the client learns both its role
+   * and its mute — there is no separate "who am I allowed to do things to"
+   * call, and every check the UI makes is repeated on the server anyway.
+   *
+   * Read this early because the voice hook needs the mute: it decides whether
+   * to open the microphone at all, and the answer has to be ready before the
+   * first render that could join a call.
+   */
+  const myMember = members.find((m) => m.user.id === me.id);
+  const iAmAdmin = myMember?.role === 'ADMIN';
+  const myMutedUntil = myMember?.mutedUntil ?? null;
+  /**
+   * An admin has taken our microphone away.
+   *
+   * The server is what actually enforces it — the join token carries no right
+   * to publish audio — so this is not the enforcement. It is what stops the
+   * client from opening the capture device and offering a track that would be
+   * refused, and what puts a reason on screen instead of a mic button that
+   * looks live and changes nothing.
+   */
+  const iAmMuted = Boolean(myMutedUntil && new Date(myMutedUntil) > new Date());
 
-  // Main refuses to restart into an update while a call is up: doing it
-  // mid-conversation drops everybody else's audio with no warning. Installing
-  // on quit is unaffected, because quitting is already leaving the call.
+  const voice = useVoice(voiceSettings, iAmMuted);
+
+  // Main needs to know, because an update that lands mid-call has to leave the
+  // channel properly before the process is taken away — and because the
+  // banner says so before the button is pressed.
   useEffect(() => {
     void bridge.setInCall(voice.channelId !== null);
   }, [voice.channelId]);
+
+  /**
+   * The channel an update took us out of, held here as well as in settings.
+   *
+   * On disk it is what the new build reads on the way back up. In memory it is
+   * what puts us back if the install never happens — a declined UAC prompt
+   * leaves this app running, and it would be a poor trade to have quietly
+   * dropped somebody out of a call for an update that did not occur.
+   */
+  const leftForUpdateRef = useRef<string | null>(null);
+
+  /**
+   * Leave the call on main's say-so, and answer when it is done.
+   *
+   * The answer is the point: main is waiting on it, because a process killed
+   * mid-call leaves a participant sitting in the room until LiveKit times the
+   * connection out. `voice.leave` awaits the disconnect, so by the time this
+   * replies, the channel really is empty of us.
+   */
+  useEffect(
+    () =>
+      bridge.onLeaveVoiceForUpdate(() => {
+        void (async () => {
+          const channelId = voice.channelId;
+          leftForUpdateRef.current = channelId;
+          if (channelId) {
+            // Written before the leave rather than after: this is the record
+            // the new build reads, and the app may be killed at any point once
+            // main has its answer.
+            await bridge.setSettings({ rejoinAfterUpdate: channelId });
+            await voice.leave();
+          }
+          await bridge.voiceLeftForUpdate();
+        })();
+      }),
+    [voice.channelId, voice.leave],
+  );
+
+  /** The install fell through; put back the call it was given up for. */
+  useEffect(
+    () =>
+      bridge.onRejoinVoiceAfterUpdate(() => {
+        const channelId = leftForUpdateRef.current;
+        leftForUpdateRef.current = null;
+        void bridge.setSettings({ rejoinAfterUpdate: null });
+        if (channelId) void voice.join(channelId);
+      }),
+    [voice.join],
+  );
 
   const msgsRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -287,6 +437,12 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
    */
   const justPickedRef = useRef<{ text: string; caret: number } | null>(null);
   const activeChannelRef = useRef<string | null>(null);
+  /**
+   * `loadReads` is redeclared every render, and the socket handlers are
+   * registered once -- so a guild refresh triggered by a socket event has to
+   * reach the current one through a ref, not the one that existed at mount.
+   */
+  const loadReadsRef = useRef<(gs?: GuildDto[]) => Promise<void>>(async () => {});
   const lastSeenIdRef = useRef<string | null>(null);
   const typingSentRef = useRef(false);
   /**
@@ -314,16 +470,6 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const activeChannelObj = guilds
     .flatMap((g) => g.channels)
     .find((c) => c.id === activeChannel);
-
-  /**
-   * Our own row in the member list is where the client learns both its role
-   * and its mute — there is no separate "who am I allowed to do things to"
-   * call, and every check the UI makes is repeated on the server anyway.
-   */
-  const myMember = members.find((m) => m.user.id === me.id);
-  const iAmAdmin = myMember?.role === 'ADMIN';
-  const myMutedUntil = myMember?.mutedUntil ?? null;
-  const iAmMuted = Boolean(myMutedUntil && new Date(myMutedUntil) > new Date());
 
   /* ---------------------------------------------------------- mentions */
 
@@ -372,6 +518,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
       setVoiceSettings(s.voice);
       setNotifications(s.notifications);
       setLastVoiceChannelId(s.lastVoiceChannelId);
+      setRejoinAfterUpdate(s.rejoinAfterUpdate);
       setLastTextChannelId(s.lastTextChannelId);
       positionsRef.current = s.chatPositions;
       setSettingsReady(true);
@@ -437,6 +584,54 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     void voice.leave();
   }
 
+  /**
+   * The guild list, refetched whole rather than patched.
+   *
+   * The server answers with the channels this account may see, already in
+   * order, so a refetch is correct for every way the list can change -- a
+   * channel added, renamed, reordered or deleted -- where a delta would need a
+   * separate event per operation and a copy of the sort on this side.
+   */
+  const loadGuilds = useCallback(async () => {
+    const gs = await api.guilds();
+    setGuilds(gs);
+    return gs;
+  }, []);
+
+  /**
+   * Pending coalesce of `guild:changed`. An admin adding three channels in a
+   * row fires three events, and every connected client would otherwise refetch
+   * three times; the list is only ever read whole, so the last one wins.
+   */
+  const guildReloadRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (guildReloadRef.current !== null) {
+        window.clearTimeout(guildReloadRef.current);
+      }
+    },
+    [],
+  );
+
+  /**
+   * Reload the list, then the unread marks for it.
+   *
+   * The second half is not optional: unread is `latest > lastRead`, and a
+   * channel this client has never heard of has no entry on either side -- so
+   * without this a brand new channel would sit there with no dot until the app
+   * was restarted, which is most of the bug this is here to fix.
+   */
+  const refreshGuilds = useCallback(async () => {
+    try {
+      const gs = await loadGuilds();
+      await loadReadsRef.current(gs);
+      return gs;
+    } catch {
+      /* a failed refresh leaves the old list; the next event tries again */
+      return null;
+    }
+  }, [loadGuilds]);
+
   const loadMembers = useCallback(async () => {
     try {
       const rows = await api.members();
@@ -457,10 +652,58 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     }
   }, []);
 
+  /**
+   * Somebody's display name or picture changed: redraw them everywhere.
+   *
+   * Everywhere is the point. A user is drawn from three different copies of
+   * themselves — the member list, the author on each loaded message, and the
+   * author on each pin — and a rename that reached only the first would leave
+   * the old name sitting on every message they had already sent, until a
+   * reload nobody has a reason to do.
+   *
+   * `@` mentions are not in that list because they never needed to be: those
+   * travel as ids and are resolved against the member list at draw time.
+   */
+  const applyUserUpdate = useCallback(
+    (u: PublicUserDto) => {
+      const patch = <T extends { author: MessageDto['author'] }>(rows: T[]) =>
+        rows.map((row) =>
+          row.author.id === u.id
+            ? {
+                ...row,
+                author: {
+                  ...row.author,
+                  displayName: u.displayName,
+                  image: u.image,
+                },
+              }
+            : row,
+        );
+
+      setMembers((prev) =>
+        prev.map((m) =>
+          m.user.id === u.id
+            ? {
+                ...m,
+                user: {
+                  ...m.user,
+                  displayName: u.displayName,
+                  image: u.image,
+                },
+              }
+            : m,
+        ),
+      );
+      setMessages(patch);
+      setPins((prev) => (prev ? patch(prev) : prev));
+      if (u.id === me.id) onMeChanged(u);
+    },
+    [me.id, onMeChanged],
+  );
+
   useEffect(() => {
     (async () => {
-      const gs = await api.guilds();
-      setGuilds(gs);
+      const gs = await loadGuilds();
       await loadMembers();
       // A client starting up mid-call would otherwise see empty voice channels
       // until the next person joined or left.
@@ -545,7 +788,30 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
         setRemoved({ kind: p.kind, reason: p.reason });
         disconnectSocket();
       },
-      onPresence: () => loadMembers(),
+      onGuildChanged: () => {
+        // Debounced rather than immediate: see `guildReloadRef`.
+        if (guildReloadRef.current !== null) {
+          window.clearTimeout(guildReloadRef.current);
+        }
+        guildReloadRef.current = window.setTimeout(() => {
+          guildReloadRef.current = null;
+          void refreshGuilds();
+        }, 250);
+      },
+      onUserUpdated: applyUserUpdate,
+      onPresence: ({ userId, online, lastSeenAt }) => {
+        // Applied here rather than waited for: the dot and the duration under
+        // a name are the whole of what this event changes, and both are in
+        // the payload, so neither has to sit wrong for a round trip.
+        setMembers((prev) =>
+          prev.map((m) =>
+            m.user.id === userId ? { ...m, online, lastSeenAt } : m,
+          ),
+        );
+        // Still refetched, because presence is also the first thing heard
+        // about somebody who has joined the server since this list was built.
+        void loadMembers();
+      },
       // Forwarded to the update banner, which lives above this component.
       onUpdateAvailable: ({ version }) => noteUpdateAvailable(version),
       onVoiceParticipants: ({ channelId, userIds }) =>
@@ -571,7 +837,11 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
         if (ch) void backfill(ch);
         void loadMembers();
         void loadVoiceState();
-        void loadReads();
+        // Channels added or removed while this client was away produced an
+        // event nobody was there to hear, so the list is re-asked for rather
+        // than repaired -- and it carries the unread marks with it, which is
+        // why there is no `loadReads` of its own here.
+        void refreshGuilds();
         // Tags that arrived while the socket was down produced no event, so
         // the counts are re-asked for rather than repaired.
         void loadMentions();
@@ -581,7 +851,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     });
 
     return () => disconnectSocket();
-  }, [loadMembers, me.id]);
+  }, [applyUserUpdate, loadMembers, refreshGuilds, me.id]);
 
   // Expire stale typing indicators (a client that died mid-type).
   useEffect(() => {
@@ -598,8 +868,9 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
 
   /**
    * A mute lifts on a deadline, and nothing pushes an event when it passes —
-   * so wake up once at the deadline and refresh, or the composer would stay
-   * disabled until the next reconnect.
+   * so wake up once at the deadline and refresh, or the panel would go on
+   * saying the microphone is gone until the next reconnect. The server hands
+   * it back on its own sweep; this is only about what is drawn.
    */
   useEffect(() => {
     if (!myMutedUntil || isForever(myMutedUntil)) return;
@@ -613,7 +884,13 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   }, [myMutedUntil, loadMembers]);
 
   /**
-   * Walk back into the channel this client was in when it last stopped.
+   * Walk back into a voice channel this client was in before it stopped.
+   *
+   * Two reasons to, and they are not the same thing. `rejoinLastChannel` is a
+   * standing preference: put me back where I was, every launch. Anything in
+   * `rejoinAfterUpdate` is a debt from one particular restart — an update
+   * closed a call that was in progress — and it is paid whether or not that
+   * preference is on, because nobody chose to leave.
    *
    * Guarded by a ref rather than by state because it has to happen exactly
    * once. The guild list and the settings arrive independently, so this runs
@@ -623,12 +900,28 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const rejoinedRef = useRef(false);
   useEffect(() => {
     if (rejoinedRef.current || !settingsReady) return;
-    if (!voiceSettings.rejoinLastChannel || !lastVoiceChannelId) return;
+    // Nothing can be decided before the channel list is here, including
+    // whether a stored id is stale.
+    if (guilds.length === 0) return;
+
+    const target =
+      rejoinAfterUpdate ??
+      (voiceSettings.rejoinLastChannel ? lastVoiceChannelId : null);
+
+    // A debt is settled by this pass either way. The channel may have been
+    // deleted, or we may have been kicked out of it while the app was down;
+    // that is an answer, not a reason to try again on some later launch.
+    if (rejoinAfterUpdate) {
+      setRejoinAfterUpdate(null);
+      void bridge.setSettings({ rejoinAfterUpdate: null });
+    }
+    if (!target) return;
+
     const channel = guilds
       .flatMap((g) => g.channels)
-      .find((c) => c.id === lastVoiceChannelId && c.kind === 'VOICE');
-    // A channel that has since been deleted, or that we were kicked out of,
-    // simply is not there — leave the stored id alone and try again next time.
+      .find((c) => c.id === target && c.kind === 'VOICE');
+    // For the standing preference, a channel that is not there is left alone
+    // and tried again next time.
     if (!channel) return;
     rejoinedRef.current = true;
     void voice.join(channel.id);
@@ -637,6 +930,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     settingsReady,
     voiceSettings.rejoinLastChannel,
     lastVoiceChannelId,
+    rejoinAfterUpdate,
     voice.join,
   ]);
 
@@ -663,6 +957,14 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, [accountMenu]);
+
+  // And for the channel menu.
+  useEffect(() => {
+    if (!channelMenu) return;
+    const close = () => setChannelMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [channelMenu]);
 
   // And for the pin board, which is a popover under the header like the rest.
   useEffect(() => {
@@ -722,6 +1024,33 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     const target = texts.find((c) => c.id === lastTextChannelId) ?? texts[0];
     if (target) setActiveChannel(target.id);
   }, [guilds, settingsReady, lastTextChannelId]);
+
+  /**
+   * A channel can vanish under the reader — an admin deletes it, here or in
+   * the console — and until the list is repaired what is left is a dead id:
+   * the header names a channel that is gone, sending 404s, with no row in the
+   * sidebar to click instead. So whenever the list changes, check that what is
+   * open is still in it.
+   *
+   * Keyed on the list rather than done inside the socket handler on purpose:
+   * it then covers every way the list can change, including the refetch on
+   * reconnect, without the check being written twice.
+   */
+  useEffect(() => {
+    if (guilds.length === 0) return;
+    const channels = guilds.flatMap((g) => g.channels);
+
+    if (activeChannel && !channels.some((c) => c.id === activeChannel)) {
+      const texts = channels.filter((c) => c.kind === 'TEXT');
+      setActiveChannel(texts[0]?.id ?? null);
+    }
+    // The call is already over — the server closes the room with the channel —
+    // but this client would sit in it holding a dead track and a panel naming
+    // somewhere that no longer exists.
+    if (voice.channelId && !channels.some((c) => c.id === voice.channelId)) {
+      leaveVoice();
+    }
+  }, [guilds, activeChannel, voice.channelId]);
 
   /** Remember which channel to come back to. */
   useEffect(() => {
@@ -830,6 +1159,8 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
       /* unread marks are cosmetic; never break chat over them */
     }
   }
+
+  loadReadsRef.current = loadReads;
 
   /** Unread tags per channel, straight from the server. */
   async function loadMentions() {
@@ -1244,8 +1575,12 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
 
   /* ------------------------------------------------- editing and deleting */
 
-  /** Your own messages, and not one that is still in flight. */
-  const canEdit = (m: Msg) => m.author.id === me.id && !m.pending && !iAmMuted;
+  /**
+   * Your own messages, and not one that is still in flight. A mute does not
+   * come into it — the server stopped refusing edits from muted people when
+   * mute stopped meaning anything about text.
+   */
+  const canEdit = (m: Msg) => m.author.id === me.id && !m.pending;
   /** Your own, or anyone's if you administer the server. */
   const canDelete = (m: Msg) => (m.author.id === me.id || iAmAdmin) && !m.pending;
 
@@ -1389,6 +1724,35 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     });
   }
 
+  /**
+   * Delete a channel, with the warning it deserves: the messages go with it,
+   * on a cascade, and nothing here or on the server keeps a copy.
+   *
+   * Nothing is removed locally first, unlike a message deletion. The server
+   * broadcasts `guild:changed` and every client — this one included — refetches
+   * the list, so an optimistic removal would only be a second code path to the
+   * same place, and a wrong one if the server refuses.
+   */
+  function askDeleteChannel(c: ChannelDto) {
+    setConfirmation({
+      title: `Delete #${c.name}`,
+      body:
+        c.kind === 'VOICE'
+          ? 'The channel goes for everyone, and anyone still in the call is dropped.'
+          : 'The channel and every message in it go for everyone. This cannot be undone.',
+      confirmLabel: 'Delete',
+      run: async () => {
+        try {
+          await api.deleteChannel(c.id);
+        } catch (e: any) {
+          // The likely refusal is the last text channel, and the server says
+          // so in words worth passing straight through.
+          setBanner(e?.message || 'Could not delete the channel.');
+        }
+      },
+    });
+  }
+
   function askBan(m: MemberDto) {
     setConfirmation({
       title: `Ban ${nameOf(m)}`,
@@ -1410,6 +1774,10 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     const u = members.find((m) => m.user.id === id)?.user;
     return u ? u.displayName || u.username : 'someone';
   };
+
+  /** The voice roster has ids, not people; the member list is where the rest is. */
+  const imageOfUser = (id: string) =>
+    members.find((m) => m.user.id === id)?.user.image ?? null;
 
   const voiceChannelObj = guilds
     .flatMap((g) => g.channels)
@@ -1434,7 +1802,20 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
         <div className="sb-scroll">
           {guilds.map((g) => (
             <div key={g.id}>
-              <div className="sb-section">Text</div>
+              <div className="sb-section">
+                Text
+                {iAmAdmin && (
+                  <button
+                    className="sb-add"
+                    title="Create a text channel"
+                    onClick={() =>
+                      setChannelEdit({ mode: 'create', guildId: g.id, kind: 'TEXT' })
+                    }
+                  >
+                    +
+                  </button>
+                )}
+              </div>
               {g.channels.filter((c) => c.kind === 'TEXT').map((c) => {
                 const pings = mentionCounts[c.id] ?? 0;
                 return (
@@ -1445,7 +1826,13 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                       (c.id === activeChannel ? ' active' : '') +
                       (isUnread(c.id) || pings > 0 ? ' unread' : '')
                     }
+                    title={iAmAdmin ? 'Right-click to rename or delete' : undefined}
                     onClick={() => setActiveChannel(c.id)}
+                    onContextMenu={(e) => {
+                      if (!iAmAdmin) return;
+                      e.preventDefault();
+                      setChannelMenu({ channel: c, x: e.clientX, y: e.clientY });
+                    }}
                   >
                     <span className="hash">#</span>
                     {c.name}
@@ -1464,9 +1851,28 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                   </div>
                 );
               })}
-              {g.channels.some((c) => c.kind === 'VOICE') && (
+              {(g.channels.some((c) => c.kind === 'VOICE') || iAmAdmin) && (
                 <>
-                  <div className="sb-section">Voice</div>
+                  {/* Shown to an admin even when empty: otherwise there is
+                      nowhere to click to make the first voice channel. */}
+                  <div className="sb-section">
+                    Voice
+                    {iAmAdmin && (
+                      <button
+                        className="sb-add"
+                        title="Create a voice channel"
+                        onClick={() =>
+                          setChannelEdit({
+                            mode: 'create',
+                            guildId: g.id,
+                            kind: 'VOICE',
+                          })
+                        }
+                      >
+                        +
+                      </button>
+                    )}
+                  </div>
                   {g.channels.filter((c) => c.kind === 'VOICE').map((c) => {
                     const occupants = voiceByChannel[c.id] ?? [];
                     const here = voice.channelId === c.id;
@@ -1474,8 +1880,19 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                       <div key={c.id}>
                         <div
                           className={'chan' + (here ? ' in-voice' : '')}
-                          title={here ? 'You are in this channel' : 'Join voice'}
+                          title={
+                            here ? 'You are in this channel' : 'Join voice'
+                          }
                           onClick={() => (here ? leaveVoice() : joinVoice(c.id))}
+                          onContextMenu={(e) => {
+                            if (!iAmAdmin) return;
+                            e.preventDefault();
+                            setChannelMenu({
+                              channel: c,
+                              x: e.clientX,
+                              y: e.clientY,
+                            });
+                          }}
                         >
                           <span className="hash">🔊</span>
                           {c.name}
@@ -1508,9 +1925,11 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                                 });
                               }}
                             >
-                              <div className="avatar tiny">
-                                {initials(nameOfUser(id))}
-                              </div>
+                              <Avatar
+                                className="tiny"
+                                name={nameOfUser(id)}
+                                image={imageOfUser(id)}
+                              />
                               <span className="vm-name">{nameOfUser(id)}</span>
                               {peer?.muted && <span className="vm-icon">🔇</span>}
                               {peer?.screenSharing && (
@@ -1532,6 +1951,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           channelName={voiceChannelObj?.name ?? ''}
           pushToTalk={voiceSettings.pushToTalk}
           pttLabel={voiceSettings.pttBinding ? voiceSettings.pttLabel : null}
+          serverMuted={iAmMuted ? muteLabel(myMutedUntil!) : null}
           onLeave={leaveVoice}
         />
 
@@ -1549,9 +1969,11 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
               setAccountMenu({ x: r.left, y: r.top });
             }}
           >
-            <div className="avatar" style={{ width: 30, height: 30, fontSize: 12 }}>
-              {initials(me.displayName || me.username || '?')}
-            </div>
+            <Avatar
+              size={30}
+              name={me.displayName || me.username || '?'}
+              image={me.image}
+            />
             <div className="name">{me.displayName || me.username}</div>
             <span className="footer-caret">▾</span>
           </button>
@@ -1662,7 +2084,10 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                       {grouped ? (
                         <div className="avatar spacer" />
                       ) : (
-                        <div className="avatar">{initials(m.author.displayName || m.author.username)}</div>
+                        <Avatar
+                          name={m.author.displayName || m.author.username}
+                          image={m.author.image}
+                        />
                       )}
                       <div className="msg-body">
                         {/* Above the author line, not inside it: a grouped
@@ -1807,18 +2232,16 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
             ref={composerRef}
             rows={1}
             value={draft}
+            // A mute is not consulted here any more. It takes the microphone
+            // and leaves the keyboard, so a muted person types as normal.
             placeholder={
-              iAmMuted
-                ? `${muteLabel(myMutedUntil!)} — you cannot send messages`
-                : activeChannelObj
-                  ? pending.length
-                    ? 'Add a message, or press Enter to send'
-                    : `Message #${activeChannelObj.name}`
-                  : ''
+              activeChannelObj
+                ? pending.length
+                  ? 'Add a message, or press Enter to send'
+                  : `Message #${activeChannelObj.name}`
+                : ''
             }
-            disabled={
-              !activeChannelObj || activeChannelObj.kind !== 'TEXT' || iAmMuted
-            }
+            disabled={!activeChannelObj || activeChannelObj.kind !== 'TEXT'}
             onChange={(e) => onDraftChange(e.target.value, e.target.selectionStart)}
             onPaste={onPaste}
             // Moving the caret with the mouse or the arrow keys can land in or
@@ -1898,8 +2321,25 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
             )
             .map((m) => (
               <div key={m.user.id} className={'mem' + (m.online ? '' : ' offline')}>
-                <div className="avatar">{initials(m.user.displayName || m.user.username)}</div>
-                <div className="mname">{m.user.displayName || m.user.username}</div>
+                <Avatar
+                  name={m.user.displayName || m.user.username}
+                  image={m.user.image}
+                />
+                {/* Name and last-seen share a column so the row keeps one
+                    height whether or not there is a duration to show. */}
+                <div className="mem-text">
+                  <div className="mname">
+                    {m.user.displayName || m.user.username}
+                  </div>
+                  {!m.online && m.lastSeenAt && (
+                    <div
+                      className="mem-seen"
+                      title={`Last seen ${stamp(m.lastSeenAt)}`}
+                    >
+                      {lastSeenLabel(m.lastSeenAt, now)}
+                    </div>
+                  )}
+                </div>
                 {m.mutedUntil && (
                   <span className="mem-muted" title={muteLabel(m.mutedUntil)}>
                     🔇
@@ -1927,7 +2367,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                           top: Math.min(menuFor.y + 4, window.innerHeight - MENU_HEIGHT),
                         }}
                       >
-                        <div className="menu-label">Mute for</div>
+                        <div className="menu-label">Mute microphone for</div>
                         {MUTE_OPTIONS.map((o) => (
                           <button
                             key={o.label}
@@ -2011,13 +2451,72 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           </button>
         </div>
       )}
+      {channelMenu && (
+        <div
+          className="menu"
+          style={{ left: channelMenu.x, top: channelMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="menu-label">
+            {channelMenu.channel.kind === 'VOICE' ? '🔊' : '#'}{' '}
+            {channelMenu.channel.name}
+          </div>
+          <button
+            onClick={() => {
+              setChannelEdit({ mode: 'rename', channel: channelMenu.channel });
+              setChannelMenu(null);
+            }}
+          >
+            Rename
+          </button>
+          <div className="menu-sep" />
+          <button
+            className="danger"
+            onClick={() => {
+              askDeleteChannel(channelMenu.channel);
+              setChannelMenu(null);
+            }}
+          >
+            Delete channel
+          </button>
+        </div>
+      )}
+      {channelEdit && (
+        <ChannelModal
+          edit={channelEdit}
+          onClose={() => setChannelEdit(null)}
+          onDone={(channel) => {
+            const creating = channelEdit.mode === 'create';
+            setChannelEdit(null);
+            void (async () => {
+              // Refreshed here rather than left to this client's own
+              // `guild:changed`, and awaited before anything is opened: the
+              // list is what decides whether a channel exists, and opening one
+              // that is not in it yet trips the check that closes channels
+              // which have gone.
+              const gs = await refreshGuilds();
+              const exists = gs?.some((g) =>
+                g.channels.some((c) => c.id === channel.id),
+              );
+              // Open what was just made, rather than leaving the person who
+              // made it to go and find it. A voice channel is not opened:
+              // creating one is not the same as joining the call.
+              if (creating && exists && channel.kind === 'TEXT') {
+                setActiveChannel(channel.id);
+              }
+            })();
+          }}
+        />
+      )}
       {showSettings && (
         <SettingsModal
+          me={me}
           settings={voiceSettings}
           notifications={notifications}
           voice={voice}
           onChange={(patch) => void updateVoiceSettings(patch)}
           onNotificationsChange={(patch) => void updateNotifications(patch)}
+          onProfileSaved={applyUserUpdate}
           onClose={() => setShowSettings(false)}
         />
       )}
@@ -2089,7 +2588,11 @@ function MentionPicker({
             onPick(user);
           }}
         >
-          <div className="avatar tiny">{initials(mentionName(user))}</div>
+          <Avatar
+            className="tiny"
+            name={mentionName(user)}
+            image={user.image}
+          />
           <span className="mention-row-name">{mentionName(user)}</span>
           {/* Only when it says something the name does not, which is how you
               tell two people apart who have picked the same display name. */}
@@ -2172,9 +2675,10 @@ function PinsPanel({
         )}
         {pins?.map((m) => (
           <div className="pin-row" key={m.id}>
-            <div className="avatar">
-              {initials(m.author.displayName || m.author.username)}
-            </div>
+            <Avatar
+              name={m.author.displayName || m.author.username}
+              image={m.author.image}
+            />
             <div className="pin-body">
               <div className="msg-head">
                 <span className="msg-author">
@@ -2235,6 +2739,97 @@ function ConfirmModal({
             }}
           >
             {confirmation.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Create a channel, or rename one. Admin only, and refused again on the server.
+ *
+ * One dialog for both because they are one form: a name. The kind is not a
+ * control — a new channel takes it from the section the `+` was clicked in,
+ * and an existing one cannot change it, since a text channel full of messages
+ * is not a voice room and there is nothing sensible to do with the history.
+ */
+function ChannelModal({
+  edit,
+  onClose,
+  onDone,
+}: {
+  edit:
+    | { mode: 'create'; guildId: string; kind: ChannelDto['kind'] }
+    | { mode: 'rename'; channel: ChannelDto };
+  onClose: () => void;
+  onDone: (channel: ChannelDto) => void;
+}) {
+  const creating = edit.mode === 'create';
+  const kind = creating ? edit.kind : edit.channel.kind;
+  const [name, setName] = useState(creating ? '' : edit.channel.name);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  /**
+   * What the server's schema accepts, checked here only to say so before a
+   * round trip. Spaces are the one people actually hit, and turning them into
+   * dashes is what every other chat app does, so the field does it as they
+   * type rather than refusing afterwards.
+   */
+  const clean = (v: string) => v.replace(/\s+/g, '-').replace(/[#@]/g, '').slice(0, 64);
+  const valid = name.length > 0;
+
+  async function submit() {
+    if (!valid || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const channel = creating
+        ? await api.createChannel(edit.guildId, { name, kind })
+        : await api.renameChannel(edit.channel.id, name);
+      onDone(channel);
+    } catch (e: any) {
+      setError(e?.message || 'Could not save the channel.');
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-wrap" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          {creating
+            ? `Create a ${kind === 'VOICE' ? 'voice' : 'text'} channel`
+            : `Rename #${edit.channel.name}`}
+        </div>
+        <div className="modal-body">
+          {error && <div className="banner">{error}</div>}
+          <label htmlFor="channel-name">Channel name</label>
+          <div className="channel-name-field">
+            <span className="hash">{kind === 'VOICE' ? '🔊' : '#'}</span>
+            <input
+              id="channel-name"
+              autoFocus
+              value={name}
+              placeholder={kind === 'VOICE' ? 'general-voice' : 'new-channel'}
+              onChange={(e) => setName(clean(e.target.value))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void submit();
+                if (e.key === 'Escape') onClose();
+              }}
+            />
+          </div>
+          <p className="hint">
+            {kind === 'VOICE'
+              ? 'Everyone on the server can see it and join the call.'
+              : 'Everyone on the server can see it and read it.'}
+          </p>
+        </div>
+        <div className="modal-foot">
+          <button onClick={onClose}>Cancel</button>
+          <button disabled={!valid || busy} onClick={() => void submit()}>
+            {creating ? 'Create' : 'Save'}
           </button>
         </div>
       </div>

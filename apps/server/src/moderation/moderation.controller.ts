@@ -68,7 +68,10 @@ export class ModerationController {
     return target;
   }
 
-  /** Voice is live: a punishment that only applies on next join is no punishment. */
+  /**
+   * Voice is live: a removal that only applies on next join is no removal.
+   * Kick and ban only — a mute leaves them where they are.
+   */
   private async ejectFromVoice(guildId: string, userId: string) {
     const rooms = await this.prisma.channel.findMany({
       where: { guildId, kind: 'VOICE' },
@@ -99,7 +102,10 @@ export class ModerationController {
       where: { guildId_userId: { guildId, userId } },
       data: { mutedUntil },
     });
-    await this.ejectFromVoice(guildId, userId);
+    // They stay in whatever call they are in and keep hearing it; what goes is
+    // the microphone. If they are not in a call this does nothing, and the
+    // grant on their next join carries the same rule.
+    await this.voice.syncMutes(guildId);
     this.gateway.broadcastMemberUpdated(guildId, userId, mutedUntil);
 
     return { ok: true, mutedUntil: mutedUntil.toISOString() };
@@ -123,6 +129,9 @@ export class ModerationController {
       where: { guildId_userId: { guildId, userId } },
       data: { mutedUntil: null },
     });
+    // Hand the microphone back now rather than at the next sweep, which is
+    // what somebody sitting in a call being told "you're unmuted" expects.
+    await this.voice.syncMutes(guildId);
     this.gateway.broadcastMemberUpdated(guildId, userId, null);
 
     return { ok: true };

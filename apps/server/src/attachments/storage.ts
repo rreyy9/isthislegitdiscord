@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { extname } from 'node:path';
 import { newId } from '../common/ids';
@@ -69,19 +69,60 @@ export async function store(file: {
 }
 
 /**
- * Open a stored file for streaming. `storedName` comes from our own database,
- * but it is still resolved and checked against the upload directory — a path
- * traversal here would serve arbitrary files off the disk.
+ * A stored name to a path inside the upload directory.
+ *
+ * `storedName` comes from our own database, but it is still resolved and
+ * checked here — a path traversal would turn any of the routes below into a
+ * general file server — and the extension is checked too, so a bad row cannot
+ * make one serve or delete something that was never an upload.
  */
-export function openStored(storedName: string) {
+function resolveStored(storedName: string): string {
   const full = path.resolve(UPLOAD_DIR, storedName);
   if (!full.startsWith(UPLOAD_DIR + path.sep)) {
-    throw new Error('Refusing to read outside the upload directory.');
+    throw new Error('Refusing to touch a file outside the upload directory.');
   }
-  // Belt and braces: only ever stream back one of the types we accept, so a
-  // bad database row cannot turn this route into a general file server.
-  const known = Object.values(ALLOWED_TYPES).includes(extname(full));
-  if (!known) throw new Error('Refusing to read an unexpected file type.');
+  if (!Object.values(ALLOWED_TYPES).includes(extname(full))) {
+    throw new Error('Refusing to touch an unexpected file type.');
+  }
+  return full;
+}
 
-  return createReadStream(full);
+/**
+ * Whether a stored file is actually on disk.
+ *
+ * Worth asking before opening one, because `createReadStream` does not fail
+ * until something reads it: by then the response has been handed to the
+ * framework, and a file that is simply not there comes back as a stream error
+ * rather than the 404 it is. An avatar reaches that state normally — replacing
+ * your picture deletes the old file, and anything still holding the old path
+ * will ask for it.
+ */
+export async function storedExists(storedName: string): Promise<boolean> {
+  try {
+    await access(resolveStored(storedName));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Delete a stored file, if there is one and it is one of ours.
+ *
+ * Best effort on purpose: this runs after the row that pointed at the file has
+ * already been updated, so the caller has nothing useful to do with a failure
+ * and an unreferenced file on disk is not worth failing a request over.
+ */
+export async function discardStored(storedName: string | null): Promise<void> {
+  if (!storedName) return;
+  try {
+    await rm(resolveStored(storedName), { force: true });
+  } catch {
+    // Left on disk. Nothing referenced it, and nothing will.
+  }
+}
+
+/** Open a stored file for streaming. Throws if the name is not one of ours. */
+export function openStored(storedName: string) {
+  return createReadStream(resolveStored(storedName));
 }

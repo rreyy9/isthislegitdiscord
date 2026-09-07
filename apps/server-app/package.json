@@ -1,6 +1,6 @@
 {
   "name": "@isthislegit/server-app",
-  "version": "0.2.3",
+  "version": "0.2.5",
   "private": true,
   "description": "Desktop app for administering an isthislegit server",
   "author": {
@@ -27,6 +27,9 @@
       "package.json"
     ],
     "npmRebuild": false,
+    "electronLanguages": [
+      "en-US"
+    ],
     "win": {
       "target": [
         {

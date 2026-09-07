@@ -12,7 +12,7 @@ import type { VoiceChannelState, VoiceTokenResponse } from '@isthislegit/shared'
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthGuard, CurrentUser, type SessionUser } from '../auth/auth.guard';
 import { PermissionService } from '../auth/permission.guard';
-import { VoiceService, roomForChannel } from './voice.service';
+import { VoiceService, publishableSources, roomForChannel } from './voice.service';
 import { voiceAudioConfig } from './audio-config';
 
 /**
@@ -34,14 +34,18 @@ export class VoiceController {
     @Param('channelId') channelId: string,
   ): Promise<VoiceTokenResponse> {
     if (!(await this.permissions.canInChannel(user.id, channelId, 'voice.join'))) {
-      // A mute keeps you out of voice entirely rather than letting you sit
-      // there silently: LiveKit has no server-side gag we could rely on, and
-      // a token that cannot publish is a broken call, not a mute.
-      const until = await this.permissions.mutedUntilInChannel(user.id, channelId);
-      throw new ForbiddenException(
-        until ? 'You are muted in this server.' : 'No access to that channel.',
-      );
+      throw new ForbiddenException('No access to that channel.');
     }
+
+    // A mute does not keep anyone out of the room. It is spent here, on the
+    // grant: the token simply does not carry the right to publish a
+    // microphone, so they join, they hear everything, and nothing they say
+    // leaves the machine. `VoiceService` keeps the same rule applied while
+    // they sit there, including handing the microphone back when it expires.
+    const mutedUntil = await this.permissions.mutedUntilInChannel(
+      user.id,
+      channelId,
+    );
 
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
@@ -70,6 +74,11 @@ export class VoiceController {
       canPublish: true,
       canSubscribe: true,
       canPublishData: true,
+      // Spelled out even when nothing is being withheld, because the sweep in
+      // VoiceService compares against this list and an absent one means
+      // "everything" — two different ways of saying the same thing is one more
+      // than that comparison can tell apart.
+      canPublishSources: publishableSources(mutedUntil !== null),
     });
 
     return {

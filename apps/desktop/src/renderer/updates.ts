@@ -25,6 +25,12 @@ export interface Updates {
   state: UpdateState;
   /** True when this build is below the server's floor and must not be used. */
   blocked: boolean;
+  /**
+   * Set for the first few seconds of a run the installer started, so the
+   * banner can confirm the update landed. Cleared on its own: it is a receipt,
+   * not a notice, and nobody needs to dismiss it.
+   */
+  justUpdated: boolean;
   download: () => void;
   install: () => void;
   recheck: () => void;
@@ -35,6 +41,8 @@ const IDLE: UpdateState = {
   version: null,
   percent: 0,
   message: null,
+  elevates: false,
+  inCall: false,
 };
 
 /* A one-slot bus, so the socket handler in Chat can reach the banner in App. */
@@ -58,6 +66,21 @@ export function useUpdates(ready: boolean): Updates {
   const [available, setAvailable] = useState<string | null>(null);
   const [state, setState] = useState<UpdateState>(IDLE);
   const [blocked, setBlocked] = useState(false);
+  const [justUpdated, setJustUpdated] = useState(false);
+
+  // Not gated on `ready`: the installer relaunched this process, and saying so
+  // should not wait on a sign-in that may take a moment or fail.
+  useEffect(() => {
+    let alive = true;
+    void bridge.launchedFromUpdate().then((was) => {
+      if (!was || !alive) return;
+      setJustUpdated(true);
+      setTimeout(() => alive && setJustUpdated(false), 6000);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   /** Ask the updater to look, which also points it at the current server. */
   function recheck() {
@@ -125,6 +148,7 @@ export function useUpdates(ready: boolean): Updates {
     available,
     state,
     blocked,
+    justUpdated,
     download: () => void bridge.downloadUpdate().then(setState),
     install: () => void bridge.installUpdate(),
     recheck,

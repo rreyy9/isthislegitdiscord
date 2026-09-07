@@ -66,6 +66,7 @@ export class GuildsController {
       // marker next to a name that is free to talk.
       mutedUntil:
         m.mutedUntil && m.mutedUntil > now ? m.mutedUntil.toISOString() : null,
+      lastSeenAt: m.lastSeenAt ? m.lastSeenAt.toISOString() : null,
       user: {
         id: m.user.id,
         username: m.user.username ?? m.user.id,

@@ -1,0 +1,11 @@
+-- When a member's connection was last seen.
+--
+-- On GuildMember rather than on the Better Auth "user" table, which this
+-- schema only reads from. Somebody in two guilds therefore has two copies of
+-- one fact; they are written by a single UPDATE keyed on userId, so they
+-- cannot drift, and the member list already reads these rows.
+--
+-- Nullable with no default: an account that has not connected since this
+-- shipped has no last-seen, which is a different thing from having been seen
+-- at the moment of the migration.
+ALTER TABLE "GuildMember" ADD COLUMN "lastSeenAt" TIMESTAMP(3);

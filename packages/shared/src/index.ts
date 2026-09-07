@@ -162,6 +162,24 @@ export const RegisterInput = z.object({
 });
 export type RegisterInput = z.infer<typeof RegisterInput>;
 
+/**
+ * Editing your own profile. Both fields are optional and applied only when
+ * present, so the settings screen can send the one thing that changed.
+ *
+ * `image` is write-cleared rather than write-set: an avatar arrives as bytes
+ * on the upload route, and the only thing the client may say about it here is
+ * that it should go away. Letting a client put an arbitrary string in the
+ * column would make it a place to store a URL the app then renders.
+ */
+export const UpdateProfileInput = z.object({
+  displayName: z.string().trim().min(1).max(64).optional(),
+  removeAvatar: z.literal(true).optional(),
+});
+export type UpdateProfileInput = z.infer<typeof UpdateProfileInput>;
+
+/** How big an avatar may be, before it is scaled down in the client. */
+export const MAX_AVATAR_BYTES = 4 * 1024 * 1024;
+
 export const LoginInput = z.object({
   username: z.string().min(2).max(32),
   password: z.string().min(1).max(200),
@@ -199,9 +217,18 @@ export type CreateInviteInput = z.infer<typeof CreateInviteInput>;
 /* ------------------------------------------------------- moderation inputs */
 
 /**
- * A mute is a deadline, not a flag: it expires on its own, so nothing has to
- * remember to lift it. `durationMinutes: null` means indefinite — stored as a
- * date far enough out that it will never arrive.
+ * A mute takes away one thing: the microphone.
+ *
+ * It is not a removal and not a gag on the whole app. A muted person stays in
+ * the voice channel they are sitting in, keeps hearing everyone, and keeps
+ * typing in text channels — the only difference is that nothing they say into
+ * a microphone is published. That is what "mute" means everywhere else people
+ * have used it, and the earlier reading of it (ejected from voice, refused
+ * entry back, unable to send messages) was three punishments wearing one name.
+ *
+ * A deadline, not a flag: it expires on its own, so nothing has to remember to
+ * lift it. `durationMinutes: null` means indefinite — stored as a date far
+ * enough out that it will never arrive.
  */
 export const MuteMemberInput = z.object({
   durationMinutes: z.number().int().min(1).max(60 * 24 * 28).nullable(),
@@ -337,6 +364,20 @@ export const GuildMemberDto = z.object({
   role: MemberRole,
   online: z.boolean(),
   mutedUntil: z.string().nullable(),
+  /**
+   * When this person's last connection was seen, or null for an account that
+   * has never signed in from a build that recorded it.
+   *
+   * Sent as an instant rather than as "3 hours ago", because the phrasing is a
+   * rendering decision and the two machines disagree about the time anyway:
+   * a duration computed on the server is already stale by the time it is
+   * drawn, and stays stale until the next fetch. The client subtracts from its
+   * own clock and re-renders on a timer.
+   *
+   * Meaningful mainly while `online` is false. For somebody connected right
+   * now it is the start of the session they are still in, which nothing draws.
+   */
+  lastSeenAt: z.string().nullable(),
   user: PublicUser,
 });
 export type GuildMemberDto = z.infer<typeof GuildMemberDto>;
@@ -620,7 +661,19 @@ export interface ServerToClientEvents {
     /** ISO date when it was pinned, null when it was just unpinned. */
     pinnedAt: string | null;
   }) => void;
-  'presence:changed': (payload: { userId: string; online: boolean }) => void;
+  /**
+   * Somebody came online or went offline.
+   *
+   * `lastSeenAt` rides along so the member list can put "last seen a moment
+   * ago" under a name the instant it dims, rather than showing nothing there
+   * until the next `/api/members`. On the way up it is the previous session's
+   * mark, which the client stops drawing anyway once the dot turns green.
+   */
+  'presence:changed': (payload: {
+    userId: string;
+    online: boolean;
+    lastSeenAt: string | null;
+  }) => void;
   'typing:changed': (payload: {
     channelId: string;
     userId: string;

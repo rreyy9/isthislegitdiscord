@@ -1,6 +1,6 @@
 import { io, type Socket } from 'socket.io-client';
 import { getClientVersion, getServerUrl, getToken } from './api';
-import type { MessageDto } from './api';
+import type { MessageDto, PublicUserDto } from './api';
 
 /**
  * Socket lifecycle. Two things here matter beyond "connect and listen":
@@ -43,7 +43,30 @@ export interface SocketEvents {
     messageId: string;
     pinnedAt: string | null;
   }) => void;
-  onPresence: (p: { userId: string; online: boolean }) => void;
+  /**
+   * Somebody changed their display name or picture. Sent to everyone, because
+   * the same user is drawn in several lists at once and they all have to move
+   * together.
+   */
+  onUserUpdated: (u: PublicUserDto) => void;
+  /**
+   * A channel was added, renamed, reordered or removed somewhere in a guild.
+   *
+   * Carries only the guild id on purpose: the handler refetches the guild
+   * list, which is what makes one event enough for all four operations and
+   * keeps the ordering the server's business rather than this client's.
+   */
+  onGuildChanged: (p: { guildId: string }) => void;
+  /**
+   * Somebody came online or went offline. `lastSeenAt` rides along so the
+   * member list can put a duration under a name the moment it dims, instead
+   * of leaving the space blank until the next fetch answers.
+   */
+  onPresence: (p: {
+    userId: string;
+    online: boolean;
+    lastSeenAt: string | null;
+  }) => void;
   onTyping: (p: { channelId: string; userId: string; typing: boolean }) => void;
   onVoiceParticipants: (p: { channelId: string; userIds: string[] }) => void;
   /**
@@ -92,6 +115,8 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('mention:new', events.onMention);
   socket.on('moderation:removed', events.onRemoved);
   socket.on('pin:changed', events.onPinChanged);
+  socket.on('user:updated', events.onUserUpdated);
+  socket.on('guild:changed', events.onGuildChanged);
   socket.on('presence:changed', events.onPresence);
   socket.on('typing:changed', events.onTyping);
   socket.on('voice:participants', events.onVoiceParticipants);

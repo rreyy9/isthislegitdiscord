@@ -25,6 +25,7 @@ import { AdminGuard, CurrentUser, type SessionUser } from '../auth/auth.guard';
 import { AUTH, type Auth, emailForUsername } from '../auth/auth.factory';
 import { ChatGateway } from '../gateway/chat.gateway';
 import { ZodPipe } from '../common/zod.pipe';
+import { ChannelsService } from '../channels/channels.service';
 import { newId, newInviteCode } from '../common/ids';
 
 /**
@@ -37,6 +38,7 @@ export class AdminController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly gateway: ChatGateway,
+    private readonly channels: ChannelsService,
     @Inject(AUTH) private readonly auth: Auth,
   ) {}
 
@@ -304,6 +306,7 @@ export class AdminController {
         },
       },
     });
+    this.gateway.broadcastGuildChanged(guild.id);
     return { id: guild.id, name: guild.name };
   }
 
@@ -312,23 +315,7 @@ export class AdminController {
     @Param('guildId') guildId: string,
     @Body(new ZodPipe(CreateChannelInput)) body: CreateChannelInput,
   ) {
-    const guild = await this.prisma.guild.findUnique({ where: { id: guildId } });
-    if (!guild) throw new NotFoundException('No such guild.');
-
-    const last = await this.prisma.channel.findFirst({
-      where: { guildId },
-      orderBy: { position: 'desc' },
-    });
-
-    const channel = await this.prisma.channel.create({
-      data: {
-        id: newId(),
-        guildId,
-        name: body.name,
-        kind: body.kind,
-        position: body.position ?? (last ? last.position + 1 : 0),
-      },
-    });
+    const channel = await this.channels.create(guildId, body);
     return { id: channel.id, name: channel.name, kind: channel.kind };
   }
 
@@ -337,31 +324,13 @@ export class AdminController {
     @Param('id') id: string,
     @Body(new ZodPipe(UpdateChannelInput)) body: UpdateChannelInput,
   ) {
-    await this.prisma.channel.update({
-      where: { id },
-      data: {
-        ...(body.name ? { name: body.name } : {}),
-        ...(body.position !== undefined ? { position: body.position } : {}),
-      },
-    });
+    await this.channels.update(id, body);
     return { ok: true };
   }
 
   @Delete('channels/:id')
   async deleteChannel(@Param('id') id: string) {
-    const channel = await this.prisma.channel.findUnique({ where: { id } });
-    if (!channel) throw new NotFoundException('No such channel.');
-
-    const remaining = await this.prisma.channel.count({
-      where: { guildId: channel.guildId },
-    });
-    if (remaining <= 1) {
-      throw new BadRequestException(
-        'A guild needs at least one channel.',
-      );
-    }
-    // Messages cascade with the channel — this is not recoverable.
-    await this.prisma.channel.delete({ where: { id } });
+    await this.channels.remove(id);
     return { ok: true };
   }
 

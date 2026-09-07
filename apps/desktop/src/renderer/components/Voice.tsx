@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Track } from 'livekit-client';
 import type { NotificationSettings, ScreenSource } from '../../preload';
+import type { Me, PublicUserDto } from '../api';
 import { bridge } from '../bridge';
+import { ProfileSettings } from './ProfileSettings';
 import {
   listAudioDevices,
   noteScreenPickerCancelled,
@@ -235,7 +237,7 @@ function InputMeter({
   );
 }
 
-type Section = 'devices' | 'input' | 'notifications' | 'behaviour';
+type Section = 'profile' | 'devices' | 'input' | 'notifications' | 'behaviour';
 
 /**
  * The nav down the left. Every section carries a sentence saying what it is
@@ -243,6 +245,11 @@ type Section = 'devices' | 'input' | 'notifications' | 'behaviour';
  * read each switch to find the one they came for.
  */
 const SECTIONS: { id: Section; label: string; blurb: string }[] = [
+  {
+    id: 'profile',
+    label: 'Profile',
+    blurb: 'The name and the picture everyone else sees beside your messages.',
+  },
   {
     id: 'devices',
     label: 'Devices',
@@ -266,21 +273,29 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
 ];
 
 export function SettingsModal({
+  me,
   settings,
   notifications,
   voice,
   onChange,
   onNotificationsChange,
+  onProfileSaved,
   onClose,
 }: {
+  me: Me;
   settings: VoiceSettings;
   notifications: NotificationSettings;
   voice: Voice;
   onChange: (patch: Partial<VoiceSettings>) => void;
   onNotificationsChange: (patch: Partial<NotificationSettings>) => void;
+  /** The saved user, for the app to redraw every list this person is in. */
+  onProfileSaved: (user: PublicUserDto) => void;
   onClose: () => void;
 }) {
-  const [section, setSection] = useState<Section>('devices');
+  // Profile first, because it is the one page here somebody opens the settings
+  // window specifically to reach -- the audio pages are the ones they end up
+  // on after something already went wrong.
+  const [section, setSection] = useState<Section>('profile');
   const [inputs, setInputs] = useState<MediaDeviceInfo[]>([]);
   const [outputs, setOutputs] = useState<MediaDeviceInfo[]>([]);
   const [pttOk, setPttOk] = useState(true);
@@ -334,6 +349,10 @@ export function SettingsModal({
           </div>
 
           <div className="settings-body">
+            {section === 'profile' && (
+              <ProfileSettings me={me} onSaved={onProfileSaved} />
+            )}
+
             {section === 'devices' && (
               <>
                 <section className="set-group">
@@ -602,6 +621,7 @@ export function VoicePanel({
   onLeave,
   pushToTalk,
   pttLabel,
+  serverMuted,
 }: {
   voice: Voice;
   channelName: string;
@@ -610,6 +630,14 @@ export function VoicePanel({
   pushToTalk: boolean;
   /** Named here so the reminder says which key or button, not just "your key". */
   pttLabel: string | null;
+  /**
+   * Why an admin has taken the microphone away, ready to read, or null.
+   *
+   * The phrasing rather than a boolean, because the only thing this panel does
+   * with it is show it — and "until 21:40" is the part somebody actually wants
+   * from a mute they did not ask for.
+   */
+  serverMuted: string | null;
 }) {
   if (voice.status === 'idle') return null;
 
@@ -646,7 +674,12 @@ export function VoicePanel({
         </div>
       )}
 
-      {pushToTalk && voice.status === 'connected' && (
+      {/* Above the push-to-talk line, and instead of nothing at all: without
+          it a muted person sees a microphone button that does nothing and no
+          reason anywhere for why nobody can hear them. */}
+      {serverMuted && <div className="vp-gagged">🔇 {serverMuted}</div>}
+
+      {pushToTalk && !serverMuted && voice.status === 'connected' && (
         <div className={'vp-ptt' + (voice.talking ? ' live' : '')}>
           {voice.talking
             ? 'Transmitting'
@@ -658,12 +691,15 @@ export function VoicePanel({
 
       <div className="vp-buttons">
         <button
-          className={voice.muted ? 'on' : ''}
-          disabled={connecting}
+          className={voice.muted || serverMuted ? 'on' : ''}
+          // An admin's mute is enforced on the server, where this button
+          // cannot reach. Leaving it live would let somebody click it, watch
+          // it change, and still not be heard.
+          disabled={connecting || Boolean(serverMuted)}
           onClick={() => void voice.setMuted(!voice.muted)}
-          title={voice.muted ? 'Unmute' : 'Mute'}
+          title={serverMuted ?? (voice.muted ? 'Unmute' : 'Mute')}
         >
-          {voice.muted ? '🔇' : '🎙'}
+          {voice.muted || serverMuted ? '🔇' : '🎙'}
         </button>
         <button
           className={voice.deafened ? 'on' : ''}

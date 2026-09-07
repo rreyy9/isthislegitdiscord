@@ -12,9 +12,10 @@ import {
 import { Server, Socket } from 'socket.io';
 import { fromNodeHeaders } from 'better-auth/node';
 import { compareVersions } from '@isthislegit/shared';
-import type { ConnectedClient, Message } from '@isthislegit/shared';
+import type { ConnectedClient, Message, PublicUser } from '@isthislegit/shared';
 import { AUTH, type Auth } from '../auth/auth.factory';
 import { PermissionService } from '../auth/permission.guard';
+import { PrismaService } from '../prisma/prisma.service';
 
 interface SocketData {
   userId: string;
@@ -46,6 +47,7 @@ export class ChatGateway
   constructor(
     @Inject(AUTH) private readonly auth: Auth,
     private readonly permissions: PermissionService,
+    private readonly prisma: PrismaService,
   ) {}
 
   /**
@@ -106,6 +108,7 @@ export class ChatGateway
       this.server.emit('presence:changed', {
         userId: data.userId,
         online: true,
+        lastSeenAt: this.touchLastSeen(data.userId),
       });
     }
     this.log.log(`connected ${data.username ?? data.userId} (${next} session(s))`);
@@ -121,10 +124,42 @@ export class ChatGateway
       this.server.emit('presence:changed', {
         userId: data.userId,
         online: false,
+        // The mark that matters: this is the instant the member list will be
+        // counting from for as long as they stay away.
+        lastSeenAt: this.touchLastSeen(data.userId),
       });
     } else {
       this.connections.set(data.userId, next);
     }
+  }
+
+  /**
+   * Record that this person was here, and say when.
+   *
+   * Called at the two transitions only -- their first window opening and their
+   * last one closing -- because in between they are online and the member list
+   * draws a green dot rather than a duration. A server that dies mid-session
+   * therefore leaves a mark from the start of that session rather than its
+   * end; it is corrected the moment they reconnect, and "last seen" being an
+   * hour early beats a heartbeat writing to the database all evening.
+   *
+   * The timestamp is returned rather than read back, so the socket event that
+   * carries it goes out now instead of after a round trip to Postgres. The
+   * write is deliberately not awaited for the same reason: a slow database
+   * must not hold up presence, and a failed one costs a stale duration under
+   * somebody's name, which is not worth refusing the connection over.
+   */
+  private touchLastSeen(userId: string): string {
+    const at = new Date();
+    // updateMany, not update: the column lives on the membership, so somebody
+    // who belongs to two guilds has two rows, and one statement keeps them
+    // from ever disagreeing.
+    this.prisma.guildMember
+      .updateMany({ where: { userId }, data: { lastSeenAt: at } })
+      .catch((err: Error) =>
+        this.log.warn(`could not record last seen for ${userId}: ${err.message}`),
+      );
+    return at.toISOString();
   }
 
   onlineUserIds(): string[] {
@@ -333,6 +368,37 @@ export class ChatGateway
    */
   disconnectUser(userId: string) {
     this.server.in(`user:${userId}`).disconnectSockets(true);
+  }
+
+  /**
+   * Somebody changed their display name or avatar.
+   *
+   * To everyone, not just the guild: the same user is drawn in the member
+   * list, on every message they have sent, and in the voice roster, and a
+   * client that missed this would keep the old name in some of those and not
+   * others. A client older than the feature never registered the handler and
+   * drops it.
+   */
+  broadcastUserUpdated(user: PublicUser) {
+    this.server.emit('user:updated', user);
+  }
+
+  /**
+   * A channel was added, renamed, reordered or removed.
+   *
+   * Deliberately carries no channel in the payload. Everyone is told only that
+   * the shape of a guild changed, and each client re-asks `GET /api/guilds`,
+   * which answers with the channels *that client* is allowed to see. A delta
+   * would have to be filtered per recipient here instead, and a broadcast of
+   * one would put channel names in front of people who are not in the guild.
+   *
+   * That also makes one event enough for four operations: a rename and a
+   * deletion are both "your list is stale", and the refetch sorts them the
+   * same way the first load did rather than re-implementing the ordering on
+   * the client.
+   */
+  broadcastGuildChanged(guildId: string) {
+    this.server.emit('guild:changed', { guildId });
   }
 
   broadcastVoiceParticipants(channelId: string, userIds: string[]) {

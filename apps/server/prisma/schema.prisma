@@ -143,7 +143,23 @@ model GuildMember {
   // A mute is a deadline rather than a flag, so it lifts itself with no timer
   // and no sweeper job. Null means not muted; an indefinite mute is simply a
   // date far enough out that it never arrives.
+  //
+  // What it takes away is the microphone, and only that: see MuteMemberInput
+  // in the shared package. Voice enforces it by permission on the LiveKit
+  // participant, which is re-derived from this column on a sweep -- so an
+  // expiry gives the microphone back without anything having to be told.
   mutedUntil DateTime?
+
+  // When a connection of theirs was last seen, written by the gateway on
+  // connect and on disconnect.
+  //
+  // Here rather than on User because User is Better Auth's model and we only
+  // read from it. The cost is that somebody in two guilds has two copies of
+  // one fact -- accepted because both are written by the same single
+  // updateMany, so they cannot drift, and because the member list already
+  // loads these rows and gets the column for no extra query. Null means an
+  // account that has not connected since this was added.
+  lastSeenAt DateTime?
 
   @@unique([guildId, userId])
   @@index([userId])

@@ -188,7 +188,14 @@ function publishOptions(
   };
 }
 
-export function useVoice(settings: VoiceSettings) {
+/**
+ * @param serverMuted An admin has taken this person's microphone away. The
+ *   server already refuses the track, so this is not what enforces it — it is
+ *   what stops the client from opening the capture device to publish something
+ *   that would be rejected, and what makes the microphone come back on its own
+ *   the moment the mute expires or is lifted.
+ */
+export function useVoice(settings: VoiceSettings, serverMuted = false) {
   const [state, setState] = useState<VoiceState>({
     channelId: null,
     status: 'idle',
@@ -210,6 +217,9 @@ export function useVoice(settings: VoiceSettings) {
   const mutedRef = useRef(false);
   const deafenedRef = useRef(false);
   const talkingRef = useRef(false);
+  /** Same reason as the others: applyMic runs outside React's knowledge. */
+  const serverMutedRef = useRef(serverMuted);
+  serverMutedRef.current = serverMuted;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const audioRef = useRef<VoiceAudioDto | null>(null);
@@ -345,9 +355,12 @@ export function useVoice(settings: VoiceSettings) {
   /* --------------------------------------------------------- mic policy */
 
   /**
-   * One place decides whether the microphone is live, because four things now
-   * fight over it. Manual mute wins over everything. With push-to-talk on, the
-   * mic is open only while the key is held. Otherwise the gate has a say.
+   * One place decides whether the microphone is live, because five things now
+   * fight over it. An admin's mute wins outright — the server will not accept
+   * the track anyway, so there is no reason to hold the capture device open
+   * and light somebody's microphone indicator for audio that goes nowhere.
+   * Then manual mute. With push-to-talk on, the mic is open only while the key
+   * is held. Otherwise the gate has a say.
    *
    * `wantsTrack` is separate from `live` on purpose: it is exactly the old
    * rule, and it decides whether a microphone track should exist at all. The
@@ -362,8 +375,11 @@ export function useVoice(settings: VoiceSettings) {
     const s = settingsRef.current;
 
     const wantsTrack =
-      !mutedRef.current && (!s.pushToTalk || talkingRef.current);
+      !serverMutedRef.current &&
+      !mutedRef.current &&
+      (!s.pushToTalk || talkingRef.current);
     const live =
+      !serverMutedRef.current &&
       !mutedRef.current &&
       (s.pushToTalk
         ? talkingRef.current
@@ -915,6 +931,19 @@ export function useVoice(settings: VoiceSettings) {
     gateRef.current.reset();
     void applyMic();
   }, [settings.gateMode, applyMic]);
+
+  /**
+   * An admin muted or unmuted us while we were sitting in a call.
+   *
+   * Both directions matter. On the way in, the microphone has to stop being
+   * captured. On the way out it has to start again by itself — the server took
+   * the published track away when the mute landed, and without this the person
+   * would sit there apparently unmuted, with the button showing a live
+   * microphone, until they toggled it or rejoined the channel.
+   */
+  useEffect(() => {
+    void applyMic();
+  }, [serverMuted, applyMic]);
 
   // Constraint changes need a new capture, which is disruptive, so this must
   // not fire on mount — the track was just created with these very values.

@@ -137,6 +137,14 @@ export interface Me {
   image: string | null;
 }
 
+/** A user as everyone else sees them: what a profile edit sends back. */
+export interface PublicUserDto {
+  id: string;
+  username: string;
+  displayName: string | null;
+  image: string | null;
+}
+
 export interface ChannelDto {
   id: string;
   guildId: string;
@@ -216,8 +224,18 @@ export interface MemberDto {
   guildId: string;
   role: 'ADMIN' | 'MEMBER';
   online: boolean;
-  /** ISO date, or null when they are free to talk. */
+  /**
+   * ISO date until which their microphone is taken away, or null. It stops
+   * them publishing audio in voice and nothing else — they still type, still
+   * sit in the channel, still hear everyone.
+   */
   mutedUntil: string | null;
+  /**
+   * ISO date a connection of theirs was last seen, or null for an account
+   * that has not signed in since the server started recording it. Only drawn
+   * while they are offline, where it is the "last seen 3h ago" under a name.
+   */
+  lastSeenAt: string | null;
   user: { id: string; username: string; displayName: string | null; image: string | null };
 }
 export interface BanDto {
@@ -249,7 +267,52 @@ export const api = {
     displayName?: string;
   }) => request<{ token: string }>('/api/register', { method: 'POST', body }),
   me: () => request<Me>('/api/me'),
+  /**
+   * Change your own display name. Comes back as the whole public user, which
+   * is the same object everyone else gets over the socket -- so the screen
+   * that sent this redraws from the same shape as the screens that did not.
+   */
+  updateProfile: (patch: { displayName?: string; removeAvatar?: true }) =>
+    request<PublicUserDto>('/api/me', { method: 'PATCH', body: patch }),
+  /**
+   * Replace your avatar. The blob is the already-cropped square the editor
+   * produced, not the file somebody picked -- the server stores what it is
+   * given and has no image codec to resize with.
+   */
+  uploadAvatar: async (blob: Blob): Promise<PublicUserDto> => {
+    const form = new FormData();
+    form.append('file', blob, 'avatar.png');
+    const res = await send(`${serverUrl}/api/me/avatar`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+    const text = await res.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!res.ok) {
+      throw new ApiError(res.status, data.message || `HTTP ${res.status}`);
+    }
+    return data as PublicUserDto;
+  },
   guilds: () => request<GuildDto[]>('/api/guilds'),
+
+  /* ----------------------------------------------------------- channels */
+
+  /**
+   * Channel management, for an admin of the guild. The same three routes the
+   * operator console drives, and the server runs both through one service --
+   * so a channel made from the app is indistinguishable from one made in the
+   * console, including the `guild:changed` every other client hears.
+   */
+  createChannel: (guildId: string, body: { name: string; kind: 'TEXT' | 'VOICE' }) =>
+    request<ChannelDto>(`/api/guilds/${guildId}/channels`, {
+      method: 'POST',
+      body,
+    }),
+  renameChannel: (id: string, name: string) =>
+    request<ChannelDto>(`/api/channels/${id}`, { method: 'PATCH', body: { name } }),
+  deleteChannel: (id: string) =>
+    request<{ ok: boolean }>(`/api/channels/${id}`, { method: 'DELETE' }),
   members: () => request<MemberDto[]>('/api/members'),
   history: (channelId: string, before?: string, limit = 50) =>
     request<{ messages: MessageDto[]; nextCursor: string | null }>(
@@ -377,6 +440,19 @@ export const api = {
  * bounded number of images, and revoking one still on screen breaks it.
  */
 const objectUrls = new Map<string, Promise<string>>();
+
+/**
+ * An avatar, as an object URL.
+ *
+ * Same cache as attachments and for the same reason -- it is behind the bearer
+ * token, so it cannot go straight in an `<img src>`. Keyed by the path rather
+ * than a separate id because that is already unique per upload: changing your
+ * picture writes a new file with a new name, so the old entry is simply never
+ * asked for again instead of needing to be invalidated.
+ */
+export function avatarUrl(image: string): Promise<string> {
+  return attachmentUrl(image, image);
+}
 
 export function attachmentUrl(id: string, path: string): Promise<string> {
   const cached = objectUrls.get(id);

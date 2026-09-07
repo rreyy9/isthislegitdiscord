@@ -1,4 +1,5 @@
 import type { Updates } from '../updates';
+import { getClientVersion } from '../api';
 
 /**
  * The update notice.
@@ -9,7 +10,18 @@ import type { Updates } from '../updates';
  * because restarting closes a window somebody may be typing in.
  */
 export function UpdateBanner({ updates }: { updates: Updates }) {
-  const { available, state } = updates;
+  const { available, state, justUpdated } = updates;
+
+  // The receipt for a restart that worked. Checked before the early returns
+  // below: after an update there is nothing newer to report, which is the
+  // point, and the idle state would otherwise swallow it.
+  if (justUpdated && state.stage === 'idle') {
+    return (
+      <div className="upd upd-done">
+        <span>Updated to {getClientVersion()}.</span>
+      </div>
+    );
+  }
 
   // Nothing published that is newer than this build, and nothing in flight.
   if (!available && state.stage === 'idle') return null;
@@ -20,18 +32,46 @@ export function UpdateBanner({ updates }: { updates: Updates }) {
   let body: React.ReactNode;
   switch (state.stage) {
     case 'downloading':
-      body = <span>Downloading {version}… {state.percent}%</span>;
+      body = (
+        <>
+          <span>Downloading {version}…</span>
+          <span className="upd-bar">
+            <span style={{ width: `${state.percent}%` }} />
+          </span>
+          <span className="upd-why">{state.percent}%</span>
+        </>
+      );
       break;
 
     case 'ready':
       body = (
         <>
           <span>Version {version} is ready.</span>
+          {/* Said before the button is pressed, not after. A restart is much
+              easier to agree to when you know what it is going to cost — a UAC
+              prompt, or a minute out of the channel you are sitting in. */}
+          <span className="upd-why">
+            {/* A message on a ready update means a previous attempt was
+                abandoned — most often a permission prompt that got a no.
+                It outranks the advance warnings, which it has overtaken. */}
+            {state.message ??
+              (state.inCall
+                ? 'You will drop out of the call and be put back in.'
+                : state.elevates
+                  ? 'Windows will ask for permission.'
+                  : null)}
+          </span>
           <button className="upd-go" onClick={updates.install}>
-            Restart now
+            Restart &amp; install
           </button>
         </>
       );
+      break;
+
+    // The window is on its way out; the progress window in main takes over
+    // from here. This exists for the moment between the click and the hide.
+    case 'installing':
+      body = <span>Installing {version}…</span>;
       break;
 
     case 'unsupported':
@@ -91,9 +131,18 @@ export function UpdateRequired({ updates }: { updates: Updates }) {
           This server needs a newer version of the app than the one installed.
         </p>
         {state.stage === 'ready' ? (
-          <button className="primary" onClick={updates.install}>
-            Restart to update
-          </button>
+          <>
+            <button className="primary" onClick={updates.install}>
+              Restart &amp; install
+            </button>
+            {state.elevates && (
+              <p className="sub" style={{ margin: '10px 0 0' }}>
+                Windows will ask for permission.
+              </p>
+            )}
+          </>
+        ) : state.stage === 'installing' ? (
+          <p className="sub">Installing…</p>
         ) : state.stage === 'downloading' ? (
           <p className="sub">Downloading… {state.percent}%</p>
         ) : state.stage === 'available' ? (
