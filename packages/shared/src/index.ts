@@ -231,6 +231,19 @@ export const ServerConfig = z.object({
   maxUploadBytes: z.number().int(),
   appVersion: z.string(),
   voiceAudio: VoiceAudioConfig,
+  /**
+   * The newest desktop build published to this server, or null when none has
+   * been. A client compares it with its own version and offers an update; it
+   * is never a reason to refuse service.
+   */
+  latestClientVersion: z.string().nullable(),
+  /**
+   * A floor, and expected to stay null. Set only for a change that genuinely
+   * cannot be made compatible — an auth change, a security fix. Blocking ten
+   * people until each notices a dialog is worse than the skew it avoids, so
+   * reaching for this is evidence the additive rules were not followed.
+   */
+  minClientVersion: z.string().nullable(),
 });
 export type ServerConfig = z.infer<typeof ServerConfig>;
 
@@ -294,6 +307,179 @@ export const MarkReadInput = z.object({
 });
 export type MarkReadInput = z.infer<typeof MarkReadInput>;
 
+/* --------------------------------------------------- storage and retention */
+
+/**
+ * The retention policy. Every field is nullable and null means "keep", so an
+ * unset policy — which is what a fresh install has — deletes nothing at all.
+ * Turning retention on is an explicit act, and it has to be, because this is
+ * the one feature whose job is to destroy data nobody has a second copy of.
+ */
+export const RetentionPolicy = z.object({
+  /**
+   * Media is nearly all of the bytes, so it gets its own knob. Expiring
+   * images while the text of the conversation lives forever is the policy
+   * most people actually want.
+   */
+  attachmentsMaxAgeDays: z.number().int().positive().nullable(),
+  messagesMaxAgeDays: z.number().int().positive().nullable(),
+  /** Soft-deleted messages: the row and its files outlive the deletion. */
+  softDeletedMaxAgeDays: z.number().int().positive().nullable(),
+  /**
+   * The one that actually bounds the disk. Age limits nothing if ten people
+   * paste two hundred screenshots in a week; over the cap, oldest goes first.
+   */
+  uploadsMaxTotalBytes: z.number().int().positive().nullable(),
+  /** The sweeper does nothing at all while this is false. */
+  enabled: z.boolean(),
+});
+export type RetentionPolicy = z.infer<typeof RetentionPolicy>;
+
+export const RETENTION_DEFAULTS: RetentionPolicy = {
+  attachmentsMaxAgeDays: null,
+  messagesMaxAgeDays: null,
+  softDeletedMaxAgeDays: null,
+  uploadsMaxTotalBytes: null,
+  enabled: false,
+};
+
+/** What a policy would remove if it ran now. Shown before anything is saved. */
+export const RetentionPreview = z.object({
+  messages: z.number().int(),
+  attachments: z.number().int(),
+  bytes: z.number().int(),
+});
+export type RetentionPreview = z.infer<typeof RetentionPreview>;
+
+export const PURGE_KINDS = [
+  'orphaned-files',
+  'orphaned-rows',
+  'tombstones',
+  'retention',
+] as const;
+
+export const PurgeInput = z.object({
+  kind: z.enum(PURGE_KINDS),
+  /** Only for `tombstones`; null means every tombstone regardless of age. */
+  olderThanDays: z.number().int().nonnegative().nullable().optional(),
+  /**
+   * Default true, and the caller has to say `false` on purpose. A destructive
+   * endpoint whose safe mode is opt-in is a destructive endpoint that runs by
+   * accident.
+   */
+  dryRun: z.boolean().optional(),
+});
+export type PurgeInput = z.infer<typeof PurgeInput>;
+
+export const PurgeResult = z.object({
+  kind: z.enum(PURGE_KINDS),
+  dryRun: z.boolean(),
+  messages: z.number().int(),
+  attachments: z.number().int(),
+  files: z.number().int(),
+  bytes: z.number().int(),
+});
+export type PurgeResult = z.infer<typeof PurgeResult>;
+
+export const TableSize = z.object({
+  table: z.string(),
+  rows: z.number().int(),
+  totalBytes: z.number().int(),
+  indexBytes: z.number().int(),
+});
+export type TableSize = z.infer<typeof TableSize>;
+
+export const StorageReport = z.object({
+  database: z.object({
+    bytes: z.number().int(),
+    tables: z.array(TableSize),
+  }),
+  uploads: z.object({
+    files: z.number().int(),
+    bytes: z.number().int(),
+    directory: z.string(),
+  }),
+  /** Null when the volume could not be read; the page still renders. */
+  disk: z
+    .object({ freeBytes: z.number().int(), totalBytes: z.number().int() })
+    .nullable(),
+  orphans: z.object({
+    /** Rows whose file is gone: a broken image, and unrecoverable. */
+    rowsWithoutFile: z.number().int(),
+    /** Files no row points at: wasted bytes, and safe to sweep. */
+    filesWithoutRow: z.number().int(),
+    bytesWithoutRow: z.number().int(),
+  }),
+  tombstones: z.object({
+    messages: z.number().int(),
+    attachments: z.number().int(),
+    bytes: z.number().int(),
+  }),
+});
+export type StorageReport = z.infer<typeof StorageReport>;
+
+/* ------------------------------------------------------------ client skew */
+
+/**
+ * Compare two dotted versions. Positive when `a` is newer than `b`.
+ *
+ * Written out rather than compared as strings, because "0.10.0" < "0.9.0" is
+ * true of strings and false of versions -- and the first time that matters is
+ * the tenth release, by which point the wrong answer looks like a client that
+ * refuses to update.
+ */
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => {
+    // Build metadata (1.2.3+abc) is not part of ordering at all.
+    const [core, ...rest] = v.trim().replace(/^v/i, '').split('+')[0].split('-');
+    const nums = (t: string) =>
+      t.split('.').map((p) => (/^\d+$/.test(p) ? Number(p) : 0));
+    return {
+      core: nums(core),
+      // A prerelease sorts BELOW the release it precedes: 1.2.3-beta.1 is
+      // older than 1.2.3, not newer. Treating the suffix as just more numbers
+      // gets this backwards, which would offer a beta as an upgrade over the
+      // final build and refuse to publish the final build over the beta.
+      pre: rest.length ? nums(rest.join('-')) : null,
+    };
+  };
+
+  const pa = parse(a);
+  const pb = parse(b);
+
+  for (let i = 0; i < Math.max(pa.core.length, pb.core.length); i += 1) {
+    const d = (pa.core[i] ?? 0) - (pb.core[i] ?? 0);
+    if (d !== 0) return d;
+  }
+
+  if (!pa.pre && !pb.pre) return 0;
+  if (!pa.pre) return 1;
+  if (!pb.pre) return -1;
+
+  for (let i = 0; i < Math.max(pa.pre.length, pb.pre.length); i += 1) {
+    const d = (pa.pre[i] ?? 0) - (pb.pre[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+
+/**
+ * What one connected client says it is. Reported by the client on connect and
+ * kept only in memory — this is telemetry for deciding when compatibility code
+ * is safe to delete, not a record worth a table.
+ */
+export const ConnectedClient = z.object({
+  userId: z.string(),
+  username: z.string().nullable(),
+  version: z.string().nullable(),
+  connections: z.number().int(),
+});
+export type ConnectedClient = z.infer<typeof ConnectedClient>;
+
+/** The header a REST call carries its version in. */
+export const CLIENT_VERSION_HEADER = 'x-client-version';
+
 /* ------------------------------------------------------- socket.io events */
 
 /** Server -> client. */
@@ -329,6 +515,15 @@ export interface ServerToClientEvents {
     channelId: string;
     userIds: string[];
   }) => void;
+  /**
+   * A newer desktop build has been published. Sent on connect to a client that
+   * is already behind, and broadcast when one is published so an app that has
+   * been open all evening finds out without reconnecting.
+   *
+   * Additive by construction: a client too old to have registered a handler
+   * drops it, which is the whole reason new features arrive as new events.
+   */
+  'client:update-available': (payload: { version: string }) => void;
 }
 
 /** Client -> server. */

@@ -205,7 +205,7 @@ Var KeepData
 Function un.onInit
   StrCpy $KeepData "1"
   MessageBox MB_YESNO|MB_ICONQUESTION \
-    "Keep your configuration and uploaded files?$\r$\n$\r$\nYes  - server\.env and data\uploads are left behind$\r$\nNo   - everything in the install folder is removed$\r$\n$\r$\nEither way the PostgreSQL 'chat' database is NOT touched. Drop it by hand if you want the messages gone." \
+    "Keep your configuration and uploaded files?$\r$\n$\r$\nYes  - server\.env and the data\ folder (uploads, published builds) are left behind$\r$\nNo   - everything in the install folder is removed$\r$\n$\r$\nEither way the PostgreSQL 'chat' database is NOT touched. Drop it by hand if you want the messages gone." \
     IDYES keep
   StrCpy $KeepData "0"
   keep:
@@ -255,7 +255,7 @@ Section "Uninstall"
     RMDir /r "$INSTDIR\server"
     RMDir /r "$INSTDIR"
   ${Else}
-    DetailPrint "Kept server\.env and data\uploads."
+    DetailPrint "Kept server\.env and the data\ folder."
     RMDir "$INSTDIR\server"
     RMDir "$INSTDIR"
   ${EndIf}

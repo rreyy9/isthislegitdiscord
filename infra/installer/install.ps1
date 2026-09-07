@@ -381,6 +381,10 @@ MAX_UPLOAD_BYTES=26214400
 # escape sequences.
 UPLOAD_DIR="$($InstallDir -replace '\\', '/')/data/uploads"
 
+# The desktop client's update feed, for the same reason. The console
+# publishes builds into it and the server serves them from there.
+UPDATES_DIR="$($InstallDir -replace '\\', '/')/data/updates"
+
 VOICE_QUALITY="studio"
 "@
 

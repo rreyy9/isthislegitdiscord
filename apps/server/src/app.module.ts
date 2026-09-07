@@ -14,6 +14,8 @@ import { AttachmentsController } from './attachments/attachments.controller';
 import { ReadsController } from './reads/reads.controller';
 import { AdminController } from './admin/admin.controller';
 import { ModerationController } from './moderation/moderation.controller';
+import { StorageModule } from './storage/storage.module';
+import { UpdatesModule } from './updates/updates.module';
 
 @Module({
   imports: [
@@ -25,6 +27,8 @@ import { ModerationController } from './moderation/moderation.controller';
     AuthModule,
     GatewayModule,
     VoiceModule,
+    StorageModule,
+    UpdatesModule,
   ],
   controllers: [
     AppController,

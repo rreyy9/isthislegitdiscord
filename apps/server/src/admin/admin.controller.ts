@@ -63,6 +63,19 @@ export class AdminController {
     };
   }
 
+  /**
+   * Who is connected and which build they are running.
+   *
+   * The reason to collect this at all: it is what says when a compatibility
+   * branch added for one release is safe to delete. Without it, that code
+   * lives forever because nobody can show it is unused. A client too old to
+   * report its version shows as unknown, which is itself the answer.
+   */
+  @Get('clients')
+  clients() {
+    return this.gateway.connectedClients();
+  }
+
   /* ---------------------------------------------------------------- users */
 
   @Get('users')

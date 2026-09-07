@@ -18,6 +18,7 @@ import {
   typingStop,
 } from '../socket';
 import { bridge } from '../bridge';
+import { noteUpdateAvailable } from '../updates';
 import { useVoice, type VoiceSettings } from '../voice';
 import {
   ScreenPicker,
@@ -199,6 +200,13 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
 
   const voice = useVoice(voiceSettings);
 
+  // Main refuses to restart into an update while a call is up: doing it
+  // mid-conversation drops everybody else's audio with no warning. Installing
+  // on quit is unaffected, because quitting is already leaving the call.
+  useEffect(() => {
+    void bridge.setInCall(voice.channelId !== null);
+  }, [voice.channelId]);
+
   const msgsRef = useRef<HTMLDivElement>(null);
   const activeChannelRef = useRef<string | null>(null);
   const lastSeenIdRef = useRef<string | null>(null);
@@ -358,6 +366,8 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
         disconnectSocket();
       },
       onPresence: () => loadMembers(),
+      // Forwarded to the update banner, which lives above this component.
+      onUpdateAvailable: ({ version }) => noteUpdateAvailable(version),
       onVoiceParticipants: ({ channelId, userIds }) =>
         setVoiceByChannel((prev) => {
           if (userIds.length === 0) {

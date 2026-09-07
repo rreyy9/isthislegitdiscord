@@ -1,0 +1,126 @@
+{
+  "version": "2.0.0",
+
+  // Two things you run, and three things you build.
+  //
+  // The console is the launcher and the admin UI: it starts and stops the chat
+  // server, LiveKit and Caddy, runs build/migrate/seed, reads out the invite
+  // code, creates the first admin, edits .env, livekit.yaml and the Caddyfile
+  // together, and reports what the database and the disk are doing. Anything
+  // that is a button in it is not a task here, and a button also tells you
+  // whether the thing worked.
+  //
+  // The first task runs the isthislegit Server app rather than the console
+  // directly, so development uses the same thing the server box does. The app
+  // spawns the console itself and adopts one already on :4000, so there is no
+  // second task for that -- and ISTHISLEGIT_ROOT points it at this checkout,
+  // which matters on a machine that also has a server installed.
+  //
+  // The build tasks are here because the console cannot cover them. Its Build
+  // button rebuilds the server on the box the console is running on; it has
+  // never been able to build the desktop client, and since the client is built
+  // here and published to a server somewhere else, the installer is something
+  // only this machine can produce.
+  //
+  // Not covered, deliberately: `nest start --watch`. The console runs
+  // apps/server/dist/main.js, so a server code change means Build then Restart
+  // in the console. If you are working on the server itself, run
+  // `npm run dev` in a terminal instead -- and stop the console's server first,
+  // because both want port 3000.
+  "tasks": [
+    {
+      "label": "Console  →  isthislegit Server window + http://127.0.0.1:4000",
+      "detail": "Opens the operator console app. Starts everything and administers it: server, LiveKit, Caddy, database, migrations, seed, invite codes, accounts, storage, retention, updates, configuration. Closing the window hides it to the tray; Quit from the tray stops the services it started.",
+      "type": "shell",
+      "command": "npm run server-app",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "ISTHISLEGIT_ROOT": "${workspaceFolder}" }
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "runOptions": { "instanceLimit": 1 }
+    },
+    {
+      "label": "Desktop app (dev)",
+      "detail": "electron-vite dev. Opens the Electron client; it talks to http://localhost:3000 unless you change the server address on the sign-in screen.",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}/apps/desktop" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "runOptions": { "instanceLimit": 1 }
+    },
+
+    {
+      "label": "Build server",
+      "detail": "tsc for packages/shared, then nest build for apps/server. The same thing the console's Build button runs -- use that one when the console is already open, since it can Restart afterwards and this cannot.",
+      "type": "shell",
+      "command": "npm run build",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$tsc"],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Build client",
+      "detail": "tsc --noEmit, then electron-vite build into apps/desktop/out. The typecheck is a separate step on purpose: electron-vite strips types with esbuild and never checks them, so a build alone will happily package code that does not compile.",
+      "type": "shell",
+      "command": "npm run build",
+      "options": { "cwd": "${workspaceFolder}/apps/desktop" },
+      "dependsOn": ["Typecheck client"],
+      "dependsOrder": "sequence",
+      "group": "build",
+      "problemMatcher": ["$tsc"],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Typecheck client",
+      "detail": "tsc --noEmit over apps/desktop. Run by Build client; here on its own because it is the fast one.",
+      "type": "shell",
+      "command": "npx tsc --noEmit -p tsconfig.json",
+      "options": { "cwd": "${workspaceFolder}/apps/desktop" },
+      "group": "build",
+      "problemMatcher": ["$tsc"],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Package client installer  →  apps/desktop/release",
+      "detail": "electron-builder. Produces isthislegit-<version>-setup.exe, its .blockmap and latest.yml -- the three files an update is made of. Bump the version in apps/desktop/package.json first: publishing refuses a version that is not newer than the one already published. Then send it to the server with infra\\publish-desktop-update.ps1; the server box cannot build this itself.",
+      "type": "shell",
+      "command": "npm run dist",
+      "options": { "cwd": "${workspaceFolder}/apps/desktop" },
+      "dependsOn": ["Typecheck client"],
+      "dependsOrder": "sequence",
+      "group": "build",
+      "problemMatcher": ["$tsc"],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    }
+  ]
+}

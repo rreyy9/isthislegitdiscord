@@ -17,7 +17,8 @@ goes direct to the box; only signalling and the HTTP API go through the proxy.
 
 - [Layout](#layout) · [Requirements](#requirements)
 - [Running it](#running-it) · [The two installers](#the-two-installers)
-- [Configuration](#configuration) · [Going public](#going-public) · [Database](#database)
+- [Updating the client](#updating-the-client) · [Older clients](#older-clients)
+- [Configuration](#configuration) · [Going public](#going-public) · [Database](#database) · [Retention](#retention)
 - [Voice quality](#voice-quality) · [API](#api)
 - [Decisions worth not re-litigating](#decisions-worth-not-re-litigating)
 - [Bugs that cost real time](#bugs-that-cost-real-time)
@@ -38,6 +39,10 @@ infra/caddy          Caddyfile and start script: TLS for the API and signalling
 infra/installer      Builds the server installer
 infra/start-all.ps1  Start, stop and status for all three services
 infra/allow-lan.ps1  Firewall rules
+infra/publish-desktop-update.ps1  Uploads a built client to the server and publishes it
+data/uploads         Uploaded images on disk, named by id
+data/updates/desktop Published client builds: latest.yml, the installer, its blockmap
+data/updates/staging An uploaded build, before it is published
 ```
 
 Everything is TypeScript except the console, which is plain ESM with no build step.
@@ -77,9 +82,34 @@ the tray, and **Quit** from the tray stops the console and everything the consol
 
 **Start server** starts the chat server, LiveKit, and — in internet mode only — Caddy.
 **Start database** starts the PostgreSQL service. The rest of it is build, migrate, seed,
-the invite code, accounts, guilds and channels, and the deployment configuration. VS Code
-has one task for it, and one for the desktop client; there is deliberately nothing else in
-that list, because everything else is a button here.
+the invite code, accounts, guilds and channels, storage, retention, updates, and the
+deployment configuration.
+
+### The VS Code tasks
+
+Two things to run, and the builds the console cannot do for you.
+
+| Task | What it is |
+|---|---|
+| **Console** | The isthislegit Server window, and everything above |
+| **Desktop app (dev)** | `electron-vite dev` — the client, against `localhost:3000` |
+| **Build server** | `packages/shared` then `apps/server`. The console's Build button runs the same thing |
+| **Typecheck client** | `tsc --noEmit` over `apps/desktop` |
+| **Build client** | Typecheck, then `electron-vite build` into `apps/desktop/out` |
+| **Package client installer** | Typecheck, then `electron-builder` → `apps/desktop/release` |
+
+Nothing else is a task, because everything else is a button in the console — and a button
+also tells you whether the thing worked.
+
+**The build tasks are here because the console cannot cover them.** Its Build button
+rebuilds the server on the box the console is running on. It has never been able to build
+the desktop client, and now that the client is built here and published to a server
+somewhere else, the installer is something only a development machine can produce.
+
+**The typecheck is a separate step on purpose.** electron-vite strips types with esbuild
+and never checks them, so `electron-vite build` will happily package code that does not
+compile. Both client tasks depend on the typecheck rather than trusting the bundler to
+notice.
 
 **`ISTHISLEGIT_ROOT` tells the app which tree to administer**, and the VS Code task sets it
 to the checkout. Without it the app searches — last used, beside its own executable,
@@ -150,6 +180,11 @@ powershell -ExecutionPolicy Bypass -File infra\installer\build-server-installer.
 npm run dist --workspace @isthislegit/desktop
 ```
 
+The second one is the **Package client installer** task. It produces the three files an
+update is made of — the installer, its `.blockmap` and `latest.yml` — which is the same
+build [publishing](#updating-the-client) sends to the server, so the first install and
+every update after it come from one command.
+
 | | What it is | Where it goes |
 |---|---|---|
 | `isthislegit-server-<v>-setup.exe` | Server, LiveKit, Caddy, console **and** the admin app | The server box |
@@ -178,7 +213,196 @@ Menu and desktop shortcuts. `-NoServerApp` leaves it out and saves roughly 200 M
   only in packaged builds.
 - **`electronVersion` is pinned** in both Electron apps' build configs. Electron is hoisted
   to the workspace root and electron-builder cannot resolve a `^` range from a workspace.
-- **There is deliberately no auto-update.** Hand the installer over yourself.
+- **The client has no auto-update yet.** Hand the installer over yourself. There is a
+  design for one below, and because it reverses what this document used to say flatly, the
+  reasoning is written out there rather than argued again here.
+
+---
+
+## Updating the client
+
+Ten friends on ten machines, and every fix used to reach them as a 90 MB file handed over
+by hand. The client now notices a new build and offers it; nobody is ever made to take it.
+
+**`electron-updater` against a feed the chat server hosts itself.** It is the provider
+electron-builder already ships with, and it wants a directory holding three files per
+release: `latest.yml`, `isthislegit-<v>-setup.exe`, and the `.exe.blockmap` that turns the
+second update into a delta rather than another full download.
+
+**The feed URL is set at runtime, not baked into the build.** The client hardcodes nothing
+else — the server address is a field on the sign-in screen, and `/api/config` exists so that
+constants live on the server — and a compiled-in update URL would be the single exception.
+So the app points the updater at whichever server it is signed in to:
+
+```js
+autoUpdater.setFeedURL({ provider: 'generic', url: `${serverAddress}/updates/desktop` })
+```
+
+One build then serves a LAN deployment and the public one, and nobody maintains a
+per-deployment binary.
+
+**The files are served without authentication.** The build already refuses to ship a `.env`
+or a real key pair, so the installer carries no secret; and the moment auto-update matters
+most is when somebody's session has lapsed and they are stranded on an old build. A feed
+that needs a token is a feed that fails exactly then.
+
+**TLS is the whole integrity guarantee, so auto-update is https-only.** The NSIS build is
+unsigned, which means `electron-updater` cannot verify a publisher name. What it can verify
+is the sha512 in `latest.yml` against the file it downloaded — so the chain is TLS
+authenticating `latest.yml`, and `latest.yml` authenticating the executable. Over plain
+`http` that chain has no root: anyone on the path can serve a `latest.yml` of their own and
+the hash will match whatever they attached to it. The client therefore enables updates only
+when its server address is `https:`, and says updates are unavailable over an unencrypted
+connection rather than checking a feed it has no way to trust.
+
+**The build happens here; the server is somewhere else, so the build has to travel.** That
+is the whole shape of publishing. The client is built on a development machine, the server
+runs on the box at the end of the DuckDNS name, and nothing on that box has ever seen
+`apps/desktop/release`.
+
+So there is a script, run from the machine that built the client:
+
+```bash
+powershell -ExecutionPolicy Bypass -File infra\publish-desktop-update.ps1 -ServerUrl https://isthislegit.duckdns.org -Username kreso
+```
+
+It reads `latest.yml`, finds the installer *that file names* rather than whatever `.exe` is
+lying around in a folder full of old builds, checks against the server what is already
+published before spending ten minutes uploading, asks for the password, uploads each file,
+and publishes. `-StageOnly` stops after the upload so the last step can be a button in the
+console instead.
+
+**Uploads land in `data/updates/staging` and are served to nobody until they are published.**
+A feed assembled in place would mean clients downloading an installer whose last few
+megabytes were still in flight. A failed upload takes the whole staging set with it, because
+a half-written installer is one whose sha512 cannot match and whose presence is worse than
+its absence.
+
+**The upload is a raw body, not multipart, and streams straight to disk.** The installer is
+most of two hundred megabytes: buffering it would be silly, and `Invoke-WebRequest -InFile`
+sends a raw body from Windows PowerShell 5.1 without anybody hand-rolling a multipart
+encoder. Size is counted as it arrives rather than read from `Content-Length`, which is the
+sender's claim about a body it has not finished writing.
+
+**The server does the copying, and the promoting, and the telling.** It owns the feed
+directory, so one definition of where updates live beats two that can disagree; and it is
+the only party that can reach everyone — publishing emits `client:update-available`, and
+both the script and the console report how many connected clients heard it. Building and
+publishing stay two steps throughout, so a half-finished build cannot reach ten machines
+merely by landing in the right folder.
+
+The console's **Updates** tab shows what is published, what is uploaded and waiting, and who
+is running what. It also keeps a *publish from a folder on this machine* box, which is only
+useful in a development checkout where the client and the server live in one tree.
+
+**`electron-builder` needs a `publish` block or it writes no `latest.yml` at all.** There is
+one in `apps/desktop/package.json`, pointing at the public deployment. That URL is never
+used at runtime — the client sets its own feed from the server address — and it is there
+purely because its presence is what makes the build emit a feed to publish.
+
+**The server tells the client, and the client tells the user.** `/api/config` carries
+`latestClientVersion`, so an app learns on connect that it is behind; and publishing a build
+broadcasts `client:update-available` over the socket, so an app that has been open all
+evening finds out without reconnecting. Either way it is a notice and not an interruption —
+a pill in the corner, and the update installs when the user chooses to restart. Nobody is
+stopped from chatting because a newer build exists; what happens in the meantime is
+[Older clients](#older-clients).
+
+**There is no fallback path, on purpose.** If the feed is unreachable, the download fails,
+or the install is refused, the client says so once and carries on running the version it
+has. It does not retry against a second host and it does not degrade into some other
+mechanism. The recovery is the one that already works: hand somebody the `.exe`. Every
+fallback would be a second update path, tested a tenth as often as the first, running on
+ten machines that are not this one.
+
+**Nothing restarts into an update during a call.** `autoDownload` is off and installing is a
+button, so an update never closes a window somebody is typing in. The passive path is
+`autoInstallOnAppQuit`: quit normally and the downloaded update is applied, which interrupts
+nobody because quitting is already leaving. `quitAndInstall` refuses outright while the app
+is in a voice channel — the renderer reports that state to main whenever it changes — since
+restarting mid-call drops everybody else's audio with no warning.
+
+**The server box keeps its manual installer.** Auto-updating the server app means the
+process that serves the updates replacing itself while running, on the one machine that
+also has three SYSTEM scheduled tasks pointing into its install directory. That installer
+is already idempotent, it is one machine, and you are standing in front of it.
+
+---
+
+## Older clients
+
+Updating is a notice rather than a gate, so somebody is always a version behind for a few
+days. The app has to keep working for them.
+
+**Most of this is already true, by construction.** The client never validates what the
+server sends: a REST response is `JSON.parse` and a TypeScript type, and a socket payload is
+a typed interface with no runtime check at all. Every schema in `packages/shared` is a plain
+`z.object()`, which *strips* unknown keys instead of rejecting them. So a new field on an
+existing response is invisible to an old client, and a new socket event it never registered
+a handler for is dropped on the floor. **Forward compatibility is the current default, and
+the work is keeping it rather than building it.**
+
+Four rules keep it true:
+
+- **Add; never rename, never remove.** A rename is a removal with extra steps — the old
+  client reads `undefined` and draws a blank where a name used to be. Deprecate in place and
+  delete once nobody is on a version that reads it.
+- **No `.strict()`, ever, on a schema either side parses.** Strict turns "the other end
+  added a field" into a 400. Plain `z.object()` is the compatible default and every schema
+  in `packages/shared` is one today; that is worth not undoing by habit.
+- **A new request field is optional, and the server decides what its absence means.** An old
+  client cannot send a field it has never heard of, so a newly required one is a 400 on
+  every message they try to post.
+- **Prefer a new event to a changed one.** An old client ignores what it did not subscribe
+  to, which makes "emit it and let old clients not see it" the cheapest way to ship
+  anything.
+
+**What still breaks comes in three shapes**, and only the middle one is worth building for:
+
+- **A new field the old client does not draw.** Nothing breaks; the feature is merely
+  invisible. This is the intended outcome, and it needs no work.
+- **A message the old client draws *wrongly*.** The one worth spending on. When the server
+  starts marking messages in a way an old client has no idea about — a reaction, a thread
+  parent, an attachment that is not an image — drawing nothing is a lie about what was said.
+  `MessageContent` now checks each attachment's `contentType` against the four image types
+  it can actually render and draws *"This message has a &lt;type&gt; attachment this version
+  cannot show — update to see it"* for anything else. One branch, written once, so the
+  version that predates a feature already knows how to admit it. Silent is the failure mode
+  this document keeps warning about, and this is the cheapest place to refuse it.
+- **A change that cannot be made compatible.** Rare, and it means the rules above were not
+  followed. That is what `minClientVersion` is for, below.
+
+**The client says what it is, and that alone is most of the value.** `clientVersion` rides
+in the socket handshake beside the token — `auth: { token, clientVersion }`, which the
+gateway middleware already reads — and in an `X-Client-Version` header on REST calls. The
+server clamps it to something short and printable and keeps it on the connection, in memory
+and nowhere else: this is telemetry, not a record worth a table.
+
+That costs almost nothing and buys the thing that is otherwise unknowable: the console's
+**Updates** tab lists who is running what, and `GET /api/admin/clients` is where it comes
+from. Which is precisely what says when a deprecated field is safe to delete. Without it,
+compatibility code added for one release lives forever, because nobody can demonstrate it is
+unused. Someone on two machines running two builds reports as the older one, since that is
+the build constraining what the server can drop.
+
+**If gating is ever needed, gate on capability rather than version number.** Comparing
+versions means the server keeps a table of what every past release could do, which grows
+without end and is wrong the moment somebody runs a dev build. A list of feature strings in
+the same handshake lets the server ask the direct question — does this connection understand
+reactions? — and answer it for a build that has no version number at all. Not needed on day
+one. Worth knowing before the first event that would mislead an old client.
+
+**`minClientVersion` is a floor, not a plan.** A server that blocks old clients has
+converted a compatibility problem into ten people who cannot use the app until each of them
+notices a dialog, which is strictly worse than the thing it was avoiding. It is for the
+change that genuinely cannot be made compatible — an auth change, a security fix — and
+reaching for it is evidence the additive rules were not followed. It exists: set
+`MIN_CLIENT_VERSION` in `apps/server/.env` and a client under it gets an Update required
+screen instead of the app. It is unset, and the expectation is that it stays that way.
+
+**Skew has a ceiling here anyway.** Ten friends, one server, and a notice on every launch:
+the window where somebody is behind is days, not quarters. Size the compatibility budget for
+that and not for a public API.
 
 ---
 
@@ -192,6 +416,12 @@ Everything lives in three files that have to agree with each other, and the cons
 | `apps/server/.env` | Database URL, secrets, `LIVEKIT_URL`, port, voice quality, upload limit |
 | `infra/livekit/livekit.yaml` | The key pair, and which address LiveKit advertises |
 | `infra/caddy/Caddyfile` | The two public hostnames |
+
+Not everything is a file. [Retention](#retention) is policy somebody edits from the console
+rather than deployment shape, so it lives in a `ServerSetting` table — editable live, inside
+the database backup, and not a fourth file that has to agree with the other three. Two more
+paths and a version floor are `.env` because the installer writes them: `UPLOAD_DIR`,
+`UPDATES_DIR` and `MIN_CLIENT_VERSION`, all documented in `.env.example`.
 
 The tab exposes a deployment **mode** — LAN or internet — rather than the individual
 fields, because `LIVEKIT_URL` and `use_external_ip` are two halves of one decision and
@@ -302,6 +532,107 @@ not just removing a login.
 
 > A previous iteration used `prisma dev` for a Docker-free database. It lost data twice and
 > once left the tables referentially inconsistent. Do not go back to it.
+
+### Size, and what is using it
+
+Uploads are 26 MB a file, uncapped, on the same volume as PostgreSQL, so without this the
+first sign of trouble is the database refusing writes.
+
+One read-only endpoint, `GET /api/admin/storage`, behind the console's **Storage** tab:
+
+- **Per table** — rows, total bytes, index bytes, from `pg_class` and
+  `pg_total_relation_size`. The row counts are **exact**, via `query_to_xml` running one
+  `count(*)` per table inside the single query. `reltuples` and `n_live_tup` are the usual
+  answer and both are estimates maintained by ANALYZE — which on a small quiet database may
+  simply never have run, so it reported *zero accounts* on a server with four of them. A
+  wrong number in an operator console is worse than a slow one, and counting fourteen small
+  tables costs milliseconds.
+- **The database total** — `pg_database_size(current_database())`.
+- **Uploads** — file count and bytes from a walk of `data/uploads`, cached for a minute.
+- **Free space on the volume** — `fs.statfs`, which works on Windows under Node 22, so there
+  is no shelling out to `wmic`.
+- **Orphans, in both directions** — attachment rows whose file is missing, and files with no
+  row. This is the number that says whether a cleanup is safe to run, and it is the one
+  nothing currently knows.
+
+Then the actions, each of which counts first, shows what it found, and asks before it
+deletes anything: purge orphaned files, purge orphaned rows, hard-delete tombstones older
+than *n* days, and `VACUUM ANALYZE`. Plain, not `FULL` — `VACUUM FULL` takes an exclusive
+lock on the table, which belongs in a maintenance window rather than behind a button.
+`POST /api/admin/storage/purge` defaults to a dry run and the caller has to pass
+`dryRun: false` on purpose; a destructive endpoint whose safe mode is opt-in is one that
+eventually runs by accident.
+
+**The orphan sweep ignores anything written in the last hour.** A file is written before the
+row that points at it exists, so a sweep landing in that window would delete somebody's
+upload mid-post and leave them looking at a broken image. An orphan is still an orphan an
+hour later.
+
+**A deleted message is still a row, and its images are still on the disk.** `deletedAt` is
+a tombstone: the row survives so that a deletion can be looked into later, and the
+attachment rows and their files survive with it. Every image anyone has ever deleted is
+still there. Purging tombstones is the safest cleanup available and probably the one that
+recovers the most space today.
+
+**Rows first, then files.** Delete the database rows, let them commit, and afterwards sweep
+the files that no longer have a row. A crash in that order leaves wasted bytes for the next
+sweep to collect. The reverse leaves a row pointing at a file that is gone — a permanently
+broken image in somebody's scrollback — and no sweep repairs that.
+
+Destructive actions want an audit trail. An `AdminAudit` table is a few columns, and the
+day something is missing and nobody remembers pressing anything is the day it pays for
+itself.
+
+---
+
+## Retention
+
+> **Built, and switched off.** `enabled` defaults to false and every limit defaults to
+> "keep", so a fresh install deletes nothing and an upgrade changes nothing. **Do not turn
+> it on before backups exist** — see [What is left](#what-is-left). This feature's entire
+> job is to permanently destroy other people's messages, on a server that currently holds
+> the only copy of them, and one mistyped number with nothing behind it is unrecoverable.
+> The console says so on the tab, in as many words.
+
+Age-based cleanup so the disk does not fill, set once on the server rather than per client,
+for the same reason the voice bitrate is: it is a decision about shared resources.
+
+**The policy lives in a `ServerSetting` table** — `key`, a JSON `value`, `updatedAt` —
+rather than in `.env`. `.env` holds the secrets and needs a restart to be reread; this is
+policy somebody adjusts from the console at eleven at night. In a table it is editable
+live, it is already inside the database backup, and the admin API already knows how to
+serve it.
+
+| Setting | Notes |
+|---|---|
+| `attachments.maxAgeDays` | Media is nearly all of the bytes. Expiring images while text lives forever is the policy most people actually want, and it is not the same knob as messages. |
+| `messages.maxAgeDays` | Null means forever, and probably stays null. |
+| `softDeleted.maxAgeDays` | Tombstones. Short — thirty days. |
+| `uploads.maxTotalBytes` | The one that actually bounds the disk. Oldest-first eviction once over the cap. |
+
+Both kinds are needed. Age is the policy; the cap is the safety net. An age limit bounds
+nothing if ten people paste two hundred screenshots in a week.
+
+**The sweeper is a nightly `@Cron`** from `@nestjs/schedule` at 4am, deleting in batches of
+500 with a pause between them — a home box should not spend the night holding a lock on
+`message`. It re-reads the policy on every run rather than caching it, so switching
+retention off from the console takes effect without a restart. Cascades take the attachment
+rows with them; the file sweep above runs afterwards, in that order and for the reason given
+there.
+
+**Attachments a doomed message would take with it are counted once, not twice.** The
+message pass and the attachment pass overlap, and adding both totals overstates what will be
+freed — which is exactly the number somebody is deciding on.
+
+**Saving a policy shows what it would delete first.** *"Would remove 4,182 message(s) and
+906 attachment(s), freeing about 3.1 GB"*, in a confirm dialog, before anything is stored —
+and `PUT /api/admin/retention` returns the same figure for what the next nightly run will
+do. The preview runs the real selection logic rather than an approximation of it, which is
+the whole difference between an irreversible setting and a reviewed one.
+
+Nothing is broadcast when the sweeper runs. A client scrolled back to a ninety-day-old
+message at four in the morning would watch it vanish; nobody is, and a socket event for
+that is machinery bought for a case that does not arise.
 
 ---
 
@@ -448,6 +779,26 @@ candidate works.
 | — | `/api/auth/*` | Better Auth's own routes |
 | — | `/api/admin/*` | Stats, users, invites, guilds, channels, messages — ADMIN role |
 
+Storage, retention and updates:
+
+| Method | Route | Notes |
+|---|---|---|
+| GET | `/api/admin/storage` | Table sizes, uploads, free space, orphan and tombstone counts |
+| POST | `/api/admin/storage/purge` | One named purge. Dry run unless `dryRun: false` |
+| POST | `/api/admin/storage/vacuum` | `VACUUM ANALYZE` |
+| GET/PUT | `/api/admin/retention` | The policy. PUT returns what the next run would remove |
+| POST | `/api/admin/retention/preview` | What a policy *would* remove, without saving it |
+| GET | `/api/admin/clients` | Who is connected and which build they are running |
+| GET | `/api/admin/updates` | What is published, what is staged, and where both live |
+| PUT | `/api/admin/updates/staging/:file` | Upload one file of a release. Raw body, streamed |
+| DELETE | `/api/admin/updates/staging` | Throw away an upload |
+| POST | `/api/admin/updates/publish` | Promote the upload — or a `sourceDir` — and tell everyone |
+| GET | `/updates/desktop/:file` | `latest.yml`, the installer, the blockmap. **No auth** |
+
+`/api/config` also carries `latestClientVersion` and a `minClientVersion` that stays null.
+The socket handshake carries `clientVersion` beside the token, REST calls carry an
+`X-Client-Version` header, and `client:update-available` is a server-to-client event.
+
 Moderation lives on the guild routes rather than under `/api/admin`: those answer "an admin
 of anything?" for the console, whereas kicking someone has to ask "an admin of *this*
 guild?". Muting, kicking and banning all refuse to act on yourself or another admin — roles
@@ -514,9 +865,51 @@ Socket.IO events are declared in `packages/shared/src/index.ts`.
 - **The gate meters a *clone* of the microphone track.** Metering the published one would
   read silence the moment the gate muted it, and the mic would never open again.
 
+**Storage and updates**
+
+- **Rows are deleted before their files, never the other way round.** An orphaned file is
+  wasted bytes the next sweep collects; an orphaned row is a broken image nothing repairs.
+- **The retention policy lives in a table, not `.env`.** It is edited live from the console
+  and it belongs inside the backup.
+- **The update feed is unauthenticated, and https only.** The installer holds no secret, and
+  a feed needing a token fails precisely when a lapsed session has stranded somebody on an
+  old build. Unsigned builds make TLS the root of the integrity chain, so the client will
+  not check a feed it reached over plain http.
+- **The feed URL comes from the server address at runtime**, not from the build. The client
+  hardcodes nothing else, and this would be the one exception.
+- **Builds are uploaded to the server, not read from beside it.** The machine that builds the
+  client is not the machine that runs the server, and it never will be.
+- **An upload is staged, and a failed one is discarded whole.** A half-written installer in
+  the feed is worse than no installer: its hash cannot match, so every client that tries it
+  fails, and none of them can say why.
+- **The server box updates by hand.** Self-updating the process that serves the updates, on
+  the machine holding the SYSTEM scheduled tasks, buys nothing on a one-machine deployment.
+- **An out-of-date client is notified, never blocked.** Ten people locked out until each
+  notices a dialog is worse than the skew it was avoiding. `minClientVersion` exists as a
+  floor and is expected to stay null.
+- **One update path, no fallbacks.** A second one would be tested a tenth as often as the
+  first, on ten machines that are not this one. When it fails, the recovery is the `.exe`.
+- **The API is additive: fields and events are added, never renamed or removed.** The client
+  runtime-validates nothing the server sends and every shared schema is a plain `z.object()`,
+  so unknown keys already strip and unheard-of events already drop. That compatibility is
+  free until somebody renames something or reaches for `.strict()`.
+- **Unrecognised content renders as a placeholder**, never as nothing. An old client drawing
+  a blank where a message has a reaction or a non-image attachment is lying about what was
+  said.
+- **The orphan sweep has an hour's grace.** A file exists before its row does, and sweeping
+  that window deletes a live upload.
+- **Row counts are counted, not estimated.** `n_live_tup` reads zero on a database that has
+  never been analysed, and a console reporting no accounts is worse than a slow query.
+- **A prerelease sorts below its release.** `1.2.3-beta.1` is older than `1.2.3`; treating
+  the suffix as more numbers reverses that, which would offer a beta as an upgrade over the
+  final build and then refuse to publish the final build over the beta.
+- **`compareVersions` is duplicated in the desktop client on purpose.** That app imports
+  nothing from `packages/shared` — it redeclares the DTOs it needs — and a workspace
+  dependency for twelve pure lines is a worse trade than the copy. Change one, change both.
+
 **Deliberately not done**
 
-Federation, mobile clients, custom emoji, threads, video calls, a web client, auto-update.
+Federation, mobile clients, custom emoji, threads, video calls, a web client.
 Ten friends and one box is the whole design.
 
 ---
@@ -586,7 +979,9 @@ Ordered by what hurts soonest.
 
 1. **No backups.** Not of the database, not of `data/`. Other people's messages, images and
    password hashes, zero copies. `pg_dump` on a schedule written somewhere that is not this
-   machine, and a restore actually tried once.
+   machine, and a restore actually tried once. **[Retention](#retention) must not ship
+   before this does**, since it deletes on purpose the thing nothing here is keeping a copy
+   of.
 2. **No tests, and no test runner in any package.** Start with the pure modules, which are
    already shaped for it: `link-utils.ts`, `audio-levels.ts`, `image-size.ts`,
    `audio-config.ts`, and the permission matrix.
@@ -597,8 +992,10 @@ Ordered by what hurts soonest.
 
 **Should do soon**
 
-4. **Disk fill takes PostgreSQL down, not just uploads.** 26 MB per file, no per-user quota,
-   no total cap, no cleanup, same disk as the database.
+4. **Disk fill takes PostgreSQL down, not just uploads.** Now visible and now clearable —
+   see [Size, and what is using it](#size-and-what-is-using-it) — but still not *bounded*
+   until somebody sets a [retention](#retention) policy, and that should wait for backups.
+   There is still no per-user quota.
 5. **CORS reflects any origin** with credentials. Pin it to the origins that exist.
 6. **Invite codes use `Math.random()`** — one line to `crypto.randomInt`, and invites are the
    entire perimeter around registration.
@@ -625,3 +1022,11 @@ Ordered by what hurts soonest.
     and devtools shows those with provisional headers, which reads as a cross-origin block
     and is not one. `api.ts` now names the origin that did not answer, and says that a
     server with no proxy in front of it is `http://` on its own port.
+
+**What was just built, and what it still waits on**
+
+[Storage accounting](#size-and-what-is-using-it), the manual purges,
+[retention](#retention), [client updates](#updating-the-client) and the
+[client-version telemetry](#older-clients) are all in. Retention ships disabled and should
+stay that way until item 1 is done: it is the one feature whose job is to destroy the only
+copy of something.

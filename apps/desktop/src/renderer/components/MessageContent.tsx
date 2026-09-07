@@ -131,6 +131,32 @@ export function AttachmentImage({ file }: { file: AttachmentDto }) {
   );
 }
 
+/* ------------------------------------------------------ forward compat */
+
+/**
+ * Something this build cannot draw.
+ *
+ * The server adds fields and events; it never renames or removes them, so an
+ * older client keeps working and simply does not see what is new. That covers
+ * almost everything -- but not the case where a message *has* content this
+ * build has no idea how to render. Drawing nothing there is a lie about what
+ * was said, so it says so instead.
+ *
+ * One branch, written once, covers every future case: anything unrecognised
+ * lands here rather than needing its own handling in the version that predates
+ * it.
+ */
+function Unrenderable({ what }: { what: string }) {
+  return (
+    <div className="attach-failed">
+      This message has {what} this version cannot show — update to see it.
+    </div>
+  );
+}
+
+/** The types this build knows how to put on screen. */
+const RENDERABLE = /^image\/(png|jpeg|gif|webp)$/i;
+
 /* ------------------------------------------------------------- content */
 
 /** Links open in the real browser, never inside the app window. */
@@ -189,9 +215,15 @@ export function MessageContent({
           {edited && <span className="edited"> (edited)</span>}
         </div>
       )}
-      {attachments.map((a) => (
-        <AttachmentImage key={a.id} file={a} />
-      ))}
+      {attachments.map((a) =>
+        RENDERABLE.test(a.contentType) ? (
+          <AttachmentImage key={a.id} file={a} />
+        ) : (
+          // A newer server accepting a file type this build was never taught
+          // to draw. Naming it beats an empty space where a file should be.
+          <Unrenderable key={a.id} what={`a ${a.contentType} attachment`} />
+        ),
+      )}
       {embeds}
     </>
   );

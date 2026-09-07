@@ -558,3 +558,22 @@ button { font-family: inherit; cursor: pointer; }
    job here, so the first control must not be pushed down twice. */
 .settings .row-label:first-of-type { margin-top: 11px; }
 .settings select { max-width: 420px; }
+
+/* --------------------------------------------------------------- updates */
+/* A notice, not a dialog: an out-of-date client keeps working, so this waits
+   in the corner for somebody to have a moment rather than taking one. */
+.upd {
+  position: fixed; right: 16px; bottom: 16px; z-index: 40;
+  display: flex; align-items: center; gap: 10px; max-width: 420px;
+  background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 9px; padding: 10px 14px; font-size: 13px;
+  box-shadow: 0 8px 26px rgba(0,0,0,.45);
+}
+.upd-ready { border-color: var(--accent); }
+.upd-error { border-color: var(--bad); }
+.upd-why { color: var(--dim); font-size: 12px; }
+.upd-go {
+  background: var(--accent); border: 1px solid var(--accent); color: #fff;
+  padding: 5px 12px; border-radius: 6px; font-size: 12.5px; white-space: nowrap;
+}
+.upd-go:hover { filter: brightness(1.1); }

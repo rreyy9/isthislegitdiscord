@@ -9,7 +9,11 @@ out/
 # Secrets and local config
 .env
 .env*.local
-.vscode/
+# Contents rather than the directory itself: git will not un-ignore a file
+# inside an excluded directory, and tasks.json has to travel with the repo --
+# it is project tooling the README documents, not personal editor settings.
+.vscode/*
+!.vscode/tasks.json
 
 # Prisma generates its client into the source tree
 apps/server/src/generated/

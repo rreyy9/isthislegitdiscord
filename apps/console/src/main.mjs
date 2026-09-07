@@ -649,6 +649,40 @@ app.get('/sv/invite-code', (req, res) => {
   res.json({ ok: false, code: null });
 });
 
+/**
+ * Where the desktop client's build output is, so publishing an update is one
+ * button rather than a typed path.
+ *
+ * Only ever reported, never published from automatically: building and
+ * publishing stay two steps, so a half-finished build cannot reach ten
+ * machines by landing in the right folder. The server does the copying and the
+ * validating -- it owns the feed directory, and one definition of where
+ * updates live beats two that can disagree.
+ */
+const DESKTOP_RELEASE = [
+  path.join(ROOT, 'apps/desktop/release'),
+  path.resolve(__dirname, '../../desktop-release'),
+].find((dir) => fs.existsSync(dir)) ?? path.join(ROOT, 'apps/desktop/release');
+
+app.get('/sv/desktop-release', (req, res) => {
+  const yaml = path.join(DESKTOP_RELEASE, 'latest.yml');
+  if (!fs.existsSync(yaml)) {
+    return res.json({ ok: false, dir: DESKTOP_RELEASE, version: null });
+  }
+  let version = null;
+  try {
+    // Split and match per line: a pattern anchored with $ against a CRLF file
+    // matches nothing, which is a failure this repository has paid for once.
+    for (const line of fs.readFileSync(yaml, 'utf8').split(/\r?\n/)) {
+      const m = line.match(/^version:\s*(.+?)\s*$/);
+      if (m) { version = m[1].replace(/^['"]|['"]$/g, ''); break; }
+    }
+  } catch {
+    // Unreadable is the same as absent for this purpose.
+  }
+  res.json({ ok: Boolean(version), dir: DESKTOP_RELEASE, version });
+});
+
 /* ------------------------------------------------------------- configuration */
 
 app.get('/sv/config', (req, res) => {

@@ -58,6 +58,21 @@ export interface ScreenSource {
   isScreen: boolean;
 }
 
+/** What the updater is doing. See main/updater.ts. */
+export interface UpdateState {
+  stage:
+    | 'idle'
+    | 'unsupported'
+    | 'checking'
+    | 'available'
+    | 'downloading'
+    | 'ready'
+    | 'error';
+  version: string | null;
+  percent: number;
+  message: string | null;
+}
+
 const bridge = {
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
   setSettings: (patch: Partial<Settings>): Promise<Settings> =>
@@ -65,6 +80,36 @@ const bridge = {
   getToken: (): Promise<string> => ipcRenderer.invoke('token:get'),
   setToken: (token: string): Promise<boolean> =>
     ipcRenderer.invoke('token:set', token),
+
+  /* ------------------------------------------------------------ updates */
+
+  /** The running build, from app.getVersion(). */
+  getVersion: (): Promise<string> => ipcRenderer.invoke('app:version'),
+  /**
+   * Point the updater at the server this client is signed in to and ask what
+   * it has. The feed follows the address rather than the build, so one binary
+   * serves a LAN deployment and the public one.
+   */
+  checkForUpdate: (serverUrl: string): Promise<UpdateState> =>
+    ipcRenderer.invoke('update:check', serverUrl),
+  downloadUpdate: (): Promise<UpdateState> =>
+    ipcRenderer.invoke('update:download'),
+  /** Restarts into the new version. Refused while a call is up. */
+  installUpdate: (): Promise<boolean> => ipcRenderer.invoke('update:install'),
+  updateState: (): Promise<UpdateState> => ipcRenderer.invoke('update:state'),
+  /**
+   * Tell main whether a call is up, so it can refuse to restart into an
+   * update mid-conversation.
+   */
+  setInCall: (value: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('update:in-call', value),
+  onUpdateState: (cb: (state: UpdateState) => void): (() => void) => {
+    const handler = (_e: unknown, state: UpdateState) => cb(state);
+    ipcRenderer.on('update:state', handler);
+    return () => {
+      ipcRenderer.off('update:state', handler);
+    };
+  },
 
   /* ------------------------------------------------------- screen share */
 

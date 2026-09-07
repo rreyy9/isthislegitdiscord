@@ -1,5 +1,5 @@
 import { io, type Socket } from 'socket.io-client';
-import { getServerUrl, getToken } from './api';
+import { getClientVersion, getServerUrl, getToken } from './api';
 import type { MessageDto } from './api';
 
 /**
@@ -30,6 +30,12 @@ export interface SocketEvents {
   onPresence: (p: { userId: string; online: boolean }) => void;
   onTyping: (p: { channelId: string; userId: string; typing: boolean }) => void;
   onVoiceParticipants: (p: { channelId: string; userIds: string[] }) => void;
+  /**
+   * A newer build has been published while this client was connected. An older
+   * client never registered this handler and simply drops the event, which is
+   * why new features arrive as new events rather than changes to old ones.
+   */
+  onUpdateAvailable: (p: { version: string }) => void;
   onStatus: (status: 'connected' | 'disconnected' | 'connecting') => void;
   onReconnected: () => void;
 }
@@ -42,7 +48,9 @@ export function connectSocket(events: SocketEvents): Socket {
   events.onStatus('connecting');
   socket = io(getServerUrl(), {
     transports: ['websocket'],
-    auth: { token: getToken() },
+    // The version rides along with the token, in the one payload a renderer
+    // can put anything in -- a WebSocket handshake takes no headers.
+    auth: { token: getToken(), clientVersion: getClientVersion() },
     reconnection: true,
     reconnectionDelay: 500,
     reconnectionDelayMax: 5000,
@@ -69,6 +77,7 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('presence:changed', events.onPresence);
   socket.on('typing:changed', events.onTyping);
   socket.on('voice:participants', events.onVoiceParticipants);
+  socket.on('client:update-available', events.onUpdateAvailable);
 
   return socket;
 }

@@ -9,10 +9,25 @@ import { bridge } from './bridge';
 let serverUrl = 'http://localhost:3000';
 let token = '';
 
+/**
+ * This build's version, sent with every request and on the socket handshake.
+ *
+ * Not so the server can refuse anything -- it is telemetry. Knowing which
+ * builds are actually connected is what says when a compatibility branch added
+ * for one release is safe to delete; without it that code lives forever,
+ * because nobody can show it is unused.
+ */
+let clientVersion = '';
+
 export async function initApi() {
   const settings = await bridge.getSettings();
   serverUrl = settings.serverUrl;
   token = await bridge.getToken();
+  clientVersion = await bridge.getVersion().catch(() => '');
+}
+
+export function getClientVersion() {
+  return clientVersion;
 }
 
 export function getServerUrl() {
@@ -86,6 +101,7 @@ async function request<T>(
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(clientVersion ? { 'X-Client-Version': clientVersion } : {}),
     },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
@@ -103,6 +119,16 @@ async function request<T>(
 }
 
 /* ------------------------------------------------------------------ calls */
+
+export interface ServerConfigDto {
+  livekitUrl: string;
+  maxUploadBytes: number;
+  appVersion: string;
+  /** Null until a desktop build has been published to this server. */
+  latestClientVersion: string | null;
+  /** A floor. Expected to stay null; see the README's Older clients. */
+  minClientVersion: string | null;
+}
 
 export interface Me {
   id: string;
@@ -185,6 +211,12 @@ export interface BanDto {
 
 export const api = {
   health: () => request<{ ok: boolean }>('/api/health'),
+  /**
+   * Everything the client would otherwise hardcode, including the newest
+   * published build. Read after sign-in; unknown fields are ignored, which is
+   * what makes a newer server safe to talk to.
+   */
+  config: () => request<ServerConfigDto>('/api/config'),
   login: (username: string, password: string) =>
     request<{ token: string }>('/api/login', {
       method: 'POST',

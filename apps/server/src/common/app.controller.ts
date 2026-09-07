@@ -4,6 +4,7 @@ import { Controller, Get } from '@nestjs/common';
 import type { ServerConfig } from '@isthislegit/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { voiceAudioConfig } from '../voice/audio-config';
+import { UpdatesService } from '../updates/updates.service';
 
 /**
  * Read once, from package.json rather than npm_package_version: that variable
@@ -29,7 +30,10 @@ const APP_VERSION = (() => {
 
 @Controller('api')
 export class AppController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly updates: UpdatesService,
+  ) {}
 
   @Get('health')
   async health() {
@@ -42,7 +46,7 @@ export class AppController {
    * needs a reinstall to change a constant, so it asks instead.
    */
   @Get('config')
-  config(): ServerConfig {
+  async config(): Promise<ServerConfig> {
     return {
       livekitUrl: process.env.LIVEKIT_URL ?? 'ws://localhost:7880',
       maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES ?? 26214400),
@@ -51,6 +55,13 @@ export class AppController {
       // Here so the settings screen can show the active quality before anyone
       // has joined a call.
       voiceAudio: voiceAudioConfig(),
+      // Null until a build has been published. The client offers an update;
+      // it is never a reason to refuse service.
+      latestClientVersion: await this.updates.latestVersion(),
+      // A floor, and expected to stay null. Set it only for a change that
+      // genuinely cannot be made compatible -- blocking ten people until each
+      // notices a dialog is worse than the skew it avoids.
+      minClientVersion: process.env.MIN_CLIENT_VERSION || null,
     };
   }
 }

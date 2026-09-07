@@ -11,13 +11,20 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { fromNodeHeaders } from 'better-auth/node';
-import type { Message } from '@isthislegit/shared';
+import { compareVersions } from '@isthislegit/shared';
+import type { ConnectedClient, Message } from '@isthislegit/shared';
 import { AUTH, type Auth } from '../auth/auth.factory';
 import { PermissionService } from '../auth/permission.guard';
 
 interface SocketData {
   userId: string;
   username: string | null;
+  /**
+   * What the client says it is, or null from one too old to say. Kept in
+   * memory only: this is telemetry for deciding when a compatibility branch is
+   * safe to delete, not a record worth a table.
+   */
+  clientVersion: string | null;
 }
 
 @WebSocketGateway({
@@ -67,9 +74,18 @@ export class ChatGateway
         return;
       }
 
+      // A version is whatever the client claims, so it is clamped to
+      // something short and printable before it is ever shown in the console.
+      const claimed = (socket.handshake.auth as any)?.clientVersion;
+      const clientVersion =
+        typeof claimed === 'string' && /^[\w.+-]{1,32}$/.test(claimed)
+          ? claimed
+          : null;
+
       socket.data = {
         userId: session.user.id,
         username: (session.user as any).username ?? null,
+        clientVersion,
       } satisfies SocketData;
       next();
     });
@@ -113,6 +129,56 @@ export class ChatGateway
 
   onlineUserIds(): string[] {
     return [...this.connections.keys()];
+  }
+
+  /**
+   * Who is connected and on what.
+   *
+   * This is the whole point of asking clients their version: it is what says
+   * when a deprecated field is safe to delete. Without it, compatibility code
+   * added for one release lives forever, because nobody can demonstrate it is
+   * unused.
+   */
+  connectedClients(): ConnectedClient[] {
+    const byUser = new Map<string, ConnectedClient>();
+    for (const socket of this.server?.sockets?.sockets?.values() ?? []) {
+      const data = socket.data as SocketData;
+      if (!data?.userId) continue;
+
+      const seen = byUser.get(data.userId);
+      if (seen) {
+        seen.connections += 1;
+        // Two windows on two builds: report the older one, since that is the
+        // one that constrains what the server can stop supporting.
+        if (
+          !seen.version ||
+          (data.clientVersion &&
+            compareVersions(data.clientVersion, seen.version) < 0)
+        ) {
+          seen.version = data.clientVersion;
+        }
+        continue;
+      }
+      byUser.set(data.userId, {
+        userId: data.userId,
+        username: data.username,
+        version: data.clientVersion,
+        connections: 1,
+      });
+    }
+    return [...byUser.values()];
+  }
+
+  /**
+   * Tell every connected client a newer build exists.
+   *
+   * Additive by construction: a client too old to have registered a handler
+   * drops it, which is exactly why new features arrive as new events rather
+   * than as changes to existing ones.
+   */
+  announceUpdate(version: string): number {
+    this.server.emit('client:update-available', { version });
+    return this.server?.sockets?.sockets?.size ?? 0;
   }
 
   @SubscribeMessage('channel:join')

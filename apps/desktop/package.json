@@ -22,6 +22,7 @@
     "vite": "^7.3.6"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "livekit-client": "^2.22.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -66,6 +67,12 @@
       "createDesktopShortcut": true,
       "shortcutName": "isthislegit"
     },
-    "electronVersion": "44.1.1"
+    "electronVersion": "44.1.1",
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://isthislegit.duckdns.org/updates/desktop"
+      }
+    ]
   }
 }

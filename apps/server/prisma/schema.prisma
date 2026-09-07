@@ -238,3 +238,19 @@ model GuildBan {
   @@unique([guildId, userId])
   @@index([userId])
 }
+
+/**
+ * Server-wide policy that somebody edits from the console, keyed by name with
+ * a JSON body.
+ *
+ * Deliberately not `.env`. That file holds the secrets, it needs a restart to
+ * be reread, and it is one of the three deployment files the Configuration tab
+ * keeps in agreement with each other -- none of which is true of a retention
+ * policy adjusted at eleven at night. In a table it is editable live and it is
+ * already inside the database backup.
+ */
+model ServerSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}

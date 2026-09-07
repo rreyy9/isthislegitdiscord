@@ -17,6 +17,7 @@ import {
   registerScreenShare,
   type PttBinding,
 } from './voice-main';
+import { registerUpdater } from './updater';
 
 /**
  * Main process. Deliberately small: no mTLS in this build, so the renderer can
@@ -270,6 +271,15 @@ ipcMain.handle('settings:set', (_e, patch: Partial<Settings>) => {
   });
   return loadSettings();
 });
+/**
+ * The running build's own version.
+ *
+ * From `app.getVersion()` rather than an import of package.json: that is what
+ * the installer wrote and what electron-updater compares against, so it is the
+ * one number that cannot disagree with the thing on disk.
+ */
+ipcMain.handle('app:version', () => app.getVersion());
+
 ipcMain.handle('token:get', () => loadToken());
 ipcMain.handle('token:set', (_e, token: string) => {
   saveToken(token);
@@ -330,6 +340,7 @@ app.whenReady().then(() => {
   );
 
   registerScreenShare(() => mainWindow);
+  registerUpdater(() => mainWindow);
   const ptt = registerPushToTalk(() => mainWindow);
   // The global hook keeps the process alive if it is never stopped.
   app.on('before-quit', () => ptt.stopHook());

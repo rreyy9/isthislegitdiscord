@@ -94,6 +94,8 @@
   <button data-tab="users">Accounts</button>
   <button data-tab="invites">Invites</button>
   <button data-tab="channels">Channels</button>
+  <button data-tab="storage">Storage</button>
+  <button data-tab="updates">Updates</button>
   <button data-tab="config">Configuration</button>
   <button data-tab="logs">Logs</button>
 </nav>
@@ -242,6 +244,144 @@
       <h2>Guilds and channels</h2>
       <div id="channels-body"></div>
     </div>
+    <div class="card not-admin"><span class="muted">Sign in on the Accounts tab first.</span></div>
+  </section>
+
+  <!-- ----------------------------------------------------------- storage -->
+  <section id="tab-storage" class="hidden">
+    <div class="card admin-only hidden">
+      <h2>Space</h2>
+      <div id="storage-stats"><span class="muted">Loading…</span></div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="b-storage-refresh">Refresh</button>
+        <button class="btn" id="b-vacuum">Vacuum</button>
+      </div>
+      <div class="hint">
+        Uploads and the database share a volume, so a full disk stops
+        PostgreSQL accepting writes and not just uploads. Vacuum is plain
+        <code>VACUUM ANALYZE</code>, never FULL — FULL takes an exclusive lock
+        on every table it touches.
+      </div>
+    </div>
+
+    <div class="card admin-only hidden">
+      <h2>Tables</h2>
+      <table>
+        <thead><tr><th>Table</th><th>Rows</th><th>Total</th><th>Indexes</th></tr></thead>
+        <tbody id="storage-tables"></tbody>
+      </table>
+      <div class="hint">Counted exactly, not estimated — a quiet database's row estimates read zero.</div>
+    </div>
+
+    <div class="card admin-only hidden">
+      <h2>Reclaim</h2>
+      <div class="row">
+        <button class="btn" data-purge="orphaned-files">Orphaned files</button>
+        <button class="btn" data-purge="orphaned-rows">Orphaned rows</button>
+        <button class="btn" data-purge="tombstones">Deleted messages</button>
+        <span class="lbl" style="min-width:0">older than</span>
+        <input id="purge-days" type="number" min="0" value="30" style="width:80px">
+        <span class="muted">days</span>
+      </div>
+      <div id="purge-out" class="hint"></div>
+      <div class="hint">
+        Every button counts first and asks before it deletes. A deleted message
+        is still a row and its images are still on the disk — the tombstone
+        purge is usually what recovers the most space.
+      </div>
+    </div>
+
+    <div class="card admin-only hidden">
+      <h2>Retention</h2>
+      <div class="row" style="margin-bottom:10px">
+        <label class="choice"><input type="checkbox" id="ret-enabled"> Run nightly</label>
+        <span class="muted">at 4am, in batches</span>
+      </div>
+      <div class="row"><span class="lbl">Delete images after</span>
+        <input id="ret-att" type="number" min="1" placeholder="never" style="width:110px"><span class="muted">days</span></div>
+      <div class="row"><span class="lbl">Delete messages after</span>
+        <input id="ret-msg" type="number" min="1" placeholder="never" style="width:110px"><span class="muted">days</span></div>
+      <div class="row"><span class="lbl">Purge deleted after</span>
+        <input id="ret-soft" type="number" min="1" placeholder="never" style="width:110px"><span class="muted">days</span></div>
+      <div class="row"><span class="lbl">Cap total uploads at</span>
+        <input id="ret-cap" type="number" min="1" placeholder="no cap" style="width:110px"><span class="muted">MB</span></div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="b-ret-preview">Preview</button>
+        <button class="btn primary" id="b-ret-save">Save policy</button>
+      </div>
+      <div id="ret-out" class="hint"></div>
+      <div class="warn-line">
+        This permanently deletes other people's messages, and there are no
+        backups of this database. Leave it off until there are.
+      </div>
+    </div>
+
+    <div class="card not-admin"><span class="muted">Sign in on the Accounts tab first.</span></div>
+  </section>
+
+  <!-- ----------------------------------------------------------- updates -->
+  <section id="tab-updates" class="hidden">
+    <div class="card admin-only hidden">
+      <h2>Published desktop build</h2>
+      <div id="upd-current"><span class="muted">Loading…</span></div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="b-upd-refresh">Refresh</button>
+      </div>
+      <div class="hint">
+        Clients only take an update over an <b>https</b> server address: the
+        build is unsigned, so TLS is the only thing proving an update came from
+        here.
+      </div>
+    </div>
+
+    <div class="card admin-only hidden">
+      <h2>Uploaded, waiting to publish</h2>
+      <div id="upd-staged"><span class="muted">Loading…</span></div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="b-upd-publish" disabled>Publish it</button>
+        <button class="btn danger" id="b-upd-discard" disabled>Discard</button>
+      </div>
+      <div id="upd-out" class="hint"></div>
+      <div class="hint">
+        The client is built on a development machine, not on this one, so it is
+        uploaded here and published from here. From the machine that built it:
+        <div class="mono" style="margin:6px 0 0">
+          powershell -ExecutionPolicy Bypass -File infra\publish-desktop-update.ps1
+          -ServerUrl https://your.server -Username you
+        </div>
+        That script uploads and publishes in one go. Add <code>-StageOnly</code>
+        to stop after the upload and press Publish here instead. Nothing
+        reaches any client until it is published.
+      </div>
+    </div>
+
+    <div class="card admin-only hidden">
+      <h2>Publish from a folder on this machine</h2>
+      <div class="row">
+        <input id="upd-dir" placeholder="path to a desktop release folder" style="flex:1;min-width:280px">
+        <button class="btn" id="b-upd-publish-dir">Publish folder</button>
+      </div>
+      <div id="upd-dir-hint" class="hint"></div>
+      <div class="hint">
+        For a development checkout, where the client and the server live in one
+        tree. On the real server box the release folder is not here — use
+        the upload above.
+      </div>
+    </div>
+
+    <div class="card admin-only hidden">
+      <h2>Connected clients</h2>
+      <table>
+        <thead><tr><th>Account</th><th>Version</th><th>Connections</th></tr></thead>
+        <tbody id="upd-clients"></tbody>
+      </table>
+      <div class="hint">
+        What each connected app reports itself as. This is what says when a
+        compatibility branch is safe to delete; an app too old to report shows
+        as unknown, which is itself the answer.
+      </div>
+    </div>
+
     <div class="card not-admin"><span class="muted">Sign in on the Accounts tab first.</span></div>
   </section>
 
@@ -418,8 +558,179 @@ document.querySelectorAll('nav button').forEach((b) => {
     if (b.dataset.tab === 'invites') loadInvites();
     if (b.dataset.tab === 'channels') loadChannels();
     if (b.dataset.tab === 'config') loadConfig();
+    if (b.dataset.tab === 'storage') { loadStorage(); loadRetention(); }
+    if (b.dataset.tab === 'updates') { loadUpdates(); loadClients(); }
   };
 });
+
+/* --------------------------------------------------------------- storage */
+
+function bytes(n) {
+  if (n === null || n === undefined) return '—';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = Number(n);
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1; }
+  return (v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)) + ' ' + u[i];
+}
+
+async function loadStorage() {
+  if (!token) return;
+  try {
+    const s = await api('/api/admin/storage');
+    const free = s.disk
+      ? bytes(s.disk.freeBytes) + ' free of ' + bytes(s.disk.totalBytes)
+      : 'unknown';
+
+    $('#storage-stats').innerHTML =
+      [['Database', bytes(s.database.bytes)],
+       ['Uploads', bytes(s.uploads.bytes) + ' in ' + s.uploads.files + ' files'],
+       ['Disk', free],
+       ['Deleted messages', s.tombstones.messages + ' · ' + bytes(s.tombstones.bytes)]]
+        .map(([l, v]) => '<span class="stat"><b>' + v + '</b><span>' + l + '</span></span>').join('')
+      + '<div class="hint">' + esc(s.uploads.directory) + '</div>'
+      + (s.orphans.filesWithoutRow
+          ? '<div class="warn-line">' + s.orphans.filesWithoutRow + ' file(s) no message points at, '
+            + bytes(s.orphans.bytesWithoutRow) + ' — safe to sweep.</div>' : '')
+      + (s.orphans.rowsWithoutFile
+          ? '<div class="warn-line">' + s.orphans.rowsWithoutFile
+            + ' attachment row(s) whose file is gone — those images are already lost.</div>' : '');
+
+    $('#storage-tables').innerHTML = s.database.tables.map((t) =>
+      '<tr><td class="mono">' + esc(t.table) + '</td><td>' + t.rows
+      + '</td><td>' + bytes(t.totalBytes) + '</td><td>' + bytes(t.indexBytes) + '</td></tr>').join('');
+  } catch (e) {
+    $('#storage-stats').textContent = 'Unavailable — is the server running?';
+  }
+}
+
+/** Count first, then ask, then delete. Never the other way round. */
+async function purge(kind) {
+  const days = Number($('#purge-days').value);
+  const body = { kind, dryRun: true };
+  if (kind === 'tombstones') body.olderThanDays = Number.isFinite(days) ? days : null;
+
+  try {
+    const dry = await api('/api/admin/storage/purge', { method: 'POST', body: JSON.stringify(body) });
+    const what = [
+      dry.messages ? dry.messages + ' message(s)' : null,
+      dry.attachments ? dry.attachments + ' attachment(s)' : null,
+      dry.files ? dry.files + ' file(s)' : null,
+    ].filter(Boolean).join(', ') || 'nothing';
+
+    if (what === 'nothing') { $('#purge-out').textContent = 'Nothing to remove.'; return; }
+    if (!confirm('Permanently remove ' + what + ' (' + bytes(dry.bytes) + ')?\n\nThere is no undo.')) return;
+
+    const done = await api('/api/admin/storage/purge', {
+      method: 'POST', body: JSON.stringify({ ...body, dryRun: false }),
+    });
+    $('#purge-out').textContent =
+      'Removed ' + done.messages + ' message(s), ' + done.attachments
+      + ' attachment(s), ' + done.files + ' file(s), ' + bytes(done.bytes) + '.';
+    toast('purge complete');
+    loadStorage();
+  } catch (e) { toast(e.message, true); }
+}
+
+/* ------------------------------------------------------------- retention */
+
+const MB = 1024 * 1024;
+const retNum = (id) => { const v = Number($(id).value); return $(id).value === '' || !Number.isFinite(v) || v <= 0 ? null : v; };
+
+function retPolicy() {
+  const cap = retNum('#ret-cap');
+  return {
+    enabled: $('#ret-enabled').checked,
+    attachmentsMaxAgeDays: retNum('#ret-att'),
+    messagesMaxAgeDays: retNum('#ret-msg'),
+    softDeletedMaxAgeDays: retNum('#ret-soft'),
+    uploadsMaxTotalBytes: cap === null ? null : Math.round(cap * MB),
+  };
+}
+
+async function loadRetention() {
+  if (!token) return;
+  try {
+    const p = await api('/api/admin/retention');
+    $('#ret-enabled').checked = Boolean(p.enabled);
+    $('#ret-att').value = p.attachmentsMaxAgeDays ?? '';
+    $('#ret-msg').value = p.messagesMaxAgeDays ?? '';
+    $('#ret-soft').value = p.softDeletedMaxAgeDays ?? '';
+    $('#ret-cap').value = p.uploadsMaxTotalBytes ? Math.round(p.uploadsMaxTotalBytes / MB) : '';
+  } catch { /* server down; the tab still renders */ }
+}
+
+function retSummary(r) {
+  return 'Would remove ' + r.messages + ' message(s) and ' + r.attachments
+    + ' attachment(s), freeing about ' + bytes(r.bytes) + '.';
+}
+
+/* --------------------------------------------------------------- updates */
+
+async function loadUpdates() {
+  if (!token) return;
+  try {
+    const [cur, local] = await Promise.all([
+      api('/api/admin/updates'),
+      fetch('/sv/desktop-release').then((r) => r.json()).catch(() => ({ ok: false })),
+    ]);
+
+    const r = cur.release;
+    $('#upd-current').innerHTML = r
+      ? '<span class="stat"><b>' + esc(r.version) + '</b><span>Published</span></span>'
+        + '<span class="stat"><b>' + bytes(r.bytes) + '</b><span>' + r.files.length + ' files</span></span>'
+        + '<div class="hint">' + esc(new Date(r.publishedAt).toLocaleString()) + ' · ' + esc(cur.directory) + '</div>'
+      : '<span class="muted">Nothing published yet — clients are never offered an update.</span>';
+
+    // What has been uploaded but not yet served to anybody.
+    const st = cur.staged;
+    $('#upd-staged').innerHTML = st
+      ? '<span class="stat"><b>' + esc(st.version) + '</b><span>Uploaded</span></span>'
+        + '<span class="stat"><b>' + bytes(st.bytes) + '</b><span>' + st.files.length + ' files</span></span>'
+        + '<div class="hint">' + esc(st.files.join(', ')) + '</div>'
+        + (r && st.version === r.version
+            ? '<div class="warn-line">Same version as the published build — publishing will be refused.</div>'
+            : '')
+      : '<span class="muted">Nothing uploaded. Run the publish script on the machine that built the client.</span>';
+    $('#b-upd-publish').disabled = !st;
+    $('#b-upd-discard').disabled = !st;
+
+    // Only useful in a development checkout, where both live in one tree.
+    $('#upd-dir').value = local.dir || '';
+    $('#upd-dir-hint').innerHTML = local.ok
+      ? 'Found a built <b>' + esc(local.version) + '</b> in that folder.'
+      : 'No <code>latest.yml</code> in that folder — nothing built there.';
+  } catch (e) {
+    $('#upd-current').textContent = 'Unavailable — is the server running?';
+  }
+}
+
+async function publishUpdate(body, what) {
+  if (!confirm('Publish ' + what + '?\n\nEveryone connected is told immediately.')) return;
+  try {
+    const r = await api('/api/admin/updates/publish', {
+      method: 'POST', body: JSON.stringify(body),
+    });
+    $('#upd-out').textContent =
+      'Published ' + r.release.version + '. Told ' + r.notified + ' connected client(s).';
+    toast('published ' + r.release.version);
+    loadUpdates();
+  } catch (e) { toast(e.message, true); $('#upd-out').textContent = e.message; }
+}
+
+
+async function loadClients() {
+  if (!token) return;
+  try {
+    const rows = await api('/api/admin/clients');
+    $('#upd-clients').innerHTML = rows.length
+      ? rows.map((c) =>
+          '<tr><td class="mono">' + esc(c.username || c.userId) + '</td><td>'
+          + (c.version ? '<span class="tag">' + esc(c.version) + '</span>'
+                       : '<span class="tag bad">unknown</span>')
+          + '</td><td>' + c.connections + '</td></tr>').join('')
+      : '<tr><td colspan="3" class="muted">Nobody connected.</td></tr>';
+  } catch { /* server down */ }
+}
 
 /* --------------------------------------------------------- configuration */
 
@@ -918,6 +1229,67 @@ setAdminUi(false);
 loadInviteCode();
 poll(); setInterval(poll, 2500);
 pollLogs(); setInterval(pollLogs, 1200);
+/* ------------------------------------------- storage / updates handlers */
+
+$('#b-storage-refresh').onclick = () => loadStorage();
+$('#b-vacuum').onclick = async () => {
+  try { await api('/api/admin/storage/vacuum', { method: 'POST' }); toast('vacuum done'); loadStorage(); }
+  catch (e) { toast(e.message, true); }
+};
+document.querySelectorAll('[data-purge]').forEach((b) => {
+  b.onclick = () => purge(b.dataset.purge);
+});
+
+$('#b-ret-preview').onclick = async () => {
+  try {
+    const r = await api('/api/admin/retention/preview', {
+      method: 'POST', body: JSON.stringify(retPolicy()),
+    });
+    $('#ret-out').textContent = retSummary(r);
+  } catch (e) { toast(e.message, true); }
+};
+
+$('#b-ret-save').onclick = async () => {
+  const policy = retPolicy();
+  try {
+    // Preview before saving, so nobody switches this on without seeing the
+    // number. The save returns the same figure for what the next run will do.
+    const dry = await api('/api/admin/retention/preview', {
+      method: 'POST', body: JSON.stringify(policy),
+    });
+    if (policy.enabled && (dry.messages || dry.attachments)) {
+      if (!confirm(retSummary(dry) + '\n\nThe first nightly run will do this. There is no undo.')) return;
+    }
+    const saved = await api('/api/admin/retention', {
+      method: 'PUT', body: JSON.stringify(policy),
+    });
+    $('#ret-out').textContent = policy.enabled
+      ? retSummary(saved.preview)
+      : 'Saved. Retention is off, so nothing will be deleted.';
+    toast('retention policy saved');
+  } catch (e) { toast(e.message, true); }
+};
+
+$('#b-upd-refresh').onclick = () => { loadUpdates(); loadClients(); };
+
+$('#b-upd-publish').onclick = () => publishUpdate({}, 'the uploaded build');
+
+$('#b-upd-discard').onclick = async () => {
+  if (!confirm('Discard the uploaded build?')) return;
+  try {
+    await api('/api/admin/updates/staging', { method: 'DELETE' });
+    toast('upload discarded');
+    $('#upd-out').textContent = '';
+    loadUpdates();
+  } catch (e) { toast(e.message, true); }
+};
+
+$('#b-upd-publish-dir').onclick = () => {
+  const dir = $('#upd-dir').value.trim();
+  if (!dir) { toast('Give a folder path.', true); return; }
+  publishUpdate({ sourceDir: dir }, 'the build in ' + dir);
+};
+
 if (token) afterLogin().catch(() => { token=''; localStorage.removeItem('token'); setAdminUi(false); });
 </script>
 </body>
