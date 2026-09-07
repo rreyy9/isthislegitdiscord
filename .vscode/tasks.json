@@ -1,7 +1,7 @@
 {
   "version": "2.0.0",
 
-  // Two things you run, and three things you build.
+  // Two things to run, two things to compile, and the two installers.
   //
   // The console is the launcher and the admin UI: it starts and stops the chat
   // server, LiveKit and Caddy, runs build/migrate/seed, reads out the invite
@@ -16,11 +16,15 @@
   // second task for that -- and ISTHISLEGIT_ROOT points it at this checkout,
   // which matters on a machine that also has a server installed.
   //
-  // The build tasks are here because the console cannot cover them. Its Build
-  // button rebuilds the server on the box the console is running on; it has
-  // never been able to build the desktop client, and since the client is built
-  // here and published to a server somewhere else, the installer is something
-  // only this machine can produce.
+  // The two "Build and package" tasks are the ones that produce something you
+  // carry to another machine. They are here because the console cannot do
+  // either: it administers the box it runs on, and both installers are built
+  // on a development machine and taken elsewhere.
+  //
+  // Set version comes before either of them. Every package in the workspace
+  // shares one number, and the client's copy of it is what electron-builder
+  // stamps into latest.yml -- which is the whole of how an installed client
+  // decides whether there is anything to update to.
   //
   // Not covered, deliberately: `nest start --watch`. The console runs
   // apps/server/dist/main.js, so a server code change means Build then Restart
@@ -63,8 +67,8 @@
     },
 
     {
-      "label": "Build server",
-      "detail": "tsc for packages/shared, then nest build for apps/server. The same thing the console's Build button runs -- use that one when the console is already open, since it can Restart afterwards and this cannot.",
+      "label": "Compile server",
+      "detail": "tsc for packages/shared, then nest build for apps/server. The fast inner loop, and what catches a type error. The console's Build button runs the same thing and can Restart afterwards, which this cannot.",
       "type": "shell",
       "command": "npm run build",
       "options": { "cwd": "${workspaceFolder}" },
@@ -77,24 +81,8 @@
       }
     },
     {
-      "label": "Build client",
-      "detail": "tsc --noEmit, then electron-vite build into apps/desktop/out. The typecheck is a separate step on purpose: electron-vite strips types with esbuild and never checks them, so a build alone will happily package code that does not compile.",
-      "type": "shell",
-      "command": "npm run build",
-      "options": { "cwd": "${workspaceFolder}/apps/desktop" },
-      "dependsOn": ["Typecheck client"],
-      "dependsOrder": "sequence",
-      "group": "build",
-      "problemMatcher": ["$tsc"],
-      "presentation": {
-        "group": "isthislegit",
-        "panel": "dedicated",
-        "reveal": "always"
-      }
-    },
-    {
       "label": "Typecheck client",
-      "detail": "tsc --noEmit over apps/desktop. Run by Build client; here on its own because it is the fast one.",
+      "detail": "tsc --noEmit over apps/desktop. Its own task because electron-vite strips types with esbuild and never checks them -- a client build alone will happily package code that does not compile. Both client packaging runs depend on this.",
       "type": "shell",
       "command": "npx tsc --noEmit -p tsconfig.json",
       "options": { "cwd": "${workspaceFolder}/apps/desktop" },
@@ -106,9 +94,37 @@
         "reveal": "always"
       }
     },
+
     {
-      "label": "Package client installer  →  apps/desktop/release",
-      "detail": "electron-builder. Produces isthislegit-<version>-setup.exe, its .blockmap and latest.yml -- the three files an update is made of. Bump the version in apps/desktop/package.json first: publishing refuses a version that is not newer than the one already published. Then send it to the server with infra\\publish-desktop-update.ps1; the server box cannot build this itself.",
+      "label": "Set version",
+      "detail": "Asks for a version, then writes it to every package.json in the workspace and to package-lock.json. Do this before packaging a client: publishing refuses a version that is not newer than the one already published, and the version in apps/desktop/package.json is what electron-builder stamps into latest.yml and what an installed client compares itself against.",
+      "type": "shell",
+      "command": "npm version ${input:version} --workspaces --include-workspace-root --no-git-tag-version",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Build and package server  →  release\\isthislegit-server-<v>-setup.exe",
+      "detail": "infra\\installer\\build-server-installer.ps1. Builds shared, the server and the admin app, stages them with pinned dependency versions, and wraps the lot as the installer you copy to the server machine. Several minutes: it runs a production npm install into the staging tree and packages Electron. Run the installer there as administrator, or it skips the database setup and the boot tasks.",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File infra\\installer\\build-server-installer.ps1",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Build and package client  →  apps\\desktop\\release\\isthislegit-<v>-setup.exe",
+      "detail": "Typecheck, then electron-builder. Produces the installer, its .blockmap and latest.yml -- the three files an update is made of, and the same build that publishing sends to the server. Run Set version first: publishing refuses a version that is not newer than the one already published, and an installed client only offers an update if the published version is higher than its own. Then infra\\publish-desktop-update.ps1 uploads it; the server box cannot build this itself.",
       "type": "shell",
       "command": "npm run dist",
       "options": { "cwd": "${workspaceFolder}/apps/desktop" },
@@ -121,6 +137,16 @@
         "panel": "dedicated",
         "reveal": "always"
       }
+    }
+  ],
+
+  // npm version validates semver itself and refuses anything that is not one,
+  // so there is nothing to check here beyond asking.
+  "inputs": [
+    {
+      "id": "version",
+      "type": "promptString",
+      "description": "New version for every package in the workspace, e.g. 0.2.3"
     }
   ]
 }

@@ -82,6 +82,18 @@ export function connectSocket(events: SocketEvents): Socket {
   return socket;
 }
 
+/**
+ * The live socket, for the network panel.
+ *
+ * Given out rather than wrapped because what that panel wants is the parts of
+ * Socket.IO this module has no other use for -- the engine's packet counters
+ * and the current transport -- and a wrapper around those would be a second
+ * copy of the same state, kept in step by hand.
+ */
+export function getSocket(): Socket | null {
+  return socket;
+}
+
 export function joinChannel(channelId: string) {
   socket?.emit('channel:join', { channelId });
 }

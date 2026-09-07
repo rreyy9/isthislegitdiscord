@@ -83,6 +83,87 @@ button { font-family: inherit; cursor: pointer; }
 .footer-caret { color: var(--faint); font-size: 10px; flex: none; }
 .footer-user:hover .footer-caret, .footer-user.open .footer-caret { color: var(--dim); }
 
+/* The signal bars in the footer, and the panel they open. Grades share the
+   q-* names with netQuality(), so the icon, the graph and the voice tag are
+   coloured by one decision rather than three. */
+.net-btn {
+  background: none; border: none; padding: 4px 2px; line-height: 0;
+  color: var(--faint); flex: none; border-radius: 5px;
+}
+.net-btn:hover, .net-btn.open { background: var(--panel2); }
+.net-btn .bar { fill: var(--line); }
+.net-btn .bar.on { fill: currentColor; }
+/* Scoped through .footer to outrank `.footer button:hover`, which would
+   otherwise repaint the bars on hover and lose the grade. */
+.footer .net-btn.q-great, .footer .net-btn.q-good { color: var(--ok); }
+.footer .net-btn.q-fair { color: var(--warn); }
+.footer .net-btn.q-poor, .footer .net-btn.q-offline { color: var(--bad); }
+/* Nothing lit is only legible if the unlit bars are visible themselves. */
+.net-btn.q-offline .bar { fill: var(--bad); opacity: .35; }
+
+.net-panel {
+  position: fixed; z-index: 30;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  padding: 11px 12px 10px; box-shadow: 0 10px 26px rgba(0, 0, 0, .5);
+  font-size: 12px; cursor: default;
+  /* It grows upwards from the footer, so a short window would otherwise clip
+     the header — the one row that says what the rest of it means. */
+  max-height: calc(100vh - 72px); overflow-y: auto;
+}
+.net-head { display: flex; align-items: center; gap: 7px; }
+.net-title { font-weight: 600; font-size: 12.5px; }
+.net-ping { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+/* Bars from the baseline up, newest on the right. Fixed height so the panel
+   does not resize as the graph fills. */
+.net-spark {
+  display: flex; align-items: flex-end; gap: 1px; height: 34px;
+  margin: 9px 0 10px; padding: 0 1px;
+  border-bottom: 1px solid var(--line);
+}
+.net-spark .spark-bar { flex: 1; min-width: 0; border-radius: 1px; background: var(--accent); }
+.net-spark.q-great .spark-bar, .net-spark.q-good .spark-bar { background: var(--ok); }
+.net-spark.q-fair .spark-bar { background: var(--warn); }
+.net-spark.q-poor .spark-bar, .net-spark.q-offline .spark-bar { background: var(--bad); }
+.net-spark .spark-bar.empty { height: 2px; background: var(--line); }
+/* A lost probe is drawn, not skipped: a gap would read as "no reading". */
+.net-spark .spark-bar.lost { height: 100%; background: var(--bad); opacity: .55; }
+
+.net-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 12px; }
+.net-stat-label {
+  color: var(--faint); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .4px; font-weight: 600;
+}
+.net-stat-value {
+  color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums;
+  margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.net-stat-value.bad { color: var(--bad); }
+.net-stat-sub {
+  color: var(--faint); font-size: 10.5px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+.net-sep { height: 1px; background: var(--line); margin: 11px 0 9px; }
+.net-subhead {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 8px;
+  color: var(--faint); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .4px; font-weight: 600;
+}
+.net-tag {
+  padding: 1px 6px; border-radius: 9px; font-size: 9.5px; letter-spacing: .3px;
+  background: var(--panel2); color: var(--dim);
+}
+.net-tag.q-excellent, .net-tag.q-good { color: var(--ok); }
+.net-tag.q-poor { color: var(--warn); }
+.net-tag.q-lost { color: var(--bad); }
+
+.net-server {
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line);
+  color: var(--faint); font-size: 10.5px; user-select: text;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* --------------------------------------------------------------- chat */
 .chat { background: var(--bg); }
 .chat-head {

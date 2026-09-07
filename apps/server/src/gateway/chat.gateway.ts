@@ -181,6 +181,22 @@ export class ChatGateway
     return this.server?.sockets?.sockets?.size ?? 0;
   }
 
+  /**
+   * Round-trip probe for the client's network panel.
+   *
+   * Deliberately does no work: the number it produces is meant to be the cost
+   * of the network and the event loop, and anything touched here (a database,
+   * a lock) would be measured as latency and blamed on the connection.
+   *
+   * `t` is echoed rather than read so the client can pair a reply with the
+   * probe that asked for it; `serverTime` is what lets it show clock skew,
+   * which is the usual explanation for timestamps that look wrong.
+   */
+  @SubscribeMessage('net:ping')
+  netPing(@MessageBody() body: { t?: number } | undefined) {
+    return { t: typeof body?.t === 'number' ? body.t : null, serverTime: Date.now() };
+  }
+
   @SubscribeMessage('channel:join')
   async joinChannel(
     @ConnectedSocket() socket: Socket,

@@ -87,29 +87,43 @@ deployment configuration.
 
 ### The VS Code tasks
 
-Two things to run, and the builds the console cannot do for you.
+Two things to run, two things to compile, and [the two installers](#the-two-installers).
 
 | Task | What it is |
 |---|---|
 | **Console** | The isthislegit Server window, and everything above |
 | **Desktop app (dev)** | `electron-vite dev` — the client, against `localhost:3000` |
-| **Build server** | `packages/shared` then `apps/server`. The console's Build button runs the same thing |
+| **Compile server** | `packages/shared` then `apps/server`. The fast inner loop |
 | **Typecheck client** | `tsc --noEmit` over `apps/desktop` |
-| **Build client** | Typecheck, then `electron-vite build` into `apps/desktop/out` |
-| **Package client installer** | Typecheck, then `electron-builder` → `apps/desktop/release` |
+| **Set version** | Asks for a version and writes it to every `package.json` and the lockfile |
+| **Build and package server** | → `release\isthislegit-server-<v>-setup.exe`, for the server machine |
+| **Build and package client** | → `apps\desktop\release\isthislegit-<v>-setup.exe`, for everyone else |
 
 Nothing else is a task, because everything else is a button in the console — and a button
 also tells you whether the thing worked.
 
-**The build tasks are here because the console cannot cover them.** Its Build button
-rebuilds the server on the box the console is running on. It has never been able to build
-the desktop client, and now that the client is built here and published to a server
-somewhere else, the installer is something only a development machine can produce.
+**The two packaging tasks are here because the console cannot do either.** It administers
+the box it runs on, and both installers are built on a development machine and carried
+somewhere else — the server's to the server box by hand, the client's to the server over
+the network by [the publish script](#updating-the-client). Neither is a thing the machine
+receiving it can build for itself.
 
-**The typecheck is a separate step on purpose.** electron-vite strips types with esbuild
-and never checks them, so `electron-vite build` will happily package code that does not
-compile. Both client tasks depend on the typecheck rather than trusting the bundler to
+**Compile server is not one of them.** It is the same `npm run build` the console's Build
+button runs, kept as a task because it is what catches a type error without leaving the
+editor. The console's version can Restart the server afterwards, which this cannot.
+
+**The client typecheck is a separate step on purpose.** electron-vite strips types with
+esbuild and never checks them, so packaging alone will happily ship code that does not
+compile. Packaging the client depends on the typecheck rather than trusting the bundler to
 notice.
+
+**Every package in the workspace shares one version number**, and **Set version** is how it
+moves — `npm version <v> --workspaces --include-workspace-root`, so the six `package.json`
+files and `package-lock.json` cannot drift apart. Do it before packaging a client: the
+client's copy of that number is what electron-builder stamps into `latest.yml`, publishing
+refuses a version that is not newer than the published one, and an installed client only
+offers an update when the published version is higher than its own. The server's copy is
+what `/api/config` reports as `appVersion`.
 
 **`ISTHISLEGIT_ROOT` tells the app which tree to administer**, and the VS Code task sets it
 to the checkout. Without it the app searches — last used, beside its own executable,
@@ -180,10 +194,17 @@ powershell -ExecutionPolicy Bypass -File infra\installer\build-server-installer.
 npm run dist --workspace @isthislegit/desktop
 ```
 
-The second one is the **Package client installer** task. It produces the three files an
-update is made of — the installer, its `.blockmap` and `latest.yml` — which is the same
-build [publishing](#updating-the-client) sends to the server, so the first install and
-every update after it come from one command.
+Both are VS Code tasks — **Build and package server** and **Build and package client**.
+The client one produces the three files an update is made of: the installer, its
+`.blockmap` and `latest.yml`. That is the same build [publishing](#updating-the-client)
+sends to the server, so somebody's first install and every update after it come out of one
+command.
+
+The server installer needs `livekit-server.exe` and `caddy.exe` to be present in
+`infra/livekit/bin` and `infra/caddy/bin`. Both are gitignored downloads — see
+[Requirements](#requirements) — and the build **warns and carries on** rather than failing
+if one is missing, so an installer built without them looks finished and arrives on the
+server box with no voice or no TLS.
 
 | | What it is | Where it goes |
 |---|---|---|

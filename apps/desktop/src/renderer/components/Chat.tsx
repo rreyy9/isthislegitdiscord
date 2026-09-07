@@ -28,6 +28,7 @@ import {
   VoicePanel,
 } from './Voice';
 import { useImageActions } from './ImageViewer';
+import { NetworkButton } from './NetworkStats';
 
 type Status = 'connected' | 'disconnected' | 'connecting';
 
@@ -1154,6 +1155,7 @@ export function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
             <span className="footer-caret">▾</span>
           </button>
           <button onClick={signOut}>Sign out</button>
+          <NetworkButton status={status} voice={voice} />
         </div>
       </div>
 

@@ -48,6 +48,25 @@ export interface ScreenShare {
   track: Track;
 }
 
+/**
+ * What the call itself is doing on the wire, read straight from WebRTC.
+ *
+ * Separate from the socket figures in net-stats.ts and not comparable to them:
+ * this is UDP to the SFU, where loss is real loss -- audio that was dropped and
+ * is never coming back -- rather than a probe that went unanswered.
+ */
+export interface VoiceNetStats {
+  /** LiveKit's own verdict on the local connection. */
+  quality: 'excellent' | 'good' | 'poor' | 'lost' | 'unknown';
+  /** Round trip to the SFU, as the sending peer connection measures it. */
+  rttMs: number | null;
+  /** Our microphone going out. `lost` is what the SFU reports it never got. */
+  send: { packets: number; bytes: number; lost: number; jitterMs: number | null };
+  /** Everyone else's audio coming in, summed. */
+  recv: { packets: number; bytes: number; lost: number; jitterMs: number | null };
+  codec: string | null;
+}
+
 export type VoiceStatus =
   | 'idle'
   | 'connecting'
@@ -446,7 +465,22 @@ export function useVoice(settings: VoiceSettings) {
     remotesRef.current.clear();
   }, []);
 
+  /**
+   * Which join attempt is the live one.
+   *
+   * Two can be in flight at once — a second click on a channel, or the
+   * rejoin-on-start landing at the same moment as a manual join — and both
+   * have `await` points before they finish. Without this the loser's
+   * continuations still ran: the abandoned attempt's `connect` rejects with
+   * "client initiated disconnect", its catch clears `roomRef` and the status,
+   * and the room that actually connected is left with nothing pointing at it.
+   * LiveKit keeps that participant in the channel, but leave, mute and the
+   * disconnect on window close all read `roomRef` and so do nothing at all.
+   */
+  const joinSeqRef = useRef(0);
+
   const leave = useCallback(async () => {
+    joinSeqRef.current += 1;
     const room = roomRef.current;
     roomRef.current = null;
     teardownAudio();
@@ -464,6 +498,10 @@ export function useVoice(settings: VoiceSettings) {
   const join = useCallback(
     async (channelId: string) => {
       await leave();
+
+      // `leave` has just bumped the counter, so this claims the attempt.
+      const mine = joinSeqRef.current;
+      const superseded = () => joinSeqRef.current !== mine;
 
       setState((s) => ({
         ...s,
@@ -484,11 +522,13 @@ export function useVoice(settings: VoiceSettings) {
         // The token is minted per join and lives ten minutes — long enough to
         // connect, short enough that a sniffed one is not worth much.
         const res = await api.voiceToken(channelId);
+        if (superseded()) return;
         token = res.token;
         url = res.livekitUrl;
         audioRef.current = res.audio ?? null;
         setState((s) => ({ ...s, audio: res.audio ?? null }));
       } catch (err) {
+        if (superseded()) return;
         setState((s) => ({
           ...s,
           channelId: null,
@@ -506,6 +546,16 @@ export function useVoice(settings: VoiceSettings) {
         publishDefaults: publishOptions(s, audioRef.current),
       });
       roomRef.current = room;
+
+      /**
+       * Is this still the room the app is in?
+       *
+       * LiveKit events are not always delivered before the call that provoked
+       * them returns — an aborted connection attempt in particular emits its
+       * `Disconnected` late. Handlers that write shared state check this first
+       * so a dead room cannot reset the live one.
+       */
+      const isCurrent = () => roomRef.current === room;
 
       room
         .on(RoomEvent.ParticipantConnected, () => {
@@ -556,10 +606,12 @@ export function useVoice(settings: VoiceSettings) {
             sync();
           },
         )
-        .on(RoomEvent.Reconnecting, () =>
-          setState((st) => ({ ...st, status: 'reconnecting' })),
-        )
+        .on(RoomEvent.Reconnecting, () => {
+          if (!isCurrent()) return;
+          setState((st) => ({ ...st, status: 'reconnecting' }));
+        })
         .on(RoomEvent.Reconnected, () => {
+          if (!isCurrent()) return;
           setState((st) => ({ ...st, status: 'connected' }));
           void applyMic();
           applyVolumes();
@@ -567,6 +619,7 @@ export function useVoice(settings: VoiceSettings) {
           sync();
         })
         .on(RoomEvent.Disconnected, () => {
+          if (!isCurrent()) return;
           roomRef.current = null;
           teardownAudio();
           setState((st) => ({
@@ -583,12 +636,19 @@ export function useVoice(settings: VoiceSettings) {
         // red banner up through this path no matter what the caller did with
         // the rejection. Microphone failures are still worth saying out loud.
         .on(RoomEvent.MediaDevicesError, (e: Error) => {
-          if (isPickerCancellation(e)) return;
+          if (!isCurrent() || isPickerCancellation(e)) return;
           setState((st) => ({ ...st, error: e.message }));
         });
 
       try {
         await room.connect(url, token);
+
+        // Somebody joined elsewhere while this was connecting. Hang this room
+        // up rather than leaving it in the call with nothing pointing at it.
+        if (!isCurrent()) {
+          await room.disconnect().catch(() => {});
+          return;
+        }
 
         if (settingsRef.current.outputDeviceId) {
           await room
@@ -605,9 +665,16 @@ export function useVoice(settings: VoiceSettings) {
         ensureMicMeter();
         sync();
       } catch (err) {
-        roomRef.current = null;
-        teardownAudio();
+        // A join that has already been replaced fails with "client initiated
+        // disconnect" precisely because it was replaced. Clean up its own room
+        // and say nothing: the state belongs to whoever superseded it.
+        const stale = !isCurrent();
+        if (!stale) {
+          roomRef.current = null;
+          teardownAudio();
+        }
         await room.disconnect().catch(() => {});
+        if (stale) return;
         setState((st) => ({
           ...st,
           channelId: null,
@@ -742,6 +809,75 @@ export function useVoice(settings: VoiceSettings) {
     await applyMic();
   }, [applyMic, ensureMicMeter]);
 
+  /**
+   * WebRTC counters for the network panel, gathered on demand.
+   *
+   * On demand rather than in state: getStats is a real query against the peer
+   * connection, and nothing outside the panel wants the answer. Every field is
+   * read defensively — which stats a browser reports varies with the codec and
+   * with how long the call has been up, and a missing counter must read as
+   * "not measured" rather than as zero, which would look like total loss.
+   */
+  const getNetStats = useCallback(async (): Promise<VoiceNetStats | null> => {
+    const room = roomRef.current;
+    if (!room || room.state !== ConnectionState.Connected) return null;
+
+    const stats: VoiceNetStats = {
+      // The enum's values are exactly this union, 'unknown' included.
+      quality: room.localParticipant.connectionQuality as VoiceNetStats['quality'],
+      rttMs: null,
+      send: { packets: 0, bytes: 0, lost: 0, jitterMs: null },
+      recv: { packets: 0, bytes: 0, lost: 0, jitterMs: null },
+      codec: null,
+    };
+    const num = (v: unknown) => (typeof v === 'number' && isFinite(v) ? v : 0);
+
+    // Outgoing. Loss and round trip are only known from the SFU's report back
+    // to us (remote-inbound-rtp); the sender itself cannot see either.
+    const mic = room.localParticipant.getTrackPublication(
+      Track.Source.Microphone,
+    )?.track;
+    const sendReport = await mic?.getRTCStatsReport().catch(() => undefined);
+    sendReport?.forEach((r: any) => {
+      if (r.type === 'outbound-rtp') {
+        stats.send.packets += num(r.packetsSent);
+        stats.send.bytes += num(r.bytesSent);
+      } else if (r.type === 'remote-inbound-rtp') {
+        stats.send.lost += num(r.packetsLost);
+        if (typeof r.jitter === 'number') {
+          stats.send.jitterMs = r.jitter * 1000;
+        }
+        if (typeof r.roundTripTime === 'number') {
+          stats.rttMs = r.roundTripTime * 1000;
+        }
+      } else if (r.type === 'codec' && typeof r.mimeType === 'string') {
+        stats.codec = r.mimeType.replace(/^audio\//, '');
+      }
+    });
+
+    // Incoming, summed over everyone. Jitter is averaged rather than added:
+    // it is a property of each stream, and a total would say nothing.
+    const jitters: number[] = [];
+    for (const peer of room.remoteParticipants.values()) {
+      for (const pub of peer.getTrackPublications()) {
+        if (pub.kind !== Track.Kind.Audio || !pub.track) continue;
+        const report = await pub.track.getRTCStatsReport().catch(() => undefined);
+        report?.forEach((r: any) => {
+          if (r.type !== 'inbound-rtp') return;
+          stats.recv.packets += num(r.packetsReceived);
+          stats.recv.bytes += num(r.bytesReceived);
+          stats.recv.lost += num(r.packetsLost);
+          if (typeof r.jitter === 'number') jitters.push(r.jitter * 1000);
+        });
+      }
+    }
+    if (jitters.length) {
+      stats.recv.jitterMs = jitters.reduce((a, b) => a + b, 0) / jitters.length;
+    }
+
+    return stats;
+  }, []);
+
   /** A snapshot for the settings meter, read on its own clock — see above. */
   const getInputLevel = useCallback(() => inputLevelRef.current, []);
 
@@ -816,6 +952,7 @@ export function useVoice(settings: VoiceSettings) {
     setInputDevice,
     setOutputDevice,
     getInputLevel,
+    getNetStats,
   };
 }
 
