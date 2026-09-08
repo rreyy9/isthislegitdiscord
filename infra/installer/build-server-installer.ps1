@@ -326,8 +326,9 @@ Copy-Item (Join-Path $here 'install.ps1') $staging -Force
 # everything is hoisted to the root and shared is a symlink. Neither survives a
 # copy. So the staged server gets its own manifest: the same runtime
 # dependencies, shared pointed at the copied folder, and the few tools
-# install.ps1 needs on the target (prisma to apply migrations, dotenv and
-# typescript because prisma7.config.ts is TypeScript and imports dotenv).
+# install.ps1 needs on the target (prisma to apply migrations, and typescript
+# because prisma7.config.ts is TypeScript). dotenv is a runtime dependency of
+# the server itself now, so it arrives with the rest of them.
 Say ""
 Say "Writing staged manifest"
 
@@ -361,7 +362,11 @@ foreach ($name in ($serverPkg.dependencies.PSObject.Properties.Name | Sort-Objec
     $deps[$name] = Resolve-InstalledVersion $name $serverPkg.dependencies.$name
 }
 $deps['@isthislegit/shared'] = 'file:../shared'
-foreach ($tool in @('prisma', 'dotenv', 'typescript')) {
+# prisma and typescript are dev tooling the target still needs at install time:
+# prisma applies the migrations, and prisma7.config.ts is TypeScript. dotenv is
+# not in this list any more -- the server imports it at runtime now, so it comes
+# through the dependencies loop above like everything else it actually uses.
+foreach ($tool in @('prisma', 'typescript')) {
     $deps[$tool] = Resolve-InstalledVersion $tool $serverPkg.devDependencies.$tool
 }
 

@@ -32,12 +32,46 @@ export function envValue(text, key) {
  * Replaces `key`'s value, preserving the rest of the line-for-line file --
  * comments in these files carry most of the reasoning and must survive an
  * edit. Appends the key if it is absent.
+ *
+ * The leading pattern is `[ \t]*` and emphatically not `\s*`, which is what it
+ * used to be and which quietly ate a byte of the file on every save. `\s`
+ * matches newlines, and JavaScript's `^` under the `m` flag matches after a
+ * bare CR as well as after an LF -- so on a CRLF file the match would start
+ * *between* the CR and the LF of the previous line, swallow the LF as leading
+ * whitespace, and the replacement would put it back without one. The result is
+ * two lines glued by a lone CR:
+ *
+ *     LIVEKIT_API_SECRET="..."\rMAX_UPLOAD_BYTES="26214400"
+ *
+ * dotenv is forgiving enough to still read that, so the server never
+ * complained. PowerShell is not: `Get-Content` does not split on a bare CR, so
+ * repair-livekit-keys.ps1 and install.ps1 read the secret as the whole glued
+ * remainder and write that into livekit.yaml. One save per corrupted line, and
+ * they accumulate.
  */
 export function setEnvValue(text, key, value) {
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
   const line = `${key}="${value}"`;
-  const re = new RegExp(`^\\s*${key}\\s*=.*$`, 'm');
+  const re = new RegExp(`^[ \\t]*${key}[ \\t]*=.*$`, 'm');
   if (re.test(text)) return text.replace(re, line);
-  return text.replace(/\s*$/, '') + `\n${line}\n`;
+  return text.replace(/\s*$/, '') + `${eol}${line}${eol}`;
+}
+
+/**
+ * Puts back the line breaks the old `setEnvValue` ate.
+ *
+ * Every save before the fix above glued one key onto the line before it with a
+ * bare CR, so a deployment that has been configured a few times has a few of
+ * them, and they never heal on their own. Applied on the way in to a write:
+ * the console is the thing that broke these files, so it is the thing that
+ * repairs them, and it does so at the one moment it is already rewriting the
+ * file for another reason.
+ *
+ * Only a CR that is not part of a CRLF is touched. A file that was never
+ * damaged comes back byte for byte.
+ */
+export function repairEnvNewlines(text) {
+  return text.replace(/\r(?!\n)/g, '\r\n');
 }
 
 /**
@@ -305,7 +339,9 @@ export function writeConfig(paths, patch) {
 
   /* .env */
   if (fs.existsSync(paths.env)) {
-    let text = fs.readFileSync(paths.env, 'utf8');
+    // Repaired before anything is set, so a file damaged by an older console
+    // is healed by the next save rather than needing anybody to notice it.
+    let text = repairEnvNewlines(fs.readFileSync(paths.env, 'utf8'));
     if (patch.port !== undefined) text = setEnvValue(text, 'PORT', port);
     if (patch.voiceQuality) text = setEnvValue(text, 'VOICE_QUALITY', patch.voiceQuality);
     if (patch.maxUploadBytes !== undefined) {

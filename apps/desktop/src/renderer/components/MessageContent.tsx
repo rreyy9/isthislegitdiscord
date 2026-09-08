@@ -5,7 +5,14 @@ import {
   type AttachmentDto,
 } from '../api';
 import { bridge } from '../bridge';
-import { IMAGE_EXT_RE, URL_RE, youtubeId, youtubeStart } from '../link-utils';
+import {
+  IMAGE_EXT_RE,
+  URL_RE,
+  VIDEO_EXT_RE,
+  tiktokId,
+  youtubeId,
+  youtubeStart,
+} from '../link-utils';
 import { MENTION_RE } from '../mention-utils';
 import { useImageActions } from './ImageViewer';
 
@@ -52,6 +59,73 @@ function YouTube({ id, start }: { id: string; start: number | null }) {
           <path d="M27 34l18-10-18-10z" fill="#fff" />
         </svg>
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------- tiktok */
+
+/**
+ * A TikTok post, on the same click-to-play deal as YouTube above.
+ *
+ * There is no still to show first. YouTube publishes a thumbnail at a URL
+ * anyone can build from the id; TikTok's is only reachable through an oEmbed
+ * call, which is a request to TikTok for every link in the channel -- exactly
+ * what the poster pattern exists to avoid. So the placeholder is drawn here,
+ * out of nothing, and the frame is loaded when somebody asks for it.
+ */
+function TikTok({ id }: { id: string }) {
+  const [playing, setPlaying] = useState(false);
+
+  if (playing) {
+    return (
+      <div className="tt">
+        <iframe
+          src={`https://www.tiktok.com/embed/v2/${id}`}
+          allow="encrypted-media; picture-in-picture; fullscreen"
+          allowFullScreen
+          title="TikTok video"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="tt poster" onClick={() => setPlaying(true)} title="Play">
+      <div className="tt-mark" aria-hidden>
+        <svg viewBox="0 0 48 48" width="40" height="40">
+          <path
+            d="M33.5 6h-5.7v25.2a4.6 4.6 0 1 1-4.6-4.6c.4 0 .8.1 1.2.2v-5.8a10.4 10.4 0 1 0 9.1 10.3V18.6a12 12 0 0 0 7 2.2v-5.7a6.9 6.9 0 0 1-7-7z"
+            fill="currentColor"
+          />
+        </svg>
+      </div>
+      <div className="tt-label">Watch on TikTok</div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------- linked video */
+
+/**
+ * A video someone linked to directly.
+ *
+ * `preload="none"` is the whole of the politeness here: the element draws its
+ * controls without fetching a byte, so a channel full of links costs nothing
+ * until somebody presses play. It is the same bargain as the YouTube still.
+ */
+function LinkedVideo({ url }: { url: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <a className="link" href={url} onClick={openExternal(url)}>
+        {url}
+      </a>
+    );
+  }
+  return (
+    <div className="embed-video">
+      <video src={url} controls preload="none" onError={() => setFailed(true)} />
     </div>
   );
 }
@@ -130,9 +204,96 @@ export function AttachmentImage({ file }: { file: AttachmentDto }) {
         <img
           src={src}
           alt={file.fileName}
+          // A fetch that worked and bytes that will not decode is a real
+          // state: a server newer than this build may call something inline
+          // that this one has no idea how to draw, and a silent empty box is
+          // the worst way to say so.
+          onError={() => setFailed(true)}
           {...imageProps({ src, name: file.fileName })}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * One uploaded video.
+ *
+ * Loaded on a click rather than on sight. The bytes come through `fetch` with
+ * the bearer token and become an object URL, exactly as a picture does -- a
+ * `<video src>` can no more carry an Authorization header than an `<img>` can
+ * -- but a video is the largest thing anyone sends, and pulling every one in
+ * the scrollback down the moment it draws would be a channel that costs
+ * hundreds of megabytes to scroll through. So: a card with the name on it,
+ * and the fetch happens when somebody wants to watch.
+ *
+ * There is no ranged playback here. The whole file arrives before the first
+ * frame plays, which is honest about what the server offers -- one stream of
+ * the whole object -- and affordable because the upload limit is what it is.
+ */
+export function AttachmentVideo({ file }: { file: AttachmentDto }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const expired = Boolean(file.expiredAt);
+
+  function load() {
+    if (loading || src) return;
+    setLoading(true);
+    attachmentUrl(file.id, file.url).then(
+      (url) => {
+        setSrc(url);
+        setLoading(false);
+      },
+      () => {
+        setFailed(true);
+        setLoading(false);
+      },
+    );
+  }
+
+  // Expired is not a failure and gets the same card a file does: the row
+  // outlives the bytes so the message can still say what was there.
+  if (expired) return <AttachmentFile file={file} />;
+  if (failed) {
+    return <div className="attach-failed">Could not load {file.fileName}</div>;
+  }
+
+  // Said on the card as well as on a file, because it is just as true and
+  // twice as surprising: a video is drawn inline and looks like part of the
+  // conversation, and it is still on the same clock as everything that is not
+  // a picture.
+  const left = file.expiresAt ? timeLeft(file.expiresAt) : null;
+  const meta = (
+    <div className="attach-video-meta">
+      <span title={file.fileName}>{file.fileName}</span>
+      <span>{fileSize(file.size)}</span>
+      {left && <span className="attach-file-clock">· {left}</span>}
+    </div>
+  );
+
+  if (src) {
+    return (
+      <div className="attach-video">
+        {/* Autoplay only because a click just asked for it -- this branch is
+            unreachable until somebody presses the card. */}
+        <video src={src} controls autoPlay />
+        {meta}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={'attach-video poster' + (loading ? ' loading' : '')}
+      onClick={load}
+      title={loading ? 'Loading…' : 'Play'}
+    >
+      <div className="attach-video-play" aria-hidden>
+        {loading ? '…' : '▶'}
+      </div>
+      {meta}
     </div>
   );
 }
@@ -155,6 +316,17 @@ const RENDERABLE = /^image\/(png|jpeg|gif|webp)$/i;
  */
 const drawInline = (file: AttachmentDto): boolean =>
   file.inline ?? RENDERABLE.test(file.contentType);
+
+/**
+ * Which of the two inline shapes an attachment is.
+ *
+ * Read off the content type rather than off `inline`, because `inline` only
+ * answers "may this be drawn" and a server newer than this build could widen
+ * it again. Anything inline that is not video is a picture, which is what this
+ * build has always assumed and remains true for every type on the list.
+ */
+const isVideo = (file: AttachmentDto): boolean =>
+  /^video\//i.test(file.contentType);
 
 /* --------------------------------------------------------------- files */
 
@@ -363,10 +535,15 @@ export function MessageContent({
     // One embed per message keeps a wall-of-links message readable.
     if (embeds.length === 0) {
       const yt = youtubeId(url);
+      const tt = yt ? null : tiktokId(url);
       if (yt) {
         embeds.push(<YouTube key={`y${key}`} id={yt} start={youtubeStart(url)} />);
+      } else if (tt) {
+        embeds.push(<TikTok key={`t${key}`} id={tt} />);
       } else if (IMAGE_EXT_RE.test(url)) {
         embeds.push(<LinkedImage key={`i${key}`} url={url} />);
+      } else if (VIDEO_EXT_RE.test(url)) {
+        embeds.push(<LinkedVideo key={`v${key}`} url={url} />);
       }
     }
   }
@@ -381,14 +558,16 @@ export function MessageContent({
         </div>
       )}
       {attachments.map((a) =>
-        drawInline(a) ? (
-          <AttachmentImage key={a.id} file={a} />
-        ) : (
-          // Everything that is not a picture: named, sized, and offered as a
-          // download. This used to be the "cannot draw this" branch, which was
-          // the right answer when pictures were the only thing that could be
-          // sent and is the wrong one now that files can.
+        !drawInline(a) ? (
+          // Everything that is not a picture or a video: named, sized, and
+          // offered as a download. This used to be the "cannot draw this"
+          // branch, which was the right answer when pictures were the only
+          // thing that could be sent and is the wrong one now that files can.
           <AttachmentFile key={a.id} file={a} />
+        ) : isVideo(a) ? (
+          <AttachmentVideo key={a.id} file={a} />
+        ) : (
+          <AttachmentImage key={a.id} file={a} />
         ),
       )}
       {embeds}

@@ -404,31 +404,70 @@ export const api = {
   /**
    * Send with files. Multipart rather than the JSON route, because upload and
    * send are one request server-side — an attachment cannot exist without its
-   * message. Content-Type is deliberately unset: fetch has to add the
-   * multipart boundary itself.
+   * message. Content-Type is deliberately unset: the boundary has to be added
+   * by whatever builds the request, and both paths below leave it to the
+   * FormData.
+   *
+   * XMLHttpRequest rather than fetch, for the one thing fetch cannot do:
+   * report how much of the body has gone out. A video takes long enough that a
+   * message sitting there with no sign of movement reads as a client that has
+   * hung, and the only honest way to say otherwise is the number itself.
+   * `onProgress` is called with 0..1, and only while the length is known.
    */
-  sendWithFiles: async (
+  sendWithFiles: (
     channelId: string,
     content: string,
     clientNonce: string,
     files: File[],
+    onProgress?: (fraction: number) => void,
   ): Promise<MessageDto> => {
     const form = new FormData();
     form.append('content', content);
     form.append('clientNonce', clientNonce);
     for (const f of files) form.append('files', f, f.name);
 
-    const res = await send(`${serverUrl}/api/channels/${channelId}/messages`, {
-      method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      body: form,
+    const url = `${serverUrl}/api/channels/${channelId}/messages`;
+    return new Promise<MessageDto>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      if (clientVersion) xhr.setRequestHeader('X-Client-Version', clientVersion);
+
+      if (onProgress) {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable && e.total > 0) {
+            onProgress(Math.min(1, e.loaded / e.total));
+          }
+        };
+        // The last byte leaving is not the same as the message existing: the
+        // server still has to write the files and the row. Pinning it at 1
+        // here is what turns the ring into a spinner for that last stretch,
+        // rather than leaving it stuck at 99% looking wedged.
+        xhr.upload.onload = () => onProgress(1);
+      }
+
+      xhr.onload = () => {
+        let data: any = {};
+        try {
+          data = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+        } catch {
+          data = {};
+        }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data as MessageDto);
+        else {
+          reject(
+            new ApiError(xhr.status, data.message || `HTTP ${xhr.status}`),
+          );
+        }
+      };
+      // Same account as `send` gives: a request that never reached a server
+      // has no status and no body, and the address is the likely fault.
+      xhr.onerror = () => reject(new ApiError(0, unreachable(url)));
+      xhr.onabort = () => reject(new ApiError(0, 'Upload cancelled.'));
+      xhr.ontimeout = () => reject(new ApiError(0, 'The upload timed out.'));
+
+      xhr.send(form);
     });
-    const text = await res.text();
-    const data = text ? JSON.parse(text) : {};
-    if (!res.ok) {
-      throw new ApiError(res.status, data.message || `HTTP ${res.status}`);
-    }
-    return data as MessageDto;
   },
   editMessage: (channelId: string, id: string, content: string) =>
     request<MessageDto>(`/api/channels/${channelId}/messages/${id}`, {

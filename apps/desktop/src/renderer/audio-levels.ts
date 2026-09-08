@@ -66,6 +66,14 @@ export class TrackMeter {
   ) {
     const context = audioContext();
     this.cloned = opts.clone ? track.clone() : null;
+    // `clone()` copies `enabled` as well as the source, and the track handed
+    // over here is normally muted -- it is built, silenced and only then
+    // published, so that nothing settling goes on the wire. A clone taken at
+    // that moment is born disabled, carries its own flag, and so reads digital
+    // silence for ever: the ring never lights, the gate never opens, and the
+    // meter in settings sits flat. The clone exists precisely to be immune to
+    // that flag, so it says so rather than inheriting an answer.
+    if (this.cloned) this.cloned.enabled = true;
     this.source = context.createMediaStreamSource(
       new MediaStream([this.cloned ?? track]),
     );
@@ -113,7 +121,7 @@ const FLOOR_MAX_DB = -30;
  * third of a second of not transmitting, which is both shorter than it takes
  * to click into a channel and start speaking, and the safe way to be wrong.
  */
-const SEED_TICKS = 15;
+export const GATE_SEED_TICKS = 15;
 
 /**
  * Decides whether the microphone should be transmitting.
@@ -145,7 +153,7 @@ export class InputGate {
       return true;
     }
 
-    if (this.seeded < SEED_TICKS) {
+    if (this.seeded < GATE_SEED_TICKS) {
       this.seeded++;
       this.floorDb =
         this.seeded === 1

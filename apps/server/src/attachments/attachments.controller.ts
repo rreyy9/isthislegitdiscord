@@ -18,13 +18,15 @@ import { PermissionService } from '../auth/permission.guard';
 import { openStored } from './storage';
 
 /**
- * Serving an uploaded image back.
+ * Serving an uploaded image or video back.
  *
  * Behind the same auth as everything else, and behind a channel-membership
  * check — an attachment id is a bearer of nothing on its own. The client
  * fetches these with its token and turns them into blob URLs rather than
  * putting them in an <img src>, because a token in a URL ends up in logs and
- * history.
+ * history. A <video src> is the same story, and the same object URL answers
+ * it: the whole file is fetched once rather than ranged over, which is what
+ * the upload limit makes affordable.
  */
 @Controller('api/attachments')
 @UseGuards(AuthGuard)
@@ -72,9 +74,15 @@ export class AttachmentsController {
 
     // The safety rule for accepting arbitrary uploads, and the only thing
     // standing between this route and hosting live script on the API's own
-    // origin: a picture is served as what it is, and everything else is served
-    // as bytes to be saved. An uploaded HTML page handed back inline would run
-    // against this origin, with this API's cookies and this API's addresses.
+    // origin: a picture or a video is served as what it is, and everything
+    // else is served as bytes to be saved. An uploaded HTML page handed back
+    // inline would run against this origin, with this API's cookies and this
+    // API's addresses.
+    //
+    // Video is on the inline side because a browser can only ever decode an
+    // MP4 or a WebM into pixels -- there is no shape of either that becomes a
+    // document. `nosniff` below is what holds that true: without it the
+    // browser is free to disagree with the label.
     res.setHeader(
       'Content-Type',
       inline ? row.contentType : 'application/octet-stream',

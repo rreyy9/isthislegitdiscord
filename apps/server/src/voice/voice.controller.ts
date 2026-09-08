@@ -74,6 +74,11 @@ export class VoiceController {
       canPublish: true,
       canSubscribe: true,
       canPublishData: true,
+      // Deafen has no representation of its own in LiveKit — it is a listener
+      // state, and the SFU only replicates what somebody is sending. It rides
+      // on a participant attribute instead, which the server stores and hands
+      // to anyone who joins later, and writing one needs this right.
+      canUpdateOwnMetadata: true,
       // Spelled out even when nothing is being withheld, because the sweep in
       // VoiceService compares against this list and an absent one means
       // "everything" — two different ways of saying the same thing is one more

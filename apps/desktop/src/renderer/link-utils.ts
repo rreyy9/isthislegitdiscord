@@ -14,6 +14,15 @@ export const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]*[^\s<>"')\].,;:!?]/gi;
 
 export const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)(\?.*)?$/i;
 
+/**
+ * A linked file this build will put in a `<video>`.
+ *
+ * The same two formats the server accepts as inline uploads, for the same
+ * reason: they are what Chromium plays without a codec question. `.m4v` is
+ * an MP4 under another name and is common enough to be worth matching.
+ */
+export const VIDEO_EXT_RE = /\.(mp4|m4v|webm)(\?.*)?$/i;
+
 /** The 11-character video id from any YouTube URL shape, or null. */
 export function youtubeId(url: string): string | null {
   let u: URL;
@@ -61,4 +70,38 @@ export function youtubeStart(url: string): number | null {
     return null;
   }
   return Number(hours ?? 0) * 3600 + Number(minutes ?? 0) * 60 + Number(seconds ?? 0);
+}
+
+/* ------------------------------------------------------------- tiktok */
+
+/**
+ * The numeric video id from a TikTok URL, or null.
+ *
+ * Only the shapes that carry the id in the path. A `vm.tiktok.com/XXXX` or
+ * `tiktok.com/t/XXXX` share link is a redirect and nothing but a request to
+ * TikTok can turn it into an id -- which would mean this app reaching out to
+ * a third party for every link that scrolls past, before anybody has asked to
+ * watch anything. Those stay plain links.
+ *
+ * The id is digits only (a snowflake, 19 digits today), and that is checked
+ * rather than assumed: it is interpolated into the embed URL, and a path
+ * segment from a stranger's message is not something to paste into a URL
+ * unexamined.
+ */
+export function tiktokId(url: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^(www|m)\./, '');
+  if (host !== 'tiktok.com') return null;
+
+  // /@someone/video/123, /@someone/photo/123 (a slideshow, which the player
+  // also handles), and the embed URL somebody may paste as-is.
+  const m = u.pathname.match(
+    /^\/(?:@[^/]+\/(?:video|photo)|embed(?:\/v\d+)?)\/(\d{6,32})/,
+  );
+  return m ? m[1] : null;
 }

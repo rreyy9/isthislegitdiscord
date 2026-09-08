@@ -86,22 +86,66 @@ export type Attachment = z.infer<typeof Attachment>;
 export const EPHEMERAL_FILE_HOURS = 48;
 
 /**
- * The types drawn in the message list rather than offered as a download.
- *
- * This is the whole safety boundary for accepting arbitrary uploads: anything
- * not on this list is served as an octet-stream attachment that no browser
- * will render, so an uploaded page cannot become script running against the
- * API's own origin. Keep it to formats an <img> can display.
+ * Pictures. Drawn in the message list, and the only uploads kept indefinitely.
  */
-export const INLINE_TYPES = [
+export const INLINE_IMAGE_TYPES = [
   'image/png',
   'image/jpeg',
   'image/gif',
   'image/webp',
 ] as const;
 
+/**
+ * Video that plays in the message list rather than being saved first.
+ *
+ * The two formats Chromium plays everywhere without a codec question: MP4
+ * (H.264/AAC) and WebM (VP8/VP9). Deliberately not a `video/*` wildcard --
+ * this list decides what the server labels as itself on the way back out, and
+ * an open-ended one would put types nobody has thought about on that side of
+ * the boundary.
+ *
+ * Video is drawn but not kept: see `isKeptType`. A video is the largest thing
+ * anyone sends, and the deal on the upload button is that anything which is
+ * not a picture is being handed over rather than stored.
+ */
+export const INLINE_VIDEO_TYPES = ['video/mp4', 'video/webm'] as const;
+
+/**
+ * The types drawn in the message list rather than offered as a download.
+ *
+ * This is the whole safety boundary for accepting arbitrary uploads: anything
+ * not on this list is served as an octet-stream attachment that no browser
+ * will render, so an uploaded page cannot become script running against the
+ * API's own origin.
+ *
+ * The rule for adding to it is not "the client can show it" but "the browser
+ * treats it as media, never as a document": an <img> or a <video> decodes
+ * these into pixels, and there is no shape of MP4 or PNG that becomes script
+ * on this origin. Anything with a document nature -- HTML, SVG, PDF -- stays
+ * off it however convenient inline would be.
+ */
+export const INLINE_TYPES = [
+  ...INLINE_IMAGE_TYPES,
+  ...INLINE_VIDEO_TYPES,
+] as const;
+
 export const isInlineType = (contentType: string): boolean =>
   (INLINE_TYPES as readonly string[]).includes(contentType);
+
+export const isInlineVideoType = (contentType: string): boolean =>
+  (INLINE_VIDEO_TYPES as readonly string[]).includes(contentType);
+
+/**
+ * Whether an upload is kept indefinitely rather than given a deadline.
+ *
+ * Pictures, and nothing else. Separate from `isInlineType` on purpose, because
+ * the two questions came apart the moment video was drawn inline: "can this be
+ * shown" is about what a browser does with the bytes, "is this kept" is about
+ * whose disk they sit on. A ten-minute screen recording is the conversation
+ * while people are reading it and a permanent tenant afterwards.
+ */
+export const isKeptType = (contentType: string): boolean =>
+  (INLINE_IMAGE_TYPES as readonly string[]).includes(contentType);
 
 export const Message = z.object({
   id: z.string(),

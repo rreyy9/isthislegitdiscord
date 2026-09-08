@@ -72,6 +72,45 @@ type Msg = MessageDto & {
  */
 const MAX_MESSAGE_CHARS = 4000;
 
+/**
+ * Bytes as somebody would say them, matching the wording the server uses when
+ * it refuses an upload -- the two numbers are compared by whoever reads them,
+ * so they have to be written the same way.
+ */
+function describeBytes(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rounded =
+    value >= 100 || Number.isInteger(value) ? Math.round(value) : Number(value.toFixed(1));
+  return `${rounded} ${units[unit]}`;
+}
+
+/**
+ * A file waiting in the composer.
+ *
+ * `ready` is the whole reason this is an object rather than a `File`. A file
+ * picked from a network share or a drive that has since been unplugged looks
+ * perfectly fine until something tries to read it, and the something used to
+ * be the upload itself -- so the failure arrived after the message had already
+ * left the box, as a send that could not be retried into working. Checking
+ * first costs a moment and turns that into a chip that says so while it can
+ * still be removed.
+ */
+interface Staged {
+  /** Stable across removals, unlike the index the list used to be keyed by. */
+  id: string;
+  file: File;
+  preview: string | null;
+  ready: boolean;
+  /** Why this file cannot be sent, or null. Blocks the send while it is set. */
+  problem: string | null;
+}
+
 function timeOf(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
@@ -289,11 +328,30 @@ export function Chat({
    * `preview` is an object URL for a picture and null for everything else --
    * there is nothing to show for a zip, and a made-up thumbnail helps nobody.
    */
-  const [pending, setPending] = useState<
-    { file: File; preview: string | null }[]
-  >([]);
+  const [pending, setPending] = useState<Staged[]>([]);
   /** The hidden input behind the attach button. */
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /**
+   * This server's attachment limit, so an oversized file is refused in the box
+   * rather than after it has been sent and uploaded.
+   *
+   * Null until the config call answers, and the check is skipped while it is —
+   * the server enforces the same number, and a client that has not been told
+   * yet must not invent a limit of its own. Re-read on every reconnect, which
+   * is what makes a limit raised on the server and restarted into show up here
+   * without restarting the client.
+   */
+  const [maxUploadBytes, setMaxUploadBytes] = useState<number | null>(null);
+  const maxUploadRef = useRef<number | null>(null);
+  maxUploadRef.current = maxUploadBytes;
+  /**
+   * How far each in-flight upload has got, keyed by the message's nonce.
+   *
+   * Separate from the outbox because it changes at the rate bytes leave the
+   * machine and the outbox does not: putting it there would rebuild the whole
+   * message list a hundred times a second for a large file.
+   */
+  const [uploads, setUploads] = useState<Record<string, number>>({});
   /**
    * Messages that have left the composer but have not landed, keyed by nonce.
    *
@@ -794,12 +852,31 @@ export function Chat({
       await loadMentions();
     })();
 
+    // Asked for again on every reconnect, not only at startup. Raising the
+    // attachment limit means editing .env and restarting the server, and the
+    // restart is the reconnect -- so this is the moment the new number becomes
+    // knowable, and the composer should not go on refusing files against the
+    // old one until somebody restarts the client too.
+    const loadServerConfig = () =>
+      void api
+        .config()
+        .then((cfg) => {
+          if (typeof cfg.maxUploadBytes === 'number') {
+            setMaxUploadBytes(cfg.maxUploadBytes);
+          }
+        })
+        .catch(() => undefined);
+    loadServerConfig();
+
     connectSocket({
       onStatus: (s) => {
         setStatus(s);
         // Cleared on the way back up, so the label says "updating" only for
         // the gap the update itself caused and not for the next one.
-        if (s === 'connected') setServerRestarting(false);
+        if (s === 'connected') {
+          setServerRestarting(false);
+          loadServerConfig();
+        }
       },
       onServerRestarting: () => setServerRestarting(true),
       onMessage: (m) => {
@@ -1710,29 +1787,97 @@ export function Chat({
    * URL so the composer can show it before it is sent; everything else gets
    * null there and is drawn as a chip with its name, because there is nothing
    * to look at and inventing a thumbnail for a zip helps nobody.
+   *
+   * Each file arrives not ready and is checked in the background -- see
+   * `checkStaged`. Enter will not send until every chip has come back, which
+   * is the point: the alternative is finding out that a file is too big or
+   * cannot be read only once the message has left the box.
    */
   function addFiles(files: File[]) {
     if (files.length === 0) return;
-    setPending((prev) => {
-      const room = MAX_FILES - prev.length;
-      const taken = files.slice(0, Math.max(0, room));
-      return [
-        ...prev,
-        ...taken.map((file) => ({
-          file,
-          preview: file.type.startsWith('image/')
-            ? URL.createObjectURL(file)
-            : null,
-        })),
-      ];
-    });
+    // Built before the state update rather than inside it. The updater has to
+    // be a pure function of the previous list -- React is free to call it more
+    // than once -- and this one makes object URLs and starts the checks, both
+    // of which must happen exactly as often as somebody adds a file.
+    const taken = files.slice(0, Math.max(0, MAX_FILES - pending.length));
+    const staged: Staged[] = taken.map((file) => ({
+      id: crypto.randomUUID(),
+      file,
+      preview: file.type.startsWith('image/')
+        ? URL.createObjectURL(file)
+        : null,
+      ready: false,
+      problem: null,
+    }));
+
+    if (staged.length) setPending((prev) => [...prev, ...staged]);
+    // Said out loud rather than dropped in silence, which is what it used to
+    // do -- picking twelve files and being given ten looks like a bug.
+    if (files.length > taken.length) {
+      const left = files.length - taken.length;
+      setBanner(
+        `A message can carry ${MAX_FILES} files, so ${left} of those were ` +
+          `left behind.`,
+      );
+    }
+    for (const item of staged) void checkStaged(item);
   }
 
-  function removePending(index: number) {
+  /**
+   * Decide whether one staged file can actually be sent.
+   *
+   * Two questions, and both of them are cheaper to ask now than to discover
+   * from a failed upload. The size, against the limit this server reports --
+   * which is the only place the client has ever known that number, and it was
+   * being fetched and thrown away. And whether the bytes are readable at all:
+   * a single byte is enough to catch a share that has gone away or a drive
+   * that has been unplugged since the file was picked.
+   */
+  async function checkStaged(item: Staged) {
+    const settle = (problem: string | null) =>
+      setPending((prev) =>
+        prev.map((p) => (p.id === item.id ? { ...p, ready: true, problem } : p)),
+      );
+
+    const limit = maxUploadRef.current;
+    if (limit !== null && item.file.size > limit) {
+      settle(
+        `${describeBytes(item.file.size)} — over this server's ` +
+          `${describeBytes(limit)} limit`,
+      );
+      return;
+    }
+
+    try {
+      await item.file.slice(0, 1).arrayBuffer();
+    } catch {
+      settle('could not be read — has it moved?');
+      return;
+    }
+
+    // A picture is not staged until its thumbnail has decoded. It is the only
+    // part of this check that takes any real time, and it is the part worth
+    // waiting for: the chip and the thumbnail then appear together instead of
+    // the chip appearing empty and filling in a moment later.
+    if (item.preview) {
+      await new Promise<void>((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve();
+        // A picture that will not decode is still a file somebody may want to
+        // send, so this is not a problem -- only the end of the wait.
+        img.onerror = () => resolve();
+        img.src = item.preview!;
+      });
+    }
+
+    settle(null);
+  }
+
+  function removePending(id: string) {
     setPending((prev) => {
-      const preview = prev[index]?.preview;
+      const preview = prev.find((p) => p.id === id)?.preview;
       if (preview) URL.revokeObjectURL(preview);
-      return prev.filter((_, i) => i !== index);
+      return prev.filter((p) => p.id !== id);
     });
   }
 
@@ -1742,6 +1887,21 @@ export function Chat({
       return [];
     });
   }
+
+  /** Every staged file has been checked and none of them was refused. */
+  const filesReady = pending.every((p) => p.ready && !p.problem);
+  /** An upload of ours is on the wire. */
+  const uploading = Object.keys(uploads).length > 0;
+  /**
+   * Whether Enter should send.
+   *
+   * A second attachment message is refused while one is uploading, and only
+   * then: text is instant and there is no reason to hold it back. Sending two
+   * large files at once from one machine does not make either arrive sooner,
+   * and it makes the progress the composer is showing a lie about which.
+   */
+  const canSend =
+    Boolean(activeChannel) && filesReady && !(uploading && pending.length > 0);
 
   /**
    * Ctrl+V of a screenshot, or of a file copied in the file manager.
@@ -1770,6 +1930,9 @@ export function Chat({
     const files = pending.map((p) => p.file);
     // A pasted screenshot with nothing typed is a perfectly good message.
     if ((!content && files.length === 0) || !activeChannel) return;
+    // A file still being checked, one that was refused, or an upload already
+    // on the wire. The composer says which, so this only has to stop.
+    if (!canSend) return;
     // Measured on the markup, because that is the string the server measures:
     // a message full of tags is longer on the wire than it looks in the box.
     // Refused here rather than sent, so a long message is never lost to a 400
@@ -1836,9 +1999,21 @@ export function Chat({
     const entry = outboxRef.current.get(nonce);
     if (!entry) return;
     const { row, files } = entry;
+    // Zero rather than absent, so the ring appears the instant the message
+    // does. A file large enough to need one takes long enough that a ring
+    // arriving on the first progress event would be a visible stutter.
+    if (files.length) setUploads((prev) => ({ ...prev, [nonce]: 0 }));
     try {
       const saved = files.length
-        ? await api.sendWithFiles(channelId, row.content, nonce, files)
+        ? await api.sendWithFiles(channelId, row.content, nonce, files, (f) =>
+            setUploads((prev) =>
+              // Never backwards. A retry starts a second request whose early
+              // events would otherwise drag the ring back to nothing.
+              prev[nonce] === undefined || f > prev[nonce]
+                ? { ...prev, [nonce]: f }
+                : prev,
+            ),
+          )
         : await api.send(channelId, row.content, nonce);
       outboxRef.current.delete(nonce);
       for (const url of row.previews ?? []) URL.revokeObjectURL(url);
@@ -1858,6 +2033,15 @@ export function Chat({
       setMessages((prev) =>
         prev.map((x) => (x.clientNonce === nonce ? failed : x)),
       );
+    } finally {
+      // Both ways out, or a send that failed would leave a ring turning for
+      // ever and the composer refusing every attachment after it.
+      setUploads((prev) => {
+        if (prev[nonce] === undefined) return prev;
+        const next = { ...prev };
+        delete next[nonce];
+        return next;
+      });
     }
   }
 
@@ -2351,7 +2535,20 @@ export function Chat({
                                 image={imageOfUser(id)}
                               />
                               <span className="vm-name">{nameOfUser(id)}</span>
-                              {peer?.muted && <span className="vm-icon">🔇</span>}
+                              {/* One icon, not two: deafening mutes you as
+                                  well, and a row carrying both says nothing
+                                  the deafen icon did not already say. */}
+                              {peer?.deafened ? (
+                                <span className="vm-icon" title="Deafened">
+                                  🔕
+                                </span>
+                              ) : (
+                                peer?.muted && (
+                                  <span className="vm-icon" title="Muted">
+                                    🔇
+                                  </span>
+                                )
+                              )}
                               {peer?.screenSharing && (
                                 <span className="vm-icon">🖥</span>
                               )}
@@ -2604,6 +2801,18 @@ export function Chat({
                             {m.previews?.map((url) => (
                               <PreviewImage key={url} url={url} />
                             ))}
+                            {/* How far the attachments have got. A message
+                                with no files never shows one -- those are gone
+                                in a round trip, and a ring that appears and
+                                vanishes is worse than nothing at all. */}
+                            {m.clientNonce !== null &&
+                              m.clientNonce !== undefined &&
+                              uploads[m.clientNonce] !== undefined &&
+                              !m.failed && (
+                                <UploadRing
+                                  fraction={uploads[m.clientNonce]}
+                                />
+                              )}
                             {/* A send that never landed. The buttons live here
                                 rather than in the hover row because that row is
                                 edit, pin and delete -- all of which need a
@@ -2684,29 +2893,51 @@ export function Chat({
         >
           {pending.length > 0 && (
             <div className="staged">
-              {pending.map((p, i) => (
-                // Keyed by index, not by preview: a file with no preview has
-                // no url to key on, and two of them would collide.
+              {pending.map((p) => (
                 <div
-                  className={'staged-item' + (p.preview ? '' : ' as-file')}
-                  key={i}
+                  className={
+                    'staged-item' +
+                    (p.preview ? '' : ' as-file') +
+                    (p.ready ? '' : ' checking') +
+                    (p.problem ? ' rejected' : '')
+                  }
+                  key={p.id}
+                  title={
+                    p.problem
+                      ? `${p.file.name} — ${p.problem}`
+                      : `${p.file.name} (${describeBytes(p.file.size)})`
+                  }
                 >
                   {p.preview ? (
                     <img src={p.preview} alt="" />
                   ) : (
-                    <span className="staged-name" title={p.file.name}>
-                      {p.file.name}
-                    </span>
+                    <span className="staged-name">{p.file.name}</span>
                   )}
+                  {/* Over the thumbnail rather than beside it: the chip is
+                      already as small as it reads at, and the state belongs to
+                      the file rather than sitting next to it. */}
+                  {!p.ready && <span className="staged-spin" />}
+                  {p.problem && <span className="staged-bad">!</span>}
                   <button
                     className="staged-x"
-                    onClick={() => removePending(i)}
+                    onClick={() => removePending(p.id)}
                     title="Remove"
                   >
                     ×
                   </button>
                 </div>
               ))}
+              {/* One line under the row, because the chips are too small to
+                  carry a sentence and the reason has to be readable. */}
+              {pending.some((p) => p.problem) && (
+                <div className="staged-note bad">
+                  {pending.find((p) => p.problem)!.file.name}{' '}
+                  {pending.find((p) => p.problem)!.problem}. Remove it to send.
+                </div>
+              )}
+              {!filesReady && !pending.some((p) => p.problem) && (
+                <div className="staged-note">Checking…</div>
+              )}
             </div>
           )}
           {mentionPicker && mentionMatches.length > 0 && (
@@ -2749,9 +2980,13 @@ export function Chat({
             // and leaves the keyboard, so a muted person types as normal.
             placeholder={
               activeChannelObj
-                ? pending.length
-                  ? 'Add a message, or press Enter to send'
-                  : `Message #${activeChannelObj.name}`
+                ? uploading && pending.length
+                  ? 'Waiting for the current upload to finish…'
+                  : pending.length
+                    ? filesReady
+                      ? 'Add a message, or press Enter to send'
+                      : 'Checking the files…'
+                    : `Message #${activeChannelObj.name}`
                 : ''
             }
             disabled={!activeChannelObj || activeChannelObj.kind !== 'TEXT'}
@@ -3115,6 +3350,46 @@ function MentionPicker({
           )}
         </button>
       ))}
+    </div>
+  );
+}
+
+/**
+ * How far an attachment upload has got.
+ *
+ * An SVG ring rather than a bar, because it sits inside a message rather than
+ * across one, and it has to read at the size of a line of text. The stroke is
+ * drawn by dash offset, which is the one way to do this without a library.
+ *
+ * At 100% it stops being a measurement and becomes a spinner: the bytes have
+ * all left, but the server is still writing the files and the row, and a full
+ * ring sitting motionless through that looks like something that has finished
+ * and got stuck rather than something still working.
+ */
+function UploadRing({ fraction }: { fraction: number }) {
+  const clamped = Math.max(0, Math.min(1, fraction));
+  const done = clamped >= 1;
+  // r=7 in a 18x18 box leaves room for the 2px stroke without clipping.
+  const circumference = 2 * Math.PI * 7;
+
+  return (
+    <div className={'upload-ring' + (done ? ' finishing' : '')}>
+      <svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true">
+        <circle className="ring-track" cx="9" cy="9" r="7" />
+        <circle
+          className="ring-arc"
+          cx="9"
+          cy="9"
+          r="7"
+          strokeDasharray={circumference}
+          // A full circle when it is spinning, so the arc the animation turns
+          // is a constant rather than whatever the last reading happened to be.
+          strokeDashoffset={done ? circumference * 0.25 : circumference * (1 - clamped)}
+        />
+      </svg>
+      <span>
+        {done ? 'Finishing…' : `Uploading… ${Math.round(clamped * 100)}%`}
+      </span>
     </div>
   );
 }

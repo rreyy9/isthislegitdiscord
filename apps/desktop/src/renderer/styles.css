@@ -273,7 +273,9 @@ button { font-family: inherit; cursor: pointer; }
 .pin-body { min-width: 0; flex: 1; }
 /* Images on the board are thumbnails: the panel is 420px wide and a full-size
    screenshot would be the only thing in it. */
-.pin-body .attach, .pin-body .embed-img, .pin-body .yt { max-width: 240px; }
+.pin-body .attach, .pin-body .embed-img, .pin-body .yt,
+.pin-body .embed-video, .pin-body .attach-video { max-width: 240px; }
+.pin-body .tt { max-width: 160px; }
 .pin-unpin {
   align-self: flex-start; background: none; border: none; color: var(--faint);
   font-size: 17px; line-height: 1; padding: 0 4px; border-radius: 5px;
@@ -608,6 +610,64 @@ button { font-family: inherit; cursor: pointer; }
 }
 .yt.poster:hover .yt-play { opacity: 1; }
 
+/* TikTok is portrait, and the embed carries its own header and caption on top
+   of the video -- 325 wide is the narrowest the player lays out at, and the
+   height is what it needs before it starts scrolling itself. */
+.tt {
+  margin-top: 6px; position: relative; width: 100%; max-width: 325px;
+  aspect-ratio: 325 / 580; border-radius: 8px; overflow: hidden;
+  background: #000;
+}
+.tt iframe { width: 100%; height: 100%; border: 0; display: block; }
+.tt.poster {
+  cursor: pointer; display: flex; flex-direction: column; gap: 10px;
+  align-items: center; justify-content: center;
+  /* No thumbnail to show, so the placeholder has to be worth looking at on
+     its own -- see the comment on the TikTok component. */
+  background: linear-gradient(150deg, #25f4ee22, #0b0b0d 45%, #fe2c5522);
+  border: 1px solid var(--line);
+}
+.tt-mark { color: var(--text); opacity: .9; }
+.tt-label { font-size: 12.5px; color: var(--faint); letter-spacing: .2px; }
+.tt.poster:hover .tt-mark { opacity: 1; }
+.tt.poster:hover .tt-label { color: var(--text); }
+
+/* ------------------------------------------------------------ video */
+
+.embed-video, .attach-video {
+  margin-top: 6px; border-radius: 8px; overflow: hidden;
+  max-width: 420px; background: #000; border: 1px solid var(--line);
+}
+.embed-video video, .attach-video video {
+  display: block; width: 100%; max-height: 420px; background: #000;
+}
+/* The card shown before the bytes are asked for: a video is the largest thing
+   anyone sends and nothing is fetched until this is clicked. */
+.attach-video.poster {
+  cursor: pointer; background: var(--panel2);
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+}
+.attach-video.poster:hover { border-color: var(--accent); }
+.attach-video.poster.loading { cursor: default; opacity: .7; }
+.attach-video-play {
+  flex: none; width: 30px; height: 30px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--panel); border: 1px solid var(--line);
+  color: var(--text); font-size: 12px;
+}
+.attach-video-meta {
+  display: flex; gap: 8px; align-items: baseline; min-width: 0;
+  font-size: 12px; color: var(--faint); padding: 0;
+}
+.attach-video.poster .attach-video-meta { flex: 1; }
+.attach-video:not(.poster) .attach-video-meta {
+  padding: 5px 9px; background: var(--panel2);
+}
+.attach-video-meta span:first-child {
+  color: var(--text); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1; min-width: 0;
+}
+
 /* ------------------------------------------------- staged attachments */
 .staged { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 0 9px; }
 .staged-item {
@@ -621,6 +681,63 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 14px; line-height: 1; padding: 0;
 }
 .staged-x:hover { background: var(--bad); }
+
+/*
+ * A staged file that has not been checked yet, and one that was refused.
+ *
+ * Dimmed rather than hidden or removed: it is still the file somebody picked,
+ * and it still has to be findable to take back out. The ring turns over the
+ * thumbnail because the chip has no room beside it for anything.
+ */
+.staged-item.rejected { border-color: var(--bad); opacity: .8; }
+/* A scrim rather than a lower opacity on the chip: the ring has to sit on top
+   of a thumbnail or a filename without either reading through it. */
+.staged-item.checking::after {
+  content: ''; position: absolute; inset: 0; background: rgba(12,14,18,.72);
+}
+.staged-spin {
+  position: absolute; inset: 0; margin: auto; z-index: 1;
+  width: 20px; height: 20px;
+  border-radius: 50%; border: 2px solid rgba(255,255,255,.22);
+  border-top-color: var(--accent); animation: staged-spin .7s linear infinite;
+}
+@keyframes staged-spin { to { transform: rotate(360deg); } }
+.staged-bad {
+  position: absolute; left: 4px; bottom: 4px; width: 17px; height: 17px;
+  border-radius: 50%; background: var(--bad); color: #fff;
+  font-size: 12px; font-weight: 700; line-height: 17px; text-align: center;
+}
+/* Full width of the wrapping row, so the sentence is not squeezed into the
+   gap left over beside the last chip. */
+.staged-note { flex: 0 0 100%; font-size: 12px; color: var(--dim); }
+.staged-note.bad { color: var(--bad); }
+
+/*
+ * The upload ring on a message that is still being sent.
+ *
+ * `rotate(-90deg)` puts zero at the top, which is where every ring anybody has
+ * seen starts; without it the arc begins at three o'clock and reads as though
+ * it is already a quarter done.
+ */
+.upload-ring {
+  display: flex; align-items: center; gap: 7px;
+  margin-top: 5px; font-size: 12px; color: var(--dim);
+}
+.upload-ring svg { transform: rotate(-90deg); flex: none; }
+.upload-ring .ring-track {
+  fill: none; stroke: var(--line); stroke-width: 2;
+}
+.upload-ring .ring-arc {
+  fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round;
+  /* Matches the progress event rate closely enough that the arc moves rather
+     than steps, and is short enough not to lag behind the number beside it. */
+  transition: stroke-dashoffset .15s linear;
+}
+/* Bytes are all out and the server is still working. The arc stops meaning a
+   fraction, so it turns instead -- and the transition has to go with it, or
+   every rotation fights the interpolation. */
+.upload-ring.finishing svg { animation: staged-spin .9s linear infinite; }
+.upload-ring.finishing .ring-arc { transition: none; }
 
 /* ------------------------------------------------ editing and moderation */
 .msg { position: relative; }

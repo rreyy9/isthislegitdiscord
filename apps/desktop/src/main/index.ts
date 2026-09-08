@@ -595,14 +595,15 @@ ipcMain.handle(
   },
 );
 
-/** The two embed origins `frame-src` in the renderer's CSP allows. */
-const YOUTUBE_ORIGINS = [
+/** The embed origins `frame-src` in the renderer's CSP allows. */
+const EMBED_ORIGINS = [
   'https://www.youtube-nocookie.com',
   'https://www.youtube.com',
+  'https://www.tiktok.com',
 ];
 
 /**
- * Give YouTube's embedded player a referrer.
+ * Give an embedded player a referrer.
  *
  * A packaged build loads its renderer from file://, and a file:// page sends
  * no Referer at all -- the origin is opaque, so there is nothing to send. The
@@ -617,24 +618,29 @@ const YOUTUBE_ORIGINS = [
  * is unavailable") for every video, embeddable or not -- a referrer that is
  * checked and rejected is worse than none. Its own origin is accepted.
  *
+ * TikTok's embed is on the list for the same reason rather than a diagnosed
+ * one: it is a third-party player framed from a file:// page, which is the
+ * exact shape that produced the YouTube bug, and its own origin is the answer
+ * that turned out to be right there.
+ *
  * The header is only added when the request has none of its own, which in
  * practice is exactly the frame document requested by our file:// page. Every
  * subresource the player then fetches is issued by the frame itself, from a
  * real https origin, and already carries the referrer YouTube expects -- those
  * are left alone rather than overwritten.
  *
- * Scoped to those two origins, so this cannot quietly attach a referrer to
+ * Scoped to those origins, so this cannot quietly attach a referrer to
  * anything else the app talks to.
  */
-function allowYouTubeEmbeds() {
+function allowEmbedReferrers() {
   session.defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: YOUTUBE_ORIGINS.map((o) => `${o}/*`) },
+    { urls: EMBED_ORIGINS.map((o) => `${o}/*`) },
     (details, callback) => {
       const headers = details.requestHeaders;
       const has = Object.keys(headers).some(
         (k) => k.toLowerCase() === 'referer',
       );
-      const origin = YOUTUBE_ORIGINS.find((o) => details.url.startsWith(o + '/'));
+      const origin = EMBED_ORIGINS.find((o) => details.url.startsWith(o + '/'));
       if (!has && origin) headers['Referer'] = origin + '/';
       callback({ requestHeaders: headers });
     },
@@ -649,7 +655,7 @@ app.whenReady().then(() => {
     cb(permission === 'media' || permission === 'display-capture'),
   );
 
-  allowYouTubeEmbeds();
+  allowEmbedReferrers();
 
   registerScreenShare(() => mainWindow);
   registerUpdater(() => mainWindow);

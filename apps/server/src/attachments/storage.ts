@@ -21,12 +21,26 @@ import { imageSize } from './image-size';
  *     below checks that extension before opening or deleting anything, and
  *     that check is what stops a bad row turning the download route into a
  *     general file server. It stays a closed set.
- *  2. Nothing but a picture is ever served in a form a browser would render.
- *     See the attachments controller: an uploaded page handed back inline
- *     would be script running against this API's own origin.
+ *  2. Nothing is served in a form a browser would render as a document. See
+ *     the attachments controller and `INLINE_TYPES` in the shared package:
+ *     pictures and the two video formats are handed back as themselves,
+ *     because a browser can only decode those into pixels; everything else is
+ *     handed back as bytes to save. An uploaded page served inline would be
+ *     script running against this API's own origin.
+ *
+ * Video sits either side of that pair on purpose: it is served as itself under
+ * rule 2, and it is still stored opaque under rule 1 and still given an expiry
+ * -- being drawable is not the same question as being worth keeping.
  */
 
-/** Pictures: kept indefinitely, drawn in the message list, real extension. */
+/**
+ * Pictures: kept indefinitely, drawn in the message list, real extension.
+ *
+ * Video is not here and should not be added. This map decides two things at
+ * once -- the extension on disk and, through `isImage` below, whether the file
+ * is kept forever -- and video is drawn inline without being either of those.
+ * What the client may show is `INLINE_TYPES` in the shared package.
+ */
 export const IMAGE_TYPES: Record<string, string> = {
   'image/png': '.png',
   'image/jpeg': '.jpg',

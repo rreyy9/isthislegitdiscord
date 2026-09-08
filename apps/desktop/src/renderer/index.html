@@ -21,12 +21,20 @@
   turned into object URLs -- an <img src> cannot carry an Authorization header,
   and a token in a query string ends up in logs.
 
-  frame-src is exactly the two YouTube origins and nothing else, so a pasted
-  link cannot frame anything it likes. The player is only ever loaded after
-  someone clicks play; until then a message shows a still image.
+  frame-src is exactly the three embed origins and nothing else, so a pasted
+  link cannot frame anything it likes. A player is only ever loaded after
+  someone clicks play; until then a message shows a still image (YouTube) or a
+  drawn placeholder (TikTok).
+
+  media-src carries blob: for uploaded video, which arrives the same way an
+  uploaded picture does -- fetched with the bearer token, handed to a <video>
+  as an object URL -- and http:/https: for a video somebody linked to. Without
+  it those inherit default-src 'self' and fail the way described above: no
+  network error, no console entry the user will ever see, just a player that
+  does nothing.
 -->
 <meta http-equiv="Content-Security-Policy"
-  content="default-src 'self'; connect-src 'self' http: https: ws: wss:; img-src 'self' data: blob: http: https:; style-src 'self' 'unsafe-inline'; frame-src https://www.youtube-nocookie.com https://www.youtube.com;">
+  content="default-src 'self'; connect-src 'self' http: https: ws: wss:; img-src 'self' data: blob: http: https:; media-src 'self' blob: http: https:; style-src 'self' 'unsafe-inline'; frame-src https://www.youtube-nocookie.com https://www.youtube.com https://www.tiktok.com;">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="./icon.png">
 <title>isthislegit</title>

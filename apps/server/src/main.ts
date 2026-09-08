@@ -1,4 +1,21 @@
 import 'reflect-metadata';
+/**
+ * The environment, loaded before anything else in the process can read it.
+ *
+ * ConfigModule reads .env too, and does it later -- when Nest constructs
+ * AppModule. That is after every module in the graph has been imported, and
+ * importing a module runs its decorators. A decorator argument that reads
+ * `process.env` therefore sees an empty environment and silently takes its
+ * fallback, for the life of the process, whatever .env says and however many
+ * times the server is restarted. The attachment size limit was exactly that
+ * bug: `MAX_UPLOAD_BYTES` was written, saved and restarted into, and uploads
+ * went on being refused at the 25 MB default.
+ *
+ * dotenv does not overwrite variables that are already set, so ConfigModule
+ * running afterwards over the same file changes nothing. This import must stay
+ * above `./app.module`; that is the whole of what it does.
+ */
+import 'dotenv/config';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -6,6 +23,8 @@ import express from 'express';
 import { toNodeHandler } from 'better-auth/node';
 import { AppModule } from './app.module';
 import { AUTH, type Auth } from './auth/auth.factory';
+import { maxUploadBytes } from './attachments/storage';
+import { describeBytes } from './common/upload-limit.filter';
 
 async function bootstrap() {
   // bodyParser is off so Better Auth's handler can read the raw request; our
@@ -57,7 +76,14 @@ async function bootstrap() {
   const port = Number(process.env.PORT ?? 3000);
   await app.listen(port, '0.0.0.0');
 
-  new Logger('bootstrap').log(`listening on http://0.0.0.0:${port}`);
+  // The upload limit is said out loud because it is the one setting whose
+  // effect is invisible until somebody tries to send a large file and is
+  // refused, with no way to tell a limit that did not apply from a file that
+  // is genuinely too big. One line in the log answers it before it is asked.
+  new Logger('bootstrap').log(
+    `listening on http://0.0.0.0:${port} ` +
+      `(attachment limit ${describeBytes(maxUploadBytes())})`,
+  );
 }
 
 void bootstrap();

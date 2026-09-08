@@ -11,6 +11,7 @@ import {
   Post,
   Query,
   UploadedFiles,
+  UseFilters,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
@@ -32,6 +33,7 @@ import { PermissionService } from '../auth/permission.guard';
 import { ChatGateway } from '../gateway/chat.gateway';
 import { MentionsService } from '../mentions/mentions.service';
 import { ZodPipe } from '../common/zod.pipe';
+import { UploadLimitFilter } from '../common/upload-limit.filter';
 import { newId } from '../common/ids';
 import {
   maxUploadBytes,
@@ -264,12 +266,19 @@ export class MessagesController {
    * One request means an attachment cannot exist without its message.
    */
   @Post()
+  // Turns multer's bare "File too large" into a refusal that names the limit.
+  @UseFilters(UploadLimitFilter)
   @UseInterceptors(
     // No `fileFilter`. Any type may be sent; what differs is how long it is
     // kept and how it is handed back. The two things that make that safe are
     // in the storage layer and the download route, not here -- a filter on the
     // client-declared mimetype was never one of them, since the client
     // declares it.
+    //
+    // This options object is built when the module is imported, so the limit
+    // in it is whatever the environment held at that moment. `main.ts` loads
+    // .env as its first import for exactly this reason -- see the note there,
+    // and do not move that import.
     FilesInterceptor('files', 10, {
       storage: memoryStorage(),
       limits: { fileSize: maxUploadBytes(), files: 10 },
