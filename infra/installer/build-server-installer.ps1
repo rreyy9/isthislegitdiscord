@@ -544,6 +544,13 @@ Updating an install that is already here
     else -- calls in progress are not interrupted, because the LiveKit binary
     has not moved.
 
+    You can leave the isthislegit Server app open while it runs. When the
+    release changes the app itself or the console it wraps, the installer
+    closes it for the few seconds the swap takes and opens it again after --
+    including after a rollback. Neither can be replaced underneath a running
+    app: Windows will not rename a folder some process has open, and the
+    console folder is the app's working directory.
+
     If the server does not answer /api/health afterwards, the previous version
     is put back and the update reports the failure. A migration that has
     already run stays applied: Prisma has no down migrations, so migrations in
@@ -652,7 +659,8 @@ $components = [ordered] @{
     # changed Caddyfile beside the live one rather than over it.
     'caddy-config'   = @('caddy\Caddyfile', 'caddy\start.ps1')
 
-    # 319 MB of Electron that cannot be overwritten while the admin app is open.
+    # 319 MB of Electron that cannot be overwritten while the admin app is
+    # open, so install.ps1 closes it for the swap and opens it again after.
     'app'            = @('app')
 
     'scripts'        = @('install.ps1', 'allow-lan.ps1', 'start-all.ps1', 'README.txt')

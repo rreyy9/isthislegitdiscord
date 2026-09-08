@@ -155,6 +155,187 @@ function Get-CaddyHosts([string] $path) {
     return $null
 }
 
+# ------------------------------------------------------------- the admin app
+#
+# "isthislegit Server" (apps/server-app) is a shell around the operator console
+# rather than a second copy of it: it spawns console\src\main.mjs with its
+# working directory set to console\ (apps/server-app/src/main.js). On Windows a
+# process's current directory is an open handle on that directory, and a
+# directory with an open handle cannot be renamed -- which is exactly how the
+# update path swaps a component into place. So an update that touches console\
+# failed, every time, on any box where the operator was watching it through the
+# app: "the process cannot access the file because it is being used by another
+# process", thrown after 224 MB of server\node_modules had already moved and
+# had to be moved back.
+#
+# app\ is the same problem twice over: 319 MB of Electron with the running
+# executable inside it. That one used to be skipped rather than fail, which
+# meant the admin app silently never updated at all.
+#
+# Both are answered the same way -- close the app for the length of the swap,
+# open it again after. It supervises; it does not serve. Nobody using the chat
+# server notices.
+#
+# The console runs on Electron's own Node (ELECTRON_RUN_AS_NODE), so it appears
+# under this same process name: closing "isthislegit Server" means both.
+$adminAppProcess = 'isthislegit Server'
+
+function Get-AdminApp {
+    @(Get-Process -Name $adminAppProcess -ErrorAction SilentlyContinue)
+}
+
+# Read before the app is closed, so it can be opened again from where it
+# actually was. On an install that is always $InstallDir\app; a developer
+# running the unpacked build somewhere else is worth not breaking.
+function Get-AdminAppPath {
+    foreach ($p in (Get-AdminApp)) {
+        try { if ($p.Path) { return $p.Path } } catch { }
+    }
+    $fallback = Join-Path $InstallDir 'app\isthislegit Server.exe'
+    if (Test-Path $fallback) { return $fallback }
+    return $null
+}
+
+# Any process whose command line names the console entry point. A force-killed
+# app leaves its console behind, and an orphaned console holds console\ open
+# just as effectively as the app did.
+function Stop-ConsoleStrays {
+    $strays = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -match 'console[\\/]src[\\/]main\.mjs' })
+    foreach ($proc in $strays) {
+        Say "    ending the operator console (pid $($proc.ProcessId))"
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Ask first, insist after. CloseMainWindow lets the app run its own before-quit,
+# which taskkills the console tree -- that is what actually releases console\,
+# and it releases it cleanly. Only a window that will not go gets ended.
+#
+# Returns whether anything was closed, which is the question the caller has:
+# an app that was not open must not be opened by an update.
+function Stop-AdminApp {
+    $running = Get-AdminApp
+    if (-not $running) { return $false }
+
+    Say "    asking $adminAppProcess to close ($($running.Count) process(es))"
+    foreach ($p in $running) {
+        try { $p.CloseMainWindow() | Out-Null } catch { }
+    }
+
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline -and (Get-AdminApp)) { Start-Sleep -Milliseconds 200 }
+
+    if (Get-AdminApp) {
+        Warn "    it did not close on its own -- ending it"
+        foreach ($p in (Get-AdminApp)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 500
+    }
+
+    Stop-ConsoleStrays
+    Start-Sleep -Milliseconds 500
+
+    if (Get-AdminApp) {
+        throw "$adminAppProcess would not close, and console\ and app\ cannot be replaced while it is running. Close it and run the installer again."
+    }
+    Say "    closed"
+    return $true
+}
+
+function Start-AdminApp([string] $exe) {
+    if (-not $exe) {
+        Warn "    could not tell where the admin app lives -- open it yourself"
+        return
+    }
+    if (-not (Test-Path $exe)) {
+        Warn "    $exe is not there -- open the admin app yourself"
+        return
+    }
+    try {
+        Start-Process -FilePath $exe -WorkingDirectory (Split-Path -Parent $exe) | Out-Null
+        Say "    reopened the admin app"
+    } catch {
+        Warn "    could not reopen the admin app -- open it yourself. $($_.Exception.Message)"
+    }
+}
+
+# ------------------------------------------------------ Caddy's certificates
+#
+# Caddy keeps its certificates and its ACME account in a per-account data
+# directory -- %AppData%\Caddy -- which is a different folder for SYSTEM, who
+# runs the scheduled task, than for whoever is logged in, who is who the
+# operator console starts Caddy as when there is no task to drive. Started one
+# way and then the other, Caddy finds an empty store the second time and
+# re-issues both certificates. Let's Encrypt allows five duplicate certificates
+# a week per set of names, which is not many if the store moves on every
+# restart.
+#
+# Pinning storage under the install directory makes the store the deployment's
+# rather than the account's, so it does not matter who starts Caddy.
+#
+# Written into the installed Caddyfile rather than shipped in the template
+# because caddy-config is staged and never overwritten -- an operator's edited
+# Caddyfile is the one Caddy actually reads, and it is the one that has to end
+# up with the directive. The template cannot carry it anyway: it does not know
+# the install directory.
+function Set-CaddyStorage([string] $caddyfile, [string] $dataDir) {
+    if (-not (Test-Path $caddyfile)) { return }
+
+    if ((Get-Content $caddyfile -Raw) -match '(?m)^\s*storage\s') {
+        Say "  certificate store already pinned in $caddyfile"
+        return
+    }
+
+    # The global block is the one that opens with a bare '{' on a line of its
+    # own. Snippets and site blocks all have a name in front of theirs.
+    $lines  = @(Get-Content $caddyfile)
+    $insert = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -eq '{') { $insert = $i; break }
+    }
+
+    $block = @(
+        "`tstorage file_system {"
+        "`t`troot `"$dataDir`""
+        "`t}"
+    )
+
+    if ($insert -ge 0) {
+        $head = @($lines[0..$insert])
+        $tail = if ($insert -lt $lines.Count - 1) { @($lines[($insert + 1)..($lines.Count - 1)]) } else { @() }
+        $out  = $head + $block + $tail
+    } else {
+        # No global block at all: open one at the top, which is where Caddy
+        # requires it to be.
+        $out = @('{') + $block + @('}', '') + $lines
+    }
+
+    Copy-Item $caddyfile "$caddyfile.bak" -Force
+    Set-Content -Path $caddyfile -Value $out -Encoding UTF8
+    Say "  pinned the certificate store to $dataDir"
+    Say "  kept the previous Caddyfile as $(Split-Path -Leaf $caddyfile).bak"
+}
+
+# Bring whatever Caddy already issued into the pinned store, so pinning it costs
+# nothing. SYSTEM's profile first: that is where the scheduled task's Caddy put
+# them, and on this deployment the task is how Caddy has always run.
+function Copy-CaddyStore([string] $dataDir) {
+    if (Test-Path (Join-Path $dataDir 'certificates')) { return }
+
+    foreach ($candidate in @(
+        (Join-Path $env:SystemRoot 'System32\config\systemprofile\AppData\Roaming\Caddy'),
+        (Join-Path $env:AppData 'Caddy')
+    )) {
+        if (-not $candidate) { continue }
+        if (-not (Test-Path (Join-Path $candidate 'certificates'))) { continue }
+        New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+        Copy-Item (Join-Path $candidate '*') $dataDir -Recurse -Force
+        Say "  copied the existing certificates in from $candidate"
+        Say "  (nothing is re-issued, so no Let's Encrypt rate limit is spent)"
+        return
+    }
+}
+
 Say ""
 Say "isthislegit server installer"
 Say "  payload      $here"
@@ -275,19 +456,21 @@ if ($Update) {
     #   Restart   which service has to come down and back up
     #   Migrate   a change here means new migrations shipped
     #   Stage     do not overwrite the installed copy; write it alongside
-    #   WhenIdle  only replace it while this process is not running
+    #   NeedsApp  the admin app has to be closed before this can be replaced
     $policy = @{
         'server-dist'    = @{ Restart = 'server' }
         'server-prisma'  = @{ Restart = 'server'; Migrate = $true }
         'server-deps'    = @{ Restart = 'server' }
         'shared'         = @{ Restart = 'server' }
 
-        # The console is a plain Node script the admin app spawns. Its files are
-        # read at startup and held open by nothing afterwards, so they can be
-        # replaced under a running one; it picks the new copy up when the app is
-        # next opened. Stopping it here would kill the supervisor the operator
-        # is most likely watching this update through.
-        'console'        = @{ Restart = 'none'; Note = 'the admin app picks it up next time it is opened' }
+        # The console's *files* are read at startup and held open by nothing
+        # afterwards, which is what this used to say and is why it was marked
+        # replaceable under a running app. The *directory* is another matter:
+        # it is the admin app's working directory for the console it spawns,
+        # and Windows will not rename a directory that is some process's cwd.
+        # So the app closes for this. Nothing serving stops -- the console
+        # supervises, it does not serve.
+        'console'        = @{ Restart = 'none'; NeedsApp = $true; Note = 'the admin app closes for this and is reopened after' }
 
         # Restarting LiveKit drops every call in progress, which is why the
         # binary is hashed apart from anything else: it moves only when someone
@@ -308,9 +491,13 @@ if ($Update) {
         # reached on, so the new one is written beside it and left to a human.
         'caddy-config'   = @{ Restart = 'none'; Stage = $true; Note = 'written as Caddyfile.new; the live one is untouched' }
 
-        # 319 MB of Electron, locked while the admin app is open, and in nobody's
-        # serving path. Skipped rather than waited for.
-        'app'            = @{ Restart = 'none'; WhenIdle = 'isthislegit Server'; Note = 'replaced only while the admin app is closed' }
+        # 319 MB of Electron with the running executable inside it. This was
+        # skipped whenever the app was open, and on a box where the operator
+        # watches the update through that app it was open every time -- so the
+        # admin app never actually updated, and the only sign of it was a line
+        # in the details list. Closed for the swap and reopened after, like the
+        # console.
+        'app'            = @{ Restart = 'none'; NeedsApp = $true; Note = 'the admin app closes for this and is reopened after' }
 
         'scripts'        = @{ Restart = 'none' }
     }
@@ -340,7 +527,7 @@ if ($Update) {
             Restart  = $rule.Restart
             Migrate  = [bool] $rule.Migrate
             Stage    = [bool] $rule.Stage
-            WhenIdle = $rule.WhenIdle
+            NeedsApp = [bool] $rule.NeedsApp
             Note     = $rule.Note
         })
     }
@@ -372,12 +559,18 @@ if ($Update) {
     # admin app never stops anything.
     $toRestart = @($changed | ForEach-Object { $_.Restart } | Where-Object { $_ -ne 'none' } | Sort-Object -Unique)
 
+    # Closing the admin app is decided the same way restarting is: off the
+    # components. An update that only moves server\dist leaves it open.
+    $closesApp = @($changed | Where-Object { $_.NeedsApp }).Count -gt 0
+
     $migrateLabel = if ($needsMigrate) { 'yes' } else { 'no -- the schema did not change' }
     $restartLabel = if ($toRestart) { $toRestart -join ', ' } else { 'nothing' }
+    $appLabel     = if ($closesApp) { 'closed for the swap, reopened after' } else { 'left open' }
 
     Say ""
     Say "  migrations   $migrateLabel"
     Say "  restarting   $restartLabel"
+    Say "  admin app    $appLabel"
 
     if ((Split-Path -Qualifier $here) -ne (Split-Path -Qualifier $InstallDir)) {
         Warn ""
@@ -530,11 +723,38 @@ if ($Update) {
     $ports = @{ server = [int] $installedPort; livekit = 7880; caddy = 443 }
     $tasks = @{ server = 'isthislegit-server'; livekit = 'isthislegit-livekit'; caddy = 'isthislegit-caddy' }
 
+    # Pinning the certificate store is version-independent and additive, so it
+    # happens outside the window and is deliberately not rolled back: it is
+    # correct on the old version as well as the new one. Caddy reads it at its
+    # next start, which is this update's restart when caddy is in $toRestart and
+    # the next reboot otherwise.
+    if ($caddyHosts) {
+        Step "Caddy's certificate store"
+        Copy-CaddyStore (Join-Path $caddyDir 'data')
+        Set-CaddyStorage (Join-Path $caddyDir 'Caddyfile') (Join-Path $caddyDir 'data')
+        if ($toRestart -notcontains 'caddy') {
+            Say "  Caddy was not restarted for this update, so it picks this up at its next start."
+        }
+    }
+
     # ------------------------------------------------------ the short window
 
-    $startedAt = Get-Date
+    $startedAt  = Get-Date
+    $appExePath = $null
+    $appWasOpen = $false
 
     try {
+        # Before the services, not after: closing the app takes the operator
+        # console with it, and on a box where somebody pressed Start in the app
+        # the console is the parent of the server, LiveKit and Caddy. Doing this
+        # first means Stop-Managed below usually finds the ports already quiet.
+        if ($closesApp) {
+            Step "Closing the admin app"
+            $appExePath = Get-AdminAppPath
+            $appWasOpen = Stop-AdminApp
+            if (-not $appWasOpen) { Say "    it was not open" }
+        }
+
         if ($toRestart) {
             Step "Stopping"
             foreach ($svc in $toRestart) { Stop-Managed $tasks[$svc] $ports[$svc] $svc }
@@ -542,9 +762,12 @@ if ($Update) {
 
         Step "Swapping components into place"
         foreach ($c in $changed) {
-            if ($c.WhenIdle -and (Get-Process -Name $c.WhenIdle -ErrorAction SilentlyContinue)) {
-                Warn "    $($c.Name) skipped -- $($c.WhenIdle) is running. Close it and run the installer again."
-                continue
+            # Stop-AdminApp already threw if it could not close the app, so this
+            # should never fire. It stays because the alternative is discovering
+            # the lock halfway through the swap, which means moving 224 MB of
+            # node_modules back -- and that is the failure this release fixes.
+            if ($c.NeedsApp -and (Get-AdminApp)) {
+                throw "$($c.Name) cannot be replaced while $adminAppProcess is running. Close it and run the installer again."
             }
             foreach ($relPath in $c.Paths) { Move-Component $relPath $c.Stage }
         }
@@ -583,6 +806,11 @@ if ($Update) {
         Undo-Moves
         foreach ($svc in $toRestart) { Start-Managed $tasks[$svc] $svc }
 
+        # The operator was watching through this, and a rollback is exactly when
+        # they want it back. Undo-Moves has already put the old app\ back, so
+        # this reopens the version that was running before.
+        if ($appWasOpen) { Start-AdminApp $appExePath }
+
         Write-Host ""
         Warn "Rolled back to $installedVersion. The install is as it was, with one exception:"
         Warn "any migration that ran is still applied -- Prisma has no down migrations."
@@ -591,7 +819,15 @@ if ($Update) {
         throw "update failed and was rolled back: $reason"
     }
 
+    # Measured before the app is reopened: Electron taking a few seconds to
+    # paint is not the chat server being unavailable, and this number is the one
+    # that gets quoted.
     $downSeconds = [math]::Round(((Get-Date) - $startedAt).TotalSeconds, 1)
+
+    if ($appWasOpen) {
+        Step "Reopening the admin app"
+        Start-AdminApp $appExePath
+    }
 
     # Only now, once the server has answered, is the new manifest the truth.
     Copy-Item $payloadManifestPath $installedManifestPath -Force
@@ -976,6 +1212,17 @@ if (-not (Would "node dist/seed.js")) {
     Say "  saved to $seedLog"
 }
 
+# ------------------------------------------------- 4b. Caddy's certificates
+
+# Done on the fresh path too, and not only on updates: a first install that is
+# started once through the app and thereafter by the task would otherwise issue
+# its certificates twice for no reason. See Set-CaddyStorage.
+if ($caddyHosts -and -not $DryRun) {
+    Step "Caddy's certificate store"
+    Copy-CaddyStore (Join-Path $caddyDir 'data')
+    Set-CaddyStorage (Join-Path $caddyDir 'Caddyfile') (Join-Path $caddyDir 'data')
+}
+
 # --------------------------------------------------------------- 5. on boot
 
 Step "Start on boot"
@@ -1027,11 +1274,29 @@ if ($NoStartup) {
         # re-run of the installer must not fail on its own previous work.
         Unregister-ScheduledTask -TaskName $t.Name -Confirm:$false -ErrorAction SilentlyContinue
 
-        $action    = New-ScheduledTaskAction -Execute $t.Exe -Argument $t.Args -WorkingDirectory $t.Dir
-        $trigger   = New-ScheduledTaskTrigger -AtStartup
+        $action = New-ScheduledTaskAction -Execute $t.Exe -Argument $t.Args -WorkingDirectory $t.Dir
+
+        # A bare -AtStartup trigger fires before the network stack is up and
+        # before PostgreSQL is listening. That matters because neither service
+        # tolerates it: PrismaService.onModuleInit calls $connect()
+        # (apps/server/src/prisma/prisma.service.ts), so the chat server exits
+        # non-zero against a database that has not finished starting, and
+        # Caddy's ACME fails on a box with no address yet.
+        #
+        # Scheduled tasks cannot express "after the postgresql service", so the
+        # two things that can be done are done: wait before the first try, and
+        # keep trying for long enough to outlast a slow boot. Three restarts a
+        # minute apart was not long enough -- a cold boot burns through all
+        # three while Postgres is still coming up, the task gives up for good,
+        # and what the operator sees is "the tasks do not work after a reboot,
+        # but starting them by hand afterwards works fine". That is the whole
+        # of that bug.
+        $trigger       = New-ScheduledTaskTrigger -AtStartup
+        $trigger.Delay = 'PT45S'
+
         $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
         $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-            -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+            -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 
         Register-ScheduledTask -TaskName $t.Name -Action $action -Trigger $trigger `
             -Principal $principal -Settings $settings | Out-Null
