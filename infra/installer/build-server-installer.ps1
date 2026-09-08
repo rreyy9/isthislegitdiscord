@@ -432,13 +432,29 @@ if (-not $SkipDependencies) {
 
     $before = Get-ChildItem $serverOut -Recurse -File | Measure-Object -Property Length -Sum
 
-    # Whole packages nothing but `prisma studio` and `prisma dev` reach for.
-    # typescript is on the list because prisma7.config.ts is TypeScript, which
-    # reads as needing the compiler -- it does not. The config loader transpiles
-    # it with jiti, and `prisma migrate status` behaves identically without it.
+    # Whole packages the Prisma CLI never loads on the one code path this
+    # install uses -- `prisma migrate deploy`.
+    #
+    # Three names that look like they belong here are deliberately absent:
+    # @prisma\studio-core, @prisma\dev and remeda. prisma\build\cli.js requires
+    # all three at the top level, so pruning them breaks every CLI command
+    # rather than only Studio. 0.2.6 shipped with the first two pruned and its
+    # update failed on the customer's box at migrate deploy, with the server
+    # already stopped.
+    #
+    # Do not add anything back to this list on the strength of running the CLI
+    # from the staging folder by hand. The staging tree is inside this repo, so
+    # anything missing from it resolves up the directory chain to the repo's own
+    # root node_modules and the command passes -- on a tree that is broken
+    # everywhere else. check-staged-prisma.cjs below is the test that does not
+    # lie about this; let it decide.
+    #
+    # typescript is here because prisma7.config.ts is TypeScript, which reads as
+    # needing the compiler -- it does not. The config loader transpiles it with
+    # jiti.
     $cliOnly = @(
-        '@prisma\studio-core', '@prisma\dev', '@electric-sql',
-        'react-dom', 'react', 'scheduler', 'elkjs', '@visx', 'remeda',
+        '@electric-sql',
+        'react-dom', 'react', 'scheduler', 'elkjs', '@visx',
         'typescript'
     )
     foreach ($name in $cliOnly) {
@@ -463,6 +479,19 @@ if (-not $SkipDependencies) {
     $after   = Get-ChildItem $serverOut -Recurse -File | Measure-Object -Property Length -Sum
     $savedMb = [math]::Round(($before.Sum - $after.Sum) / 1MB, 1)
     Say "  removed $savedMb MB across $($before.Count - $after.Count) files"
+
+    # Prove the tree that just lost 100 MB can still apply a migration.
+    #
+    # This is the step whose absence let 0.2.6 ship broken. Pruning is a guess
+    # about what the Prisma CLI loads, the guess goes stale every time Prisma
+    # moves something, and the place it is found out is an install that has
+    # already stopped the server. Better here, where the cost is a failed build.
+    Say ""
+    Say "Checking the pruned tree still runs the Prisma CLI"
+    & node (Join-Path $here 'check-staged-prisma.cjs') $serverOut
+    if ($LASTEXITCODE -ne 0) {
+        throw "The pruned tree cannot run the Prisma CLI, so migrations would fail during install. Fix `$cliOnly above and build again."
+    }
 }
 
 # ------------------------------------------------------------------- 5. readme

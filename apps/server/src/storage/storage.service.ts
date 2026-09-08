@@ -3,7 +3,11 @@ import { readdir, stat, statfs, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type { PurgeInput, PurgeResult, StorageReport } from '@isthislegit/shared';
 import { PrismaService } from '../prisma/prisma.service';
-import { UPLOAD_DIR } from '../attachments/storage';
+import {
+  AVATAR_PATH,
+  avatarStoredName,
+  UPLOAD_DIR,
+} from '../attachments/storage';
 
 /**
  * What is on the disk, and how to get some of it back.
@@ -110,19 +114,47 @@ export class StorageService {
     }));
   }
 
-  async report(): Promise<StorageReport> {
-    const [dbRows, tables, files, attachments, tombstones] = await Promise.all([
-      this.prisma.$queryRaw<{ bytes: bigint }[]>`
-        SELECT pg_database_size(current_database())::bigint AS bytes
-      `,
-      this.tableSizes(),
-      this.walk(),
-      this.prisma.attachment.findMany({ select: { storedName: true, size: true } }),
-      this.tombstoneTotals(),
+  /**
+   * Every file name the database still points at.
+   *
+   * Attachments are not the only thing in the upload directory. An avatar is
+   * written by the same `store()` into the same place and is referenced only
+   * by `user.image` — deliberately, since it belongs to a person rather than
+   * to a message. Counting attachment rows alone made every avatar look like a
+   * file nothing points at, which is a stray, which is something the sweep
+   * below deletes. Both callers ask this question, so both ask it here.
+   */
+  private async knownFileNames(): Promise<Set<string>> {
+    const [attachments, users] = await Promise.all([
+      this.prisma.attachment.findMany({ select: { storedName: true } }),
+      this.prisma.user.findMany({
+        where: { image: { startsWith: AVATAR_PATH } },
+        select: { image: true },
+      }),
     ]);
 
-    const onDisk = new Map(files.map((f) => [f.name, f]));
     const known = new Set(attachments.map((a) => a.storedName));
+    for (const u of users) {
+      const name = avatarStoredName(u.image);
+      if (name) known.add(name);
+    }
+    return known;
+  }
+
+  async report(): Promise<StorageReport> {
+    const [dbRows, tables, files, attachments, known, tombstones] =
+      await Promise.all([
+        this.prisma.$queryRaw<{ bytes: bigint }[]>`
+        SELECT pg_database_size(current_database())::bigint AS bytes
+      `,
+        this.tableSizes(),
+        this.walk(),
+        this.prisma.attachment.findMany({ select: { storedName: true, size: true } }),
+        this.knownFileNames(),
+        this.tombstoneTotals(),
+      ]);
+
+    const onDisk = new Map(files.map((f) => [f.name, f]));
 
     const rowsWithoutFile = attachments.filter((a) => !onDisk.has(a.storedName)).length;
     const strays = files.filter((f) => !known.has(f.name));
@@ -185,11 +217,10 @@ export class StorageService {
    * permanently broken image and nothing repairs it.
    */
   async sweepOrphanFiles(dryRun: boolean): Promise<{ files: number; bytes: number }> {
-    const [files, attachments] = await Promise.all([
+    const [files, known] = await Promise.all([
       this.walk(true),
-      this.prisma.attachment.findMany({ select: { storedName: true } }),
+      this.knownFileNames(),
     ]);
-    const known = new Set(attachments.map((a) => a.storedName));
     const cutoff = Date.now() - ORPHAN_GRACE_MS;
 
     let count = 0;
@@ -230,6 +261,57 @@ export class StorageService {
     return done;
   }
 
+  /**
+   * Remove messages somebody already deleted, and the files that hung off
+   * them.
+   *
+   * `days` null means every one of them regardless of age. `reclaim` runs a
+   * VACUUM afterwards: deleting rows leaves the space inside the tables, so
+   * without it the database size on the console does not move and the person
+   * who just pressed the button reasonably concludes it did nothing.
+   */
+  private async removeDeleted(
+    kind: PurgeInput['kind'],
+    days: number | null,
+    dryRun: boolean,
+    reclaim: boolean,
+  ): Promise<PurgeResult> {
+    const doomed = await this.prisma.message.findMany({
+      where: {
+        NOT: { deletedAt: null },
+        ...(days === null
+          ? {}
+          : { deletedAt: { lt: new Date(Date.now() - days * 86_400_000) } }),
+      },
+      select: { id: true },
+    });
+    const agg = await this.prisma.attachment.aggregate({
+      where: { messageId: { in: doomed.map((d) => d.id) } },
+      _count: { _all: true },
+      _sum: { size: true },
+    });
+
+    if (dryRun) {
+      return {
+        kind,
+        dryRun,
+        messages: doomed.length,
+        attachments: agg._count._all,
+        files: 0,
+        bytes: agg._sum.size ?? 0,
+      };
+    }
+
+    // Rows first and committed, then the files. A crash in that order wastes
+    // bytes the next sweep collects; the reverse leaves a row pointing at a
+    // file that is gone, which is a permanently broken image nothing repairs.
+    const messages = await this.deleteMessages(doomed.map((d) => d.id));
+    const swept = await this.sweepOrphanFiles(false);
+    if (reclaim) await this.vacuum();
+
+    return { kind, dryRun, messages, attachments: agg._count._all, ...swept };
+  }
+
   async purge(input: PurgeInput): Promise<PurgeResult> {
     const dryRun = input.dryRun !== false;
     const empty = { messages: 0, attachments: 0, files: 0, bytes: 0 };
@@ -256,45 +338,18 @@ export class StorageService {
         return { kind: input.kind, dryRun, ...empty, attachments: dead.length };
       }
 
-      case 'tombstones': {
-        const days = input.olderThanDays ?? null;
-        const where = {
-          NOT: { deletedAt: null },
-          ...(days === null
-            ? {}
-            : { deletedAt: { lt: new Date(Date.now() - days * 86_400_000) } }),
-        };
-        const doomed = await this.prisma.message.findMany({
-          where,
-          select: { id: true },
-        });
-        const agg = await this.prisma.attachment.aggregate({
-          where: { messageId: { in: doomed.map((d) => d.id) } },
-          _count: { _all: true },
-          _sum: { size: true },
-        });
+      case 'deleted':
+        // No age filter, and the space actually handed back afterwards. See
+        // the note on PURGE_KINDS for why this is the one the console shows.
+        return this.removeDeleted(input.kind, null, dryRun, true);
 
-        if (dryRun) {
-          return {
-            kind: input.kind,
-            dryRun,
-            messages: doomed.length,
-            attachments: agg._count._all,
-            files: 0,
-            bytes: agg._sum.size ?? 0,
-          };
-        }
-
-        const messages = await this.deleteMessages(doomed.map((d) => d.id));
-        const swept = await this.sweepOrphanFiles(false);
-        return {
-          kind: input.kind,
+      case 'tombstones':
+        return this.removeDeleted(
+          input.kind,
+          input.olderThanDays ?? null,
           dryRun,
-          messages,
-          attachments: agg._count._all,
-          ...swept,
-        };
-      }
+          false,
+        );
 
       default:
         // 'retention' is applied by RetentionService, which owns the policy.

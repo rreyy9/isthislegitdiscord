@@ -28,6 +28,8 @@ import { ChatGateway } from '../gateway/chat.gateway';
 import { ZodPipe } from '../common/zod.pipe';
 import {
   ALLOWED_TYPES,
+  AVATAR_PATH,
+  avatarStoredName,
   discardStored,
   openStored,
   store,
@@ -49,21 +51,14 @@ import {
  * the attachment permission check.
  */
 
-/** `user.image` holds this shape, and the GET route below serves it back. */
-const AVATAR_PATH = '/api/avatars/';
-
 /**
- * The stored file name out of a stored `user.image`, or null.
- *
- * Written as a parse rather than a string chop because the column has held a
- * plain URL in the past (Better Auth writes one for an OAuth account) and a
- * value that is not one of ours must not be handed to the file layer.
+ * `AVATAR_PATH` is the shape `user.image` holds, and the GET route below
+ * serves it back. Both it and the parse live in the file layer rather than
+ * here, because the storage sweeper needs the same answer: it has to know
+ * which files in the upload directory are avatars, or it treats every one of
+ * them as a file nothing points at.
  */
-function storedNameOf(image: string | null): string | null {
-  if (!image || !image.startsWith(AVATAR_PATH)) return null;
-  const name = image.slice(AVATAR_PATH.length);
-  return /^[A-Za-z0-9_-]+\.[a-z]{3,4}$/.test(name) ? name : null;
-}
+const storedNameOf = avatarStoredName;
 
 function toPublicUser(row: {
   id: string;
@@ -158,7 +153,7 @@ export class ProfileController {
       select: { image: true },
     });
 
-    const stored = await store(file);
+    const stored = await store(file, { imagesOnly: true });
     const row = await this.prisma.user.update({
       where: { id: user.id },
       data: { image: AVATAR_PATH + stored.storedName },

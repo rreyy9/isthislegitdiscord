@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Track } from 'livekit-client';
 import type { NotificationSettings, ScreenSource } from '../../preload';
-import type { Me, PublicUserDto } from '../api';
+import {
+  api,
+  getClientVersion,
+  getServerUrl,
+  type Me,
+  type PublicUserDto,
+} from '../api';
+import type { Updates } from '../updates';
 import { bridge } from '../bridge';
 import { ProfileSettings } from './ProfileSettings';
 import {
@@ -237,7 +244,113 @@ function InputMeter({
   );
 }
 
-type Section = 'profile' | 'devices' | 'input' | 'notifications' | 'behaviour';
+/* ------------------------------------------------------------------ about */
+
+/**
+ * Which version of everything is running, and where it is connected.
+ *
+ * The client and the server are two separate builds that are upgraded
+ * separately, so this is two rows and never one: "you are on 0.2.6" is not an
+ * answer to "why is search missing" when the server is on 0.2.5. The address
+ * is here for the same reason — it is the first question anyone asks when
+ * something is not working, and it is otherwise buried on the sign-in screen.
+ */
+function AboutSettings({ updates }: { updates: Updates }) {
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    void api
+      .config()
+      .then((cfg) => alive && setServerVersion(cfg.appVersion))
+      .catch(() => alive && setFailed(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const { state } = updates;
+  const busy = state.stage === 'checking' || state.stage === 'downloading';
+
+  return (
+    <>
+      <section className="set-group">
+        <h4>Versions</h4>
+        <div className="about-rows">
+          <div className="about-row">
+            <span>This app</span>
+            <b>{getClientVersion() || 'unknown'}</b>
+          </div>
+          <div className="about-row">
+            <span>Server</span>
+            <b>
+              {failed ? 'could not ask' : (serverVersion ?? 'checking…')}
+            </b>
+          </div>
+          <div className="about-row">
+            <span>Connected to</span>
+            <b className="about-url">{getServerUrl()}</b>
+          </div>
+        </div>
+        <div className="hint">
+          The app and the server are updated separately, so these two are
+          often different — and a feature missing from one of them is usually
+          why.
+        </div>
+      </section>
+
+      <section className="set-group">
+        <h4>Updates</h4>
+        {updates.available ? (
+          <div className="about-update">
+            <div>
+              Version <b>{updates.available}</b> is available.
+            </div>
+            {/* Mirrors the banner rather than replacing it. This is where
+                somebody comes looking on purpose; the banner is where it
+                finds them. */}
+            {state.stage === 'ready' ? (
+              <button onClick={updates.install}>Restart and install</button>
+            ) : state.stage === 'downloading' ? (
+              <button disabled>Downloading… {Math.round(state.percent)}%</button>
+            ) : (
+              <button onClick={updates.download} disabled={busy}>
+                Download it
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="about-update">
+            <div className="muted">
+              {busy ? 'Looking…' : 'This is the newest build the server has.'}
+            </div>
+            <button onClick={updates.recheck} disabled={busy}>
+              Check again
+            </button>
+          </div>
+        )}
+        {state.stage === 'error' && state.message && (
+          <div className="profile-msg bad">{state.message}</div>
+        )}
+        {state.stage === 'unsupported' && (
+          <div className="hint">
+            This build updates itself only when it was installed from the
+            installer, and only over an https server address.
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+type Section =
+  | 'profile'
+  | 'devices'
+  | 'input'
+  | 'notifications'
+  | 'behaviour'
+  | 'about';
 
 /**
  * The nav down the left. Every section carries a sentence saying what it is
@@ -270,6 +383,11 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
     label: 'Behaviour',
     blurb: 'What the app does on its own when you open it.',
   },
+  {
+    id: 'about',
+    label: 'About',
+    blurb: 'Which version of everything you are running, and where it is connected.',
+  },
 ];
 
 export function SettingsModal({
@@ -280,6 +398,7 @@ export function SettingsModal({
   onChange,
   onNotificationsChange,
   onProfileSaved,
+  updates,
   onClose,
 }: {
   me: Me;
@@ -290,6 +409,8 @@ export function SettingsModal({
   onNotificationsChange: (patch: Partial<NotificationSettings>) => void;
   /** The saved user, for the app to redraw every list this person is in. */
   onProfileSaved: (user: PublicUserDto) => void;
+  /** What this build is, and whether the server is offering a newer one. */
+  updates: Updates;
   onClose: () => void;
 }) {
   // Profile first, because it is the one page here somebody opens the settings
@@ -352,6 +473,8 @@ export function SettingsModal({
             {section === 'profile' && (
               <ProfileSettings me={me} onSaved={onProfileSaved} />
             )}
+
+            {section === 'about' && <AboutSettings updates={updates} />}
 
             {section === 'devices' && (
               <>

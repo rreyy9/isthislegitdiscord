@@ -53,6 +53,7 @@ button { font-family: inherit; cursor: pointer; }
   width: 340px; background: var(--panel); border: 1px solid var(--line);
   border-radius: 12px; padding: 26px;
 }
+.login .mark { display: block; width: 56px; height: 56px; border-radius: 13px; margin: 0 0 14px; }
 .login h1 { font-size: 18px; margin: 0 0 4px; }
 .login p.sub { color: var(--dim); margin: 0 0 20px; font-size: 13px; }
 .login label { display: block; font-size: 12px; color: var(--dim); margin: 12px 0 5px; }
@@ -326,6 +327,21 @@ button { font-family: inherit; cursor: pointer; }
 .msg-time { font-size: 11px; color: var(--faint); }
 .msg-content { white-space: pre-wrap; word-wrap: break-word; user-select: text; }
 .msg.pending .msg-content { opacity: .55; }
+/* A send that did not land. Dimmed like any other unconfirmed message, but
+   with the reason and a way out attached -- there is nothing on the server to
+   delete, so the hover row's bin cannot help here. */
+.msg.failed .msg-content { opacity: .55; }
+.msg-failed {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--bad);
+}
+.msg-failed a { color: var(--accent); cursor: pointer; }
+.msg-failed a:hover { text-decoration: underline; }
 
 .typing { height: 22px; padding: 0 18px; font-size: 12.5px; color: var(--dim); font-style: italic; }
 
@@ -941,3 +957,126 @@ button { font-family: inherit; cursor: pointer; }
   flex: 1; background: none; border: 0; outline: none;
   color: var(--text); font: inherit; padding: 9px 0;
 }
+
+/* ------------------------------------------------------------- search */
+/*
+ * The search popover is the pin board with a text field in its header: same
+ * anchoring, same rows, same click-away. Two panels that both mean "a list of
+ * messages elsewhere, click one to go there" should not look like two
+ * different ideas, so this only overrides what genuinely differs.
+ */
+.search-panel { width: 480px; }
+.search-input {
+  flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 10px; font-size: 13px; font-family: inherit; font-weight: 400;
+}
+.search-input:focus { outline: none; border-color: var(--accent); }
+/* Which channel a result is in. Between the name and the time, because that
+   is the order the question is asked in: who, where, when. */
+.search-where {
+  color: var(--accent); font-size: 11.5px; font-weight: 500;
+}
+
+/*
+ * A row in either panel is a button now, so it has to be told not to look
+ * like one: buttons come with a background, a border, centred text and the
+ * platform font, all of which are wrong for a list row.
+ */
+.pin-row {
+  width: 100%; text-align: left; font: inherit; color: inherit;
+  background: none; border: none; cursor: pointer;
+}
+.pin-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* --------------------------------------------------- jumped-to message */
+/*
+ * A flash, not a lasting mark. It answers "which one" at the moment of
+ * arrival; a highlight still sitting there minutes later reads as a second
+ * unread marker meaning something else entirely.
+ */
+.flash > .msg { animation: flash-in 2s ease-out; }
+@keyframes flash-in {
+  0%, 45% { background: rgba(91, 141, 239, .17); }
+  100% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flash > .msg { animation: none; background: rgba(91, 141, 239, .12); }
+}
+
+/* --------------------------------------------------------- attachments */
+
+.attach-btn {
+  align-self: flex-end; background: none; border: none; color: var(--faint);
+  font-size: 17px; line-height: 1; padding: 7px 6px; border-radius: 6px;
+}
+.attach-btn:hover:not(:disabled) { background: var(--panel2); color: var(--text); }
+.attach-btn:disabled { opacity: .35; cursor: default; }
+
+/* A staged file with nothing to preview: its name, in the same square the
+   thumbnails use, so the row does not change shape depending on what is in it. */
+.staged-item.as-file { display: flex; align-items: center; padding: 8px; }
+.staged-name {
+  font-size: 11px; line-height: 1.35; color: var(--dim);
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical; word-break: break-all;
+}
+
+/*
+ * A sent file. Not a card with a shadow: it sits inside a message, and
+ * lifting it off the page would make every file look more important than the
+ * sentence it was sent with.
+ */
+.attach-file {
+  display: flex; align-items: center; gap: 11px; margin-top: 6px;
+  max-width: 420px; padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+}
+.attach-file.expired { opacity: .72; border-style: dashed; }
+.attach-file-icon {
+  width: 30px; height: 30px; flex: none; display: grid; place-items: center;
+  border-radius: 6px; background: var(--panel2); color: var(--dim);
+  font-size: 14px;
+}
+.attach-file-body { min-width: 0; flex: 1; }
+.attach-file-name {
+  font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.attach-file-meta {
+  display: flex; gap: 5px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--faint); margin-top: 1px;
+}
+.attach-file-clock { color: var(--warn); }
+.attach-file-gone { color: var(--faint); line-height: 1.4; }
+.attach-file-saved { font-size: 11.5px; color: var(--ok); margin-top: 3px; word-break: break-all; }
+.attach-file-error { font-size: 11.5px; color: var(--bad); margin-top: 3px; }
+.attach-file-save {
+  flex: none; background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 12px; font-size: 12.5px;
+}
+.attach-file-save:hover:not(:disabled) { border-color: var(--accent); }
+.attach-file-save:disabled { opacity: .5; }
+
+/* --------------------------------------------------------------- about */
+
+.about-rows { display: flex; flex-direction: column; gap: 1px; }
+.about-row {
+  display: flex; align-items: baseline; gap: 14px;
+  padding: 8px 0; border-bottom: 1px solid var(--line);
+}
+.about-row:last-child { border-bottom: none; }
+.about-row span { color: var(--dim); font-size: 13px; min-width: 110px; }
+.about-row b { font-weight: 500; }
+.about-url { word-break: break-all; }
+.about-update {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 4px 0;
+}
+.about-update button {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 13px; font-size: 13px;
+}
+.about-update button:hover:not(:disabled) { border-color: var(--accent); }
+.about-update button:disabled { opacity: .5; }

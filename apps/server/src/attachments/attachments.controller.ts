@@ -2,6 +2,7 @@ import {
   Controller,
   ForbiddenException,
   Get,
+  GoneException,
   Header,
   NotFoundException,
   Param,
@@ -10,6 +11,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { isInlineType } from '@isthislegit/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthGuard, CurrentUser, type SessionUser } from '../auth/auth.guard';
 import { PermissionService } from '../auth/permission.guard';
@@ -45,6 +47,7 @@ export class AttachmentsController {
         storedName: true,
         contentType: true,
         fileName: true,
+        expiredAt: true,
         message: { select: { channelId: true } },
       },
     });
@@ -57,16 +60,35 @@ export class AttachmentsController {
     );
     if (!allowed) throw new ForbiddenException('No access to that attachment.');
 
-    res.setHeader('Content-Type', row.contentType);
-    // inline, not attachment: these are shown in the message list, and the
-    // filename is only used if someone chooses to save one.
+    // The row outlives its file by design, so this is a normal state rather
+    // than a fault: 410 rather than 404, because the difference between "there
+    // was never such a file" and "it was here and its time ran out" is the
+    // whole thing the reader wants to know.
+    if (row.expiredAt) {
+      throw new GoneException('That file has expired and is no longer stored.');
+    }
+
+    const inline = isInlineType(row.contentType);
+
+    // The safety rule for accepting arbitrary uploads, and the only thing
+    // standing between this route and hosting live script on the API's own
+    // origin: a picture is served as what it is, and everything else is served
+    // as bytes to be saved. An uploaded HTML page handed back inline would run
+    // against this origin, with this API's cookies and this API's addresses.
+    res.setHeader(
+      'Content-Type',
+      inline ? row.contentType : 'application/octet-stream',
+    );
     res.setHeader(
       'Content-Disposition',
-      `inline; filename="${encodeURIComponent(row.fileName)}"`,
+      `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(row.fileName)}`,
     );
     // Uploaded bytes rendered in an Electron window: tell the browser not to
-    // second-guess the declared type.
+    // second-guess the declared type. Load-bearing for the octet-stream above,
+    // since sniffing is exactly what would undo it.
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    // Nothing here is a document, and neither is anything it might reference.
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
 
     return new StreamableFile(openStored(row.storedName));
   }

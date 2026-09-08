@@ -18,6 +18,8 @@ import { FilesInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import {
   EditMessageInput,
+  EPHEMERAL_FILE_HOURS,
+  isInlineType,
   MAX_PINS_PER_CHANNEL,
   MessageHistoryQuery,
   SendMessageInput,
@@ -32,7 +34,6 @@ import { MentionsService } from '../mentions/mentions.service';
 import { ZodPipe } from '../common/zod.pipe';
 import { newId } from '../common/ids';
 import {
-  ALLOWED_TYPES,
   maxUploadBytes,
   store,
   type StoredFile,
@@ -50,6 +51,8 @@ const withAuthor = {
       size: true,
       width: true,
       height: true,
+      expiresAt: true,
+      expiredAt: true,
     },
   },
   // Who the message tagged. Read from the rows rather than re-parsed out of
@@ -86,6 +89,12 @@ function toDto(row: any): Message {
       // A path, not a full URL: the client already knows its server address,
       // and baking one in would break the moment that address changed.
       url: `/api/attachments/${a.id}`,
+      expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
+      expiredAt: a.expiredAt ? a.expiredAt.toISOString() : null,
+      // Told, not inferred. The client must not decide for itself that
+      // something is safe to put in an <img> -- this is the same answer the
+      // download route gives, from the same function.
+      inline: isInlineType(a.contentType),
     })),
   };
 }
@@ -115,6 +124,28 @@ export class MessagesController {
       throw new ForbiddenException('No access to that channel.');
     }
 
+    if (query.around) return this.window(channelId, query.around, query.limit);
+
+    if (query.after) {
+      // Forwards, for filling in the gap above a window somebody jumped into.
+      // Taken oldest-first so `take` grabs the messages nearest the cursor
+      // rather than the newest in the channel, then handed back in that same
+      // order -- which is already the order the client appends in.
+      const rows = await this.prisma.message.findMany({
+        where: { channelId, deletedAt: null, id: { gt: query.after } },
+        include: withAuthor,
+        orderBy: { id: 'asc' },
+        take: query.limit,
+      });
+      const full = rows.length === query.limit;
+      return {
+        messages: rows.map(toDto),
+        // Backwards is exhausted: this page did not come from that end.
+        nextCursor: null,
+        prevCursor: full ? rows[rows.length - 1].id : null,
+      };
+    }
+
     const rows = await this.prisma.message.findMany({
       where: {
         channelId,
@@ -130,6 +161,64 @@ export class MessagesController {
       // Returned oldest-first so the client can append directly to the top.
       messages: rows.map(toDto).reverse(),
       nextCursor: rows.length === query.limit ? rows[rows.length - 1].id : null,
+      // This page ends at the newest message there is, so there is nothing
+      // newer to ask for. Null here is what tells the client it is live.
+      prevCursor: null,
+    };
+  }
+
+  /**
+   * A page centred on one message: half of it older, half newer.
+   *
+   * What jumping to a search result or a pin actually needs, and what `before`
+   * cannot express -- paging backwards from the newest message to reach
+   * something said in March means fetching March through today to get there.
+   *
+   * Two queries rather than one clever one. They use the same
+   * `[channelId, id]` index from opposite directions, and a single query with
+   * an OR across a centre point cannot use it for both halves.
+   */
+  private async window(
+    channelId: string,
+    around: string,
+    limit: number,
+  ): Promise<MessagePage> {
+    // The target itself comes back in the older half: `lte`, not `lt`. A
+    // message that has since been deleted simply is not there, and the client
+    // lands on the surrounding conversation instead of on an error -- which is
+    // the right outcome for a search result somebody deleted this morning.
+    const half = Math.max(1, Math.floor(limit / 2));
+
+    const [older, newer] = await Promise.all([
+      this.prisma.message.findMany({
+        where: { channelId, deletedAt: null, id: { lte: around } },
+        include: withAuthor,
+        orderBy: { id: 'desc' },
+        take: half,
+      }),
+      this.prisma.message.findMany({
+        where: { channelId, deletedAt: null, id: { gt: around } },
+        include: withAuthor,
+        orderBy: { id: 'asc' },
+        take: limit - half,
+      }),
+    ]);
+
+    // `older` arrives newest-first, so its last row is the oldest message in
+    // the window and the cursor for walking further back. Named rather than
+    // read off the array after reversing it, which is the same answer and one
+    // refactor away from being the wrong one.
+    const oldest = older.length ? older[older.length - 1].id : null;
+    const newest = newer.length ? newer[newer.length - 1].id : null;
+
+    return {
+      messages: [...older.reverse().map(toDto), ...newer.map(toDto)],
+      // Both ends are open here, which is what separates this from every other
+      // page: a window in the middle of a channel has history above it and
+      // live messages below it, and the client must be able to walk either
+      // way. A short half means that end is exhausted.
+      nextCursor: older.length === half ? oldest : null,
+      prevCursor: newer.length === limit - half ? newest : null,
     };
   }
 
@@ -176,13 +265,14 @@ export class MessagesController {
    */
   @Post()
   @UseInterceptors(
+    // No `fileFilter`. Any type may be sent; what differs is how long it is
+    // kept and how it is handed back. The two things that make that safe are
+    // in the storage layer and the download route, not here -- a filter on the
+    // client-declared mimetype was never one of them, since the client
+    // declares it.
     FilesInterceptor('files', 10, {
       storage: memoryStorage(),
       limits: { fileSize: maxUploadBytes(), files: 10 },
-      fileFilter: (_req, file, cb) =>
-        ALLOWED_TYPES[file.mimetype]
-          ? cb(null, true)
-          : cb(new BadRequestException(`Cannot send ${file.mimetype} here.`), false),
     }),
   )
   async send(
@@ -223,6 +313,13 @@ export class MessagesController {
       stored.push(await store(file));
     }
 
+    // One deadline for the whole message, computed once: two files sent
+    // together expiring a second apart would be arbitrary, and the client
+    // draws a single "expires in" line for the message.
+    const expiresAt = new Date(
+      Date.now() + EPHEMERAL_FILE_HOURS * 60 * 60 * 1000,
+    );
+
     const row = await this.prisma.message.create({
       data: {
         id: newId(),
@@ -240,6 +337,10 @@ export class MessagesController {
             size: f.size,
             width: f.width,
             height: f.height,
+            // Pictures are the conversation and are kept. Everything else is
+            // being handed to somebody, and goes when that has had time to
+            // happen.
+            expiresAt: f.isImage ? null : expiresAt,
           })),
         },
       },

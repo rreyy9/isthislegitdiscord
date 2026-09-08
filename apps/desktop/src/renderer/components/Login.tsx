@@ -47,6 +47,7 @@ export function Login({ onDone }: { onDone: () => void }) {
   return (
     <div className="login-wrap">
       <div className="login">
+        <img className="mark" src="./icon.png" alt="" width={56} height={56} />
         <h1>isthislegit</h1>
         <p className="sub">
           {mode === 'login' ? 'Sign in to your server.' : 'Create an account with an invite code.'}

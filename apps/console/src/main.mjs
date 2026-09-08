@@ -61,6 +61,26 @@ const CADDY_PORT = Number(process.env.CADDY_PORT ?? 443);
 
 const CONFIG_PATHS = resolvePaths(ROOT, __dirname);
 
+/**
+ * The scheduled tasks the installer registers, and the reason this file knows
+ * about them at all.
+ *
+ * On an installed box nothing is a child of this console. `install.ps1`
+ * registers each piece as a SYSTEM task with an at-startup trigger and starts
+ * it, so after an install — or after any reboot — the server is running and
+ * every process button here was dead, over a status line that told the
+ * operator to "stop it in its own terminal". There is no terminal. It was
+ * started by the task scheduler before anybody logged in.
+ *
+ * So process control has two backends, picked per action: a child this console
+ * spawned (a development checkout), or the task (an install).
+ */
+const TASKS = {
+  server: 'isthislegit-server',
+  livekit: 'isthislegit-livekit',
+  caddy: 'isthislegit-caddy',
+};
+
 /* ------------------------------------------------------------------ state */
 
 let child = null;
@@ -366,6 +386,130 @@ async function killPort(port, label) {
   };
 }
 
+/* ------------------------------------------------- scheduled tasks */
+
+/**
+ * Whether this console can control a SYSTEM scheduled task.
+ *
+ * Worth knowing before somebody presses Stop rather than after: the tasks run
+ * as SYSTEM, an unelevated `schtasks /end` fails with "Access is denied", and
+ * the whole reason this file gained task support was an operator staring at
+ * buttons that did nothing.
+ *
+ * `fltmc` is the probe because it is in System32 on every supported Windows,
+ * takes no arguments, changes nothing, and fails for exactly one reason. The
+ * usual `net session` alternative talks to the Server service, which may be
+ * disabled — a false negative on a box that is in fact elevated.
+ *
+ * Cached: elevation cannot change while the process runs.
+ */
+let elevatedCache = null;
+async function isElevated() {
+  if (process.platform !== 'win32') return true;
+  if (elevatedCache !== null) return elevatedCache;
+  const { ok } = await run('fltmc', []);
+  elevatedCache = ok;
+  return ok;
+}
+
+/**
+ * What the task scheduler says about one task.
+ *
+ * `schtasks` rather than PowerShell's `Get-ScheduledTask`: it is a plain exe
+ * with a stable list format, so this is one `execFile` instead of spawning a
+ * shell and parsing an object.
+ *
+ * Returns 'absent' when there is no such task, which is the normal answer in a
+ * development checkout and is what makes the whole of this optional.
+ */
+async function taskState(name) {
+  if (process.platform !== 'win32') return 'absent';
+  const { ok, out, err } = await run('schtasks', ['/query', '/tn', name, '/fo', 'list']);
+  if (!ok) {
+    // "cannot find the file specified" is how schtasks reports an unknown
+    // task. Anything else is a real failure worth distinguishing, because
+    // "absent" would send the caller down the wrong path silently.
+    if (/cannot find|does not exist/i.test(out + err)) return 'absent';
+    return 'unknown';
+  }
+  const status = out.match(/^\s*Status:\s*(.+)$/im)?.[1]?.trim().toLowerCase();
+  if (!status) return 'unknown';
+  if (status.startsWith('running')) return 'running';
+  if (status.startsWith('disabled')) return 'disabled';
+  // "Ready" — registered, not currently running.
+  return 'ready';
+}
+
+/**
+ * Start or stop a task, with the one error that actually happens spelled out.
+ *
+ * These tasks run as SYSTEM, so controlling them needs elevation. Unelevated,
+ * schtasks exits non-zero with "Access is denied", which does not tell anybody
+ * what to do about it — the same trap `stopDatabase` already had to answer.
+ */
+async function taskAction(verb, name, what) {
+  if (process.platform !== 'win32') {
+    return { ok: false, error: 'Scheduled tasks are Windows-only.' };
+  }
+  const flag = verb === 'start' ? '/run' : '/end';
+  log('console', `${verb}ing scheduled task ${name}`);
+  const r = await run('schtasks', [flag, '/tn', name]);
+  const text = (r.out + r.err).trim();
+
+  if (!r.ok && /access is denied/i.test(text)) {
+    return {
+      ok: false,
+      error:
+        `Access denied ${verb === 'start' ? 'starting' : 'stopping'} ${what}. ` +
+        `It runs as SYSTEM, so this needs an elevated console — or run it yourself:  ` +
+        `schtasks ${flag} /tn ${name}`,
+    };
+  }
+  if (!r.ok) return { ok: false, error: text || `schtasks ${flag} failed (code ${r.code})` };
+  return { ok: true, note: `${what} ${verb === 'start' ? 'started' : 'stopped'} (${name})` };
+}
+
+/**
+ * Stop the server however it is actually running.
+ *
+ * Task first, then the port. Ending the task is the clean stop; the port sweep
+ * afterwards catches the case where the task ended but its process did not,
+ * and the case where somebody has a copy running from a terminal as well.
+ */
+async function stopServerAnyhow() {
+  const steps = [];
+  if (child) {
+    steps.push({ what: 'child process', ...(await stopServer()) });
+  }
+
+  const state = await taskState(TASKS.server);
+  if (state === 'running' || state === 'ready') {
+    const r = await taskAction('stop', TASKS.server, 'the chat server');
+    steps.push({ what: 'scheduled task', ...r });
+    // Give the process a moment to go before deciding the port is still held.
+    if (r.ok) {
+      for (let i = 0; i < 20 && (await tcpProbe(SERVER_PORT)); i++) {
+        await new Promise((res) => setTimeout(res, 150));
+      }
+    }
+  }
+
+  if (await tcpProbe(SERVER_PORT)) {
+    steps.push({ what: 'port', ...(await killPort(SERVER_PORT, 'chat server')) });
+  }
+
+  const stillUp = await tcpProbe(SERVER_PORT);
+  return {
+    ok: !stillUp,
+    steps,
+    error: stillUp
+      ? (steps.find((s) => s.error)?.error ??
+         `Something is still listening on :${SERVER_PORT}.`)
+      : undefined,
+    note: stillUp ? undefined : 'chat server stopped',
+  };
+}
+
 /* ------------------------------------------------------------- database */
 
 async function serviceState(name) {
@@ -459,13 +603,16 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 app.get('/sv/status', async (req, res) => {
   const dbPort = readEnvPort();
-  const [apiUp, dbUp, livekitUp, caddyUp, dbService] = await Promise.all([
-    tcpProbe(SERVER_PORT),
-    dbPort ? tcpProbe(dbPort) : Promise.resolve(false),
-    tcpProbe(LIVEKIT_PORT),
-    tcpProbe(CADDY_PORT),
-    serviceState(DB_SERVICE),
-  ]);
+  const [apiUp, dbUp, livekitUp, caddyUp, dbService, serverTask, elevated] =
+    await Promise.all([
+      tcpProbe(SERVER_PORT),
+      dbPort ? tcpProbe(dbPort) : Promise.resolve(false),
+      tcpProbe(LIVEKIT_PORT),
+      tcpProbe(CADDY_PORT),
+      serviceState(DB_SERVICE),
+      taskState(TASKS.server),
+      isElevated(),
+    ]);
 
   let health = null;
   if (apiUp) {
@@ -488,7 +635,21 @@ app.get('/sv/status', async (req, res) => {
       lastExit,
       port: SERVER_PORT,
       health,
+      /**
+       * The scheduled task, when there is one. `controllable` is the question
+       * the buttons actually want answered: can this console do anything
+       * about the process, whoever started it. It used to be `managed` alone,
+       * which is false on every installed box.
+       */
+      task: { name: TASKS.server, state: serverTask },
+      controllable: Boolean(child) || serverTask !== 'absent' || apiUp,
     },
+    /**
+     * Whether this console runs elevated. Only interesting when there are
+     * tasks to drive -- a development checkout spawns its own children and
+     * needs nothing.
+     */
+    elevated,
     database: {
       listening: dbUp,
       port: dbPort,
@@ -546,19 +707,82 @@ async function startAll() {
   };
 }
 
-app.post('/sv/server/start', async (req, res) => res.json(await startAll()));
+/**
+ * Start: the task if there is one, otherwise spawn children.
+ *
+ * The task is preferred on an installed box because that is what will be
+ * running after the next reboot. Starting a child instead would give a server
+ * that dies with this console and a task that fights it for the port.
+ */
+app.post('/sv/server/start', async (req, res) => {
+  if ((await taskState(TASKS.server)) !== 'absent') {
+    const steps = [];
+    for (const [key, name] of Object.entries(TASKS)) {
+      const state = await taskState(name);
+      // Caddy is not registered in a LAN deployment, and a disabled task is a
+      // deliberate choice somebody made that this button must not undo.
+      if (state === 'absent' || state === 'disabled') continue;
+      if (state === 'running') {
+        steps.push({ what: key, ok: true, note: `${key} already running` });
+        continue;
+      }
+      steps.push({ what: key, ...(await taskAction('start', name, key)) });
+    }
+    const failed = steps.find((s) => !s.ok);
+    return res.json({ ok: !failed, steps, error: failed?.error, managedBy: 'task' });
+  }
+  res.json(await startAll());
+});
+
 app.post('/sv/server/stop', async (req, res) => {
-  const server = await stopServer();
+  const server = await stopServerAnyhow();
   const livekit = await stopLiveKit();
   const caddyStopped = await stopCaddy();
-  res.json({ ok: server.ok, error: server.error, livekit, caddy: caddyStopped });
+
+  // The other two are tasks on an installed box as well, and leaving voice up
+  // after "Stop" is how somebody ends up debugging a call that connects to a
+  // server that is gone.
+  const extra = [];
+  for (const key of ['livekit', 'caddy']) {
+    if ((await taskState(TASKS[key])) === 'running') {
+      extra.push({ what: key, ...(await taskAction('stop', TASKS[key], key)) });
+    }
+  }
+
+  res.json({
+    ok: server.ok,
+    error: server.error,
+    steps: [...(server.steps ?? []), ...extra],
+    livekit,
+    caddy: caddyStopped,
+  });
 });
+
 app.post('/sv/server/restart', async (req, res) => {
-  if (child) await stopServer();
+  const taskRun = (await taskState(TASKS.server)) !== 'absent';
+
+  await stopServerAnyhow();
   await stopLiveKit();
   await stopCaddy();
+  if (taskRun) {
+    for (const key of ['livekit', 'caddy']) {
+      if ((await taskState(TASKS[key])) === 'running') {
+        await taskAction('stop', TASKS[key], key);
+      }
+    }
+  }
   await new Promise((r) => setTimeout(r, 400));
-  res.json(await startAll());
+
+  if (!taskRun) return res.json(await startAll());
+
+  const steps = [];
+  for (const [key, name] of Object.entries(TASKS)) {
+    const state = await taskState(name);
+    if (state === 'absent' || state === 'disabled') continue;
+    steps.push({ what: key, ...(await taskAction('start', name, key)) });
+  }
+  const failed = steps.find((s) => !s.ok);
+  res.json({ ok: !failed, steps, error: failed?.error, managedBy: 'task' });
 });
 
 app.post('/sv/livekit/start', async (req, res) => res.json(await startLiveKit()));

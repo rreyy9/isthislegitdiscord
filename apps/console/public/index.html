@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="icon.png">
 <title>Server Console</title>
 <style>
   :root {
@@ -15,7 +16,9 @@
          font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
   header { display: flex; align-items: center; gap: 16px; padding: 12px 20px;
            background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-  h1 { font-size: 15px; margin: 0 20px 0 0; font-weight: 600; letter-spacing: .2px; }
+  h1 { font-size: 15px; margin: 0 20px 0 0; font-weight: 600; letter-spacing: .2px;
+       display: flex; align-items: center; gap: 9px; }
+  h1 .mark { width: 26px; height: 26px; border-radius: 7px; }
   .pill { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px;
           border-radius: 999px; background: var(--panel2); font-size: 12.5px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
@@ -79,7 +82,7 @@
 <body>
 
 <header>
-  <h1>Server Console</h1>
+  <h1><img class="mark" src="icon.png" alt="">Server Console</h1>
   <span class="pill"><span class="dot" id="d-server"></span><span id="t-server">checking…</span></span>
   <span class="pill"><span class="dot" id="d-db"></span><span id="t-db">database</span></span>
   <span class="pill"><span class="dot" id="d-lk"></span><span id="t-lk">voice</span></span>
@@ -111,10 +114,21 @@
         <button class="btn" id="b-restart">Restart</button>
         <span class="muted" id="proc-detail" style="margin-left:8px"></span>
       </div>
+      <div class="warn-line hidden" id="proc-elevate">
+        This console is not running as administrator, so it can watch the
+        scheduled tasks but not start or stop them. Reopen it as administrator,
+        or run <code>schtasks /end /tn isthislegit-server</code> yourself.
+      </div>
       <div class="hint">
         Starts both the chat server and LiveKit — voice is a separate process, so
-        without it text works and calls never connect. Both run as child processes,
-        so stopping the console stops them too.
+        without it text works and calls never connect.
+      </div>
+      <div class="hint">
+        On an installed server these are Windows scheduled tasks that start on
+        boot, and these buttons drive the tasks. Stopping and starting them
+        needs an elevated console; if it says access denied, the message gives
+        you the command to run yourself. In a development checkout they are
+        child processes instead, and closing the console stops them.
       </div>
     </div>
 
@@ -254,13 +268,10 @@
       <div id="storage-stats"><span class="muted">Loading…</span></div>
       <div class="row" style="margin-top:12px">
         <button class="btn" id="b-storage-refresh">Refresh</button>
-        <button class="btn" id="b-vacuum">Vacuum</button>
       </div>
       <div class="hint">
-        Uploads and the database share a volume, so a full disk stops
-        PostgreSQL accepting writes and not just uploads. Vacuum is plain
-        <code>VACUUM ANALYZE</code>, never FULL — FULL takes an exclusive lock
-        on every table it touches.
+        Uploads and the database sit on the same drive, so when it fills up the
+        server stops accepting messages, not just pictures.
       </div>
     </div>
 
@@ -274,20 +285,21 @@
     </div>
 
     <div class="card admin-only hidden">
-      <h2>Reclaim</h2>
-      <div class="row">
-        <button class="btn" data-purge="orphaned-files">Orphaned files</button>
-        <button class="btn" data-purge="orphaned-rows">Orphaned rows</button>
-        <button class="btn" data-purge="tombstones">Deleted messages</button>
-        <span class="lbl" style="min-width:0">older than</span>
-        <input id="purge-days" type="number" min="0" value="30" style="width:80px">
-        <span class="muted">days</span>
+      <h2>Empty the bin</h2>
+      <div class="hint" style="margin-top:0">
+        Deleting a message hides it from everyone, but the message and its
+        pictures stay on the server so a deletion can still be looked into
+        afterwards. Nothing is actually freed until you empty the bin.
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn danger" id="b-purge-deleted">Delete them for good</button>
       </div>
       <div id="purge-out" class="hint"></div>
       <div class="hint">
-        Every button counts first and asks before it deletes. A deleted message
-        is still a row and its images are still on the disk — the tombstone
-        purge is usually what recovers the most space.
+        Counts first and shows you the numbers before it removes anything.
+        Then it deletes those messages, their pictures on the disk, and any
+        picture left behind by one — and gives the space back to Windows.
+        There is no undo.
       </div>
     </div>
 
@@ -352,20 +364,6 @@
         That script uploads and publishes in one go. Add <code>-StageOnly</code>
         to stop after the upload and press Publish here instead. Nothing
         reaches any client until it is published.
-      </div>
-    </div>
-
-    <div class="card admin-only hidden">
-      <h2>Publish from a folder on this machine</h2>
-      <div class="row">
-        <input id="upd-dir" placeholder="path to a desktop release folder" style="flex:1;min-width:280px">
-        <button class="btn" id="b-upd-publish-dir">Publish folder</button>
-      </div>
-      <div id="upd-dir-hint" class="hint"></div>
-      <div class="hint">
-        For a development checkout, where the client and the server live in one
-        tree. On the real server box the release folder is not here — use
-        the upload above.
       </div>
     </div>
 
@@ -589,11 +587,12 @@ async function loadStorage() {
         .map(([l, v]) => '<span class="stat"><b>' + v + '</b><span>' + l + '</span></span>').join('')
       + '<div class="hint">' + esc(s.uploads.directory) + '</div>'
       + (s.orphans.filesWithoutRow
-          ? '<div class="warn-line">' + s.orphans.filesWithoutRow + ' file(s) no message points at, '
-            + bytes(s.orphans.bytesWithoutRow) + ' — safe to sweep.</div>' : '')
+          ? '<div class="warn-line">' + s.orphans.filesWithoutRow + ' picture(s) left over from deleted messages, '
+            + bytes(s.orphans.bytesWithoutRow) + '. Emptying the bin removes them.</div>' : '')
       + (s.orphans.rowsWithoutFile
           ? '<div class="warn-line">' + s.orphans.rowsWithoutFile
-            + ' attachment row(s) whose file is gone — those images are already lost.</div>' : '');
+            + ' message(s) point at a picture that is no longer on the disk. '
+            + 'Those pictures are gone for good; the messages still read fine without them.</div>' : '');
 
     $('#storage-tables').innerHTML = s.database.tables.map((t) =>
       '<tr><td class="mono">' + esc(t.table) + '</td><td>' + t.rows
@@ -603,32 +602,52 @@ async function loadStorage() {
   }
 }
 
-/** Count first, then ask, then delete. Never the other way round. */
-async function purge(kind) {
-  const days = Number($('#purge-days').value);
-  const body = { kind, dryRun: true };
-  if (kind === 'tombstones') body.olderThanDays = Number.isFinite(days) ? days : null;
+/**
+ * Empty the bin: count first, show the numbers, then delete.
+ *
+ * Never the other way round. The count is the whole difference between a
+ * button somebody presses to see what it does and one they press knowing.
+ */
+async function purgeDeleted() {
+  const body = { kind: 'deleted', dryRun: true };
+  const button = $('#b-purge-deleted');
 
   try {
     const dry = await api('/api/admin/storage/purge', { method: 'POST', body: JSON.stringify(body) });
     const what = [
-      dry.messages ? dry.messages + ' message(s)' : null,
-      dry.attachments ? dry.attachments + ' attachment(s)' : null,
-      dry.files ? dry.files + ' file(s)' : null,
-    ].filter(Boolean).join(', ') || 'nothing';
+      dry.messages ? dry.messages + ' deleted message(s)' : null,
+      dry.attachments ? dry.attachments + ' picture(s)' : null,
+    ].filter(Boolean).join(' and ');
 
-    if (what === 'nothing') { $('#purge-out').textContent = 'Nothing to remove.'; return; }
-    if (!confirm('Permanently remove ' + what + ' (' + bytes(dry.bytes) + ')?\n\nThere is no undo.')) return;
+    if (!what) { $('#purge-out').textContent = 'The bin is empty — nothing to remove.'; return; }
+    if (!confirm(
+      'Permanently remove ' + what + ', freeing about ' + bytes(dry.bytes) + '?'
+      + '\n\nThis cannot be undone.'
+    )) return;
+
+    // The vacuum on the server side runs inside this request, so on a large
+    // database it is the slow part. Say so rather than leaving a dead button.
+    button.disabled = true;
+    $('#purge-out').textContent = 'Removing…';
 
     const done = await api('/api/admin/storage/purge', {
       method: 'POST', body: JSON.stringify({ ...body, dryRun: false }),
     });
+    // A message with no picture on it frees no disk at all, so saying
+    // "0 file(s), 0 B" reads like the button failed. Mention files only when
+    // there were some.
     $('#purge-out').textContent =
-      'Removed ' + done.messages + ' message(s), ' + done.attachments
-      + ' attachment(s), ' + done.files + ' file(s), ' + bytes(done.bytes) + '.';
-    toast('purge complete');
+      'Removed ' + done.messages + ' message(s)'
+      + (done.files ? ' and ' + done.files + ' picture(s), freeing ' + bytes(done.bytes) : '')
+      + '.';
+    toast('bin emptied');
     loadStorage();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+    $('#purge-out').textContent = e.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 /* ------------------------------------------------------------- retention */
@@ -669,9 +688,8 @@ function retSummary(r) {
 async function loadUpdates() {
   if (!token) return;
   try {
-    const [cur, local] = await Promise.all([
+    const [cur] = await Promise.all([
       api('/api/admin/updates'),
-      fetch('/sv/desktop-release').then((r) => r.json()).catch(() => ({ ok: false })),
     ]);
 
     const r = cur.release;
@@ -693,22 +711,16 @@ async function loadUpdates() {
       : '<span class="muted">Nothing uploaded. Run the publish script on the machine that built the client.</span>';
     $('#b-upd-publish').disabled = !st;
     $('#b-upd-discard').disabled = !st;
-
-    // Only useful in a development checkout, where both live in one tree.
-    $('#upd-dir').value = local.dir || '';
-    $('#upd-dir-hint').innerHTML = local.ok
-      ? 'Found a built <b>' + esc(local.version) + '</b> in that folder.'
-      : 'No <code>latest.yml</code> in that folder — nothing built there.';
   } catch (e) {
     $('#upd-current').textContent = 'Unavailable — is the server running?';
   }
 }
 
-async function publishUpdate(body, what) {
-  if (!confirm('Publish ' + what + '?\n\nEveryone connected is told immediately.')) return;
+async function publishUpdate() {
+  if (!confirm('Publish the uploaded build?\n\nEveryone connected is told immediately.')) return;
   try {
     const r = await api('/api/admin/updates/publish', {
-      method: 'POST', body: JSON.stringify(body),
+      method: 'POST', body: '{}',
     });
     $('#upd-out').textContent =
       'Published ' + r.release.version + '. Told ' + r.notified + ' connected client(s).';
@@ -886,15 +898,31 @@ async function poll() {
     $('#b-db-stop').disabled = s.database.serviceState === 'stopped';
     $('#b-db-start').disabled = s.database.serviceState === 'running';
 
+    // `controllable`, not `managed`. On an installed box nothing is a child of
+    // this console — the installer registers scheduled tasks — and keying the
+    // buttons off `managed` disabled all of them on exactly the machine the
+    // console exists to run on.
+    const task = s.server.task || { state: 'absent' };
+    const canControl = s.server.controllable ?? s.server.managed;
+
     $('#b-start').disabled = up;
-    $('#b-stop').disabled = !s.server.managed;
-    $('#b-restart').disabled = !s.server.managed;
+    $('#b-stop').disabled = !canControl || !up;
+    $('#b-restart').disabled = !canControl;
 
     let d = '';
     if (s.server.managed) d = `pid ${s.server.pid}`;
-    else if (up) d = 'running, but not started by this console — stop it in its own terminal to manage it here';
+    else if (task.state === 'running') d = 'running as scheduled task ' + task.name;
+    else if (task.state === 'ready' && up) d = 'listening, but the task is not running — something else holds the port';
+    else if (task.state === 'ready') d = 'installed as scheduled task ' + task.name + ', not running';
+    else if (task.state === 'disabled') d = 'scheduled task ' + task.name + ' is disabled — it will not come back after a reboot';
+    else if (up) d = 'running, started outside this console';
     else if (s.server.lastExit) d = `last exit: code ${s.server.lastExit.code}`;
     $('#proc-detail').textContent = d;
+
+    // Said before the button is pressed, not after it fails. The tasks run as
+    // SYSTEM, so an unelevated console can watch them and nothing else.
+    const needsAdmin = task.state !== 'absent' && s.elevated === false;
+    $('#proc-elevate').classList.toggle('hidden', !needsAdmin);
   } catch {
     $('#t-server').textContent = 'console unreachable';
   }
@@ -1232,13 +1260,7 @@ pollLogs(); setInterval(pollLogs, 1200);
 /* ------------------------------------------- storage / updates handlers */
 
 $('#b-storage-refresh').onclick = () => loadStorage();
-$('#b-vacuum').onclick = async () => {
-  try { await api('/api/admin/storage/vacuum', { method: 'POST' }); toast('vacuum done'); loadStorage(); }
-  catch (e) { toast(e.message, true); }
-};
-document.querySelectorAll('[data-purge]').forEach((b) => {
-  b.onclick = () => purge(b.dataset.purge);
-});
+$('#b-purge-deleted').onclick = () => purgeDeleted();
 
 $('#b-ret-preview').onclick = async () => {
   try {
@@ -1272,7 +1294,7 @@ $('#b-ret-save').onclick = async () => {
 
 $('#b-upd-refresh').onclick = () => { loadUpdates(); loadClients(); };
 
-$('#b-upd-publish').onclick = () => publishUpdate({}, 'the uploaded build');
+$('#b-upd-publish').onclick = () => publishUpdate();
 
 $('#b-upd-discard').onclick = async () => {
   if (!confirm('Discard the uploaded build?')) return;
@@ -1282,12 +1304,6 @@ $('#b-upd-discard').onclick = async () => {
     $('#upd-out').textContent = '';
     loadUpdates();
   } catch (e) { toast(e.message, true); }
-};
-
-$('#b-upd-publish-dir').onclick = () => {
-  const dir = $('#upd-dir').value.trim();
-  if (!dir) { toast('Give a folder path.', true); return; }
-  publishUpdate({ sourceDir: dir }, 'the build in ' + dir);
 };
 
 if (token) afterLogin().catch(() => { token=''; localStorage.removeItem('token'); setAdminUi(false); });

@@ -94,6 +94,10 @@ Var OldVersion
 ; ---------------------------------------------------------------------- pages
 
 !define MUI_ABORTWARNING
+; BMP-encoded entries only, and nothing above 64px: makensis rejects the
+; PNG-compressed sizes an .ico for the app itself would carry.
+!define MUI_ICON "icon.ico"
+!define MUI_UNICON "icon.ico"
 !define MUI_WELCOMEPAGE_TITLE "isthislegit server ${VERSION}"
 !define MUI_WELCOMEPAGE_TEXT "This installs the chat server, the operator console and LiveKit on this machine.$\r$\n$\r$\nBefore you continue, make sure this box has:$\r$\n    Node.js 22 or newer$\r$\n    PostgreSQL 17 running as a service$\r$\n$\r$\nRe-running this installer upgrades in place. Your database, your .env and your LiveKit keys are kept."
 ; The welcome and finish text above is the fresh-install wording. On an update

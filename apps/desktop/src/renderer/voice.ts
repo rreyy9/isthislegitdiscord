@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ConnectionState,
+  createLocalAudioTrack,
   RemoteTrack,
   Room,
   RoomEvent,
   Track,
   type AudioCaptureOptions,
+  type LocalAudioTrack,
   type Participant,
   type RemoteParticipant,
   type RemoteTrackPublication,
@@ -189,6 +191,37 @@ function publishOptions(
 }
 
 /**
+ * How often the level meters poll. 20ms is short enough that the gate reacts
+ * within a poll and long enough that the reading is stable.
+ */
+const METER_INTERVAL_MS = 20;
+
+/**
+ * How long a freshly opened microphone is held silent before it may transmit.
+ *
+ * A capture device does not start clean. The first fraction of a second out of
+ * one carries the step of the input being switched on and whatever the
+ * browser's gain control and noise suppression make of a signal they have not
+ * measured yet -- and published as-is, that is the click or burst of static
+ * everyone already in the channel hears the moment somebody joins.
+ *
+ * The old code made it worse in two ways, and both are fixed below. The track
+ * was handed to `setMicrophoneEnabled`, which publishes it live and only
+ * returns once the SFU has acknowledged it, so the settling noise was on the
+ * wire before anything here could mute it. And the gate starts every join
+ * reading "open", so with voice activation the track then stayed live until
+ * the first meter tick came back. Push-to-talk never showed it, because there
+ * is no track at all until the key goes down -- which is exactly why it looked
+ * like a difference between the two modes.
+ *
+ * A quarter of a second: longer than the device and the processing chain need
+ * to settle, and shorter than it takes anyone to click into a channel and get
+ * a word out.
+ */
+const MIC_SETTLE_MS = 250;
+const MIC_SETTLE_TICKS = Math.ceil(MIC_SETTLE_MS / METER_INTERVAL_MS);
+
+/**
  * @param serverMuted An admin has taken this person's microphone away. The
  *   server already refuses the track, so this is not what enforces it — it is
  *   what stops the client from opening the capture device to publish something
@@ -230,6 +263,12 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
   const gateOpenRef = useRef(true);
   const micMeterRef = useRef<TrackMeter | null>(null);
   const micSourceRef = useRef<MediaStreamTrack | null>(null);
+  /**
+   * Meter ticks still owed before the microphone may transmit. Counted down by
+   * the meter, so it measures audio actually arriving from the device rather
+   * than wall-clock time since the request for it. See MIC_SETTLE_MS.
+   */
+  const micSettleRef = useRef(0);
   const inputLevelRef = useRef<InputLevel>({
     db: -100,
     thresholdDb: -60,
@@ -386,27 +425,59 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
         : s.gateMode === 'off' || gateOpenRef.current);
 
     if (!wantsTrack) {
+      // Mutes rather than unpublishes -- that is what setMicrophoneEnabled(false)
+      // does, and it is the behaviour worth having: the device stays open, so
+      // coming off mute has nothing to settle and makes no noise.
       await room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
       return;
     }
 
     let pub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
     if (!pub?.track) {
-      await room.localParticipant
-        .setMicrophoneEnabled(
-          true,
-          captureOptions(s, audioRef.current),
+      // Built, silenced, and only then published, rather than handed to
+      // setMicrophoneEnabled -- which publishes live and returns after the SFU
+      // has it, by which point the settling noise has already gone out. Muting
+      // first means `muted` is set in the AddTrack request itself, so none of
+      // it is ever on the wire. See MIC_SETTLE_MS.
+      let fresh: LocalAudioTrack;
+      try {
+        fresh = await createLocalAudioTrack(captureOptions(s, audioRef.current));
+      } catch (e) {
+        // setMicrophoneEnabled routed this through RoomEvent.MediaDevicesError;
+        // opening the device by hand means saying it here instead.
+        if (roomRef.current === room) {
+          setState((st) => ({ ...st, error: (e as Error).message }));
+        }
+        return;
+      }
+      // The device is open now, so a join that has been superseded while it
+      // opened has to give it back rather than leave the indicator lit.
+      if (roomRef.current !== room) {
+        fresh.stop();
+        return;
+      }
+      await fresh.mute().catch(() => {});
+      try {
+        await room.localParticipant.publishTrack(
+          fresh,
           publishOptions(s, audioRef.current),
-        )
-        .catch(() => {});
+        );
+      } catch {
+        fresh.stop();
+        return;
+      }
       pub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+      // Starts the settle countdown, because it is the meter that counts it.
       ensureMicMeter();
     }
 
     const track = pub?.track;
     if (!track) return;
-    if (live && track.isMuted) await track.unmute().catch(() => {});
-    else if (!live && !track.isMuted) await track.mute().catch(() => {});
+    // A microphone that has only just been opened stays silent whatever the
+    // mute rules say; the meter calls this back when it has settled.
+    const transmit = live && micSettleRef.current === 0;
+    if (transmit && track.isMuted) await track.unmute().catch(() => {});
+    else if (!transmit && !track.isMuted) await track.mute().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -428,10 +499,13 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
     micMeterRef.current = null;
     micSourceRef.current = source;
     gateRef.current.reset();
+    // Any new source is a cold one -- a fresh join, or the input device having
+    // been switched under the same track -- so both start from silence.
+    micSettleRef.current = source ? MIC_SETTLE_TICKS : 0;
     if (!source) {
-      // Muting unpublishes the track, which stops the meter — so if this is
-      // not said now, nothing will ever say it, and the ring stays lit on
-      // whatever the last reading before the mute happened to be.
+      // Losing the track stops the meter — so if this is not said now,
+      // nothing will ever say it, and the ring stays lit on whatever the last
+      // reading before it went happened to be.
       localSpeechRef.current.reset();
       setSpeaking(room?.localParticipant.identity, false);
       return;
@@ -439,9 +513,16 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
 
     micMeterRef.current = new TrackMeter(
       source,
-      20,
+      METER_INTERVAL_MS,
       (db) => {
         const s = settingsRef.current;
+        // Counted here rather than on a timer so it measures audio the device
+        // has actually delivered. The tick that finishes it is the one that
+        // may open the microphone, so it asks for the decision again.
+        if (micSettleRef.current > 0) {
+          micSettleRef.current -= 1;
+          if (micSettleRef.current === 0) void applyMic();
+        }
         const open = gateRef.current.update(db, s.gateMode, s.gateThreshold);
         inputLevelRef.current = {
           db,
@@ -459,6 +540,7 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
         const loud = localSpeechRef.current.update(db);
         const live =
           !mutedRef.current &&
+          micSettleRef.current === 0 &&
           (s.pushToTalk ? talkingRef.current : s.gateMode === 'off' || open);
         setSpeaking(roomRef.current?.localParticipant.identity, loud && live);
       },
@@ -473,6 +555,7 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
     micMeterRef.current?.close();
     micMeterRef.current = null;
     micSourceRef.current = null;
+    micSettleRef.current = 0;
     gateRef.current.reset();
     gateOpenRef.current = true;
     localSpeechRef.current.reset();
@@ -601,10 +684,21 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
             participant: RemoteParticipant,
           ) => {
             if (track.kind === Track.Kind.Audio) {
-              const el = track.attach() as HTMLAudioElement;
+              // The element is built here, with the volume already on it,
+              // rather than taken from a bare `attach()`. `attach()` sets the
+              // source and starts playing at once, so setting the volume
+              // after it -- which is what this did -- let a moment of audio
+              // out at full volume before deafen or this person's slider had
+              // been applied. Joining a channel subscribes to everyone in it
+              // at the same time, so that moment was every one of them.
+              const el = document.createElement('audio');
               el.autoplay = true;
+              el.volume = volumeFor(participant.identity);
+              track.attach(el);
               audioBoxRef.current?.appendChild(el);
               watchRemote(participant, track);
+              // Still said to LiveKit, so it holds the volume for any element
+              // it attaches to this participant later.
               participant.setVolume(volumeFor(participant.identity));
             }
             sync();

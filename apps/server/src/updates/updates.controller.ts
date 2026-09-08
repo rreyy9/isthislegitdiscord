@@ -151,16 +151,14 @@ export class UpdatesAdminController {
    * would otherwise not learn about the build until it next reconnected.
    */
   @Post('publish')
-  async publish(
-    @Body() body: { sourceDir?: string },
-  ): Promise<{ release: PublishedRelease; notified: number }> {
-    // With no directory named, publish what was uploaded. That is the normal
-    // case: the server is not the machine the client was built on. A
-    // `sourceDir` is for the local checkout, where both live in one tree.
-    const source = String(body?.sourceDir ?? '').trim();
-    const release = source
-      ? await this.updates.publish(source)
-      : await this.updates.publishStaged();
+  async publish(): Promise<{ release: PublishedRelease; notified: number }> {
+    // Only ever what was uploaded. This used to take a `sourceDir` for a
+    // development checkout where the client and the server live in one tree,
+    // and it was a route that took a path from the network and read files
+    // from it -- for a convenience that only ever applied on one machine.
+    // Upload is now the single way in, which is also the one that works on
+    // the box this actually runs on.
+    const release = await this.updates.publishStaged();
     const notified = this.gateway.announceUpdate(release.version);
     return { release, notified };
   }

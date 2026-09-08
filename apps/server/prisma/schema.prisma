@@ -192,12 +192,27 @@ model Message {
   // a person looking into something, not something the app joins on.
   pinnedById String?
 
+  /// What search matches against: `content`, parsed into lexemes by Postgres.
+  ///
+  /// A column rather than an expression index because it is GENERATED ALWAYS
+  /// ... STORED -- Postgres recomputes it on every insert and every edit, so
+  /// it cannot drift from the text the way anything we maintained ourselves
+  /// eventually would. Nothing in this codebase ever writes it; Prisma cannot
+  /// type a tsvector, so it is Unsupported and invisible to the client.
+  ///
+  /// The generated-ness is the one thing Prisma does not model. If a future
+  /// `prisma migrate dev` offers to alter this column, it is wrong -- the
+  /// definition lives in 20260908150000_search_and_ephemeral_files.
+  searchVector Unsupported("tsvector")?
+
   attachments Attachment[]
   mentions    MessageMention[]
 
   // Ids are UUIDv7, so id order is chronological order: this one index serves
   // the cursor pagination in both directions.
   @@index([channelId, id])
+  // What makes search a lookup rather than a scan of every message ever sent.
+  @@index([searchVector], type: Gin)
   // "The pins in this channel" -- asked every time the list is opened, and
   // otherwise a scan of every message the channel has ever held.
   @@index([channelId, pinnedAt])
@@ -247,7 +262,23 @@ model Attachment {
   height      Int?
   createdAt   DateTime @default(now())
 
+  // When the bytes go. Null means kept indefinitely, which is every picture
+  // and every row written before this column existed -- so the migration
+  // back-fills nothing and an upgrade changes nothing about what is stored.
+  //
+  // Everything that is not a picture gets a deadline at upload time. That is
+  // the deal the uploader is shown and it is why arbitrary files are accepted
+  // at all: the server is a courier for them, not the place they live.
+  expiresAt   DateTime?
+  // Stamped when the deadline was acted on. The row outlives the file so the
+  // message can still say what was there; deleting it would leave a message
+  // that was only a file rendering as a blank gap.
+  expiredAt   DateTime?
+
   @@index([messageId])
+  // "What is due to expire" -- asked every hour by the sweeper, and otherwise
+  // a scan of every attachment ever uploaded.
+  @@index([expiresAt])
 }
 
 model ChannelReadState {

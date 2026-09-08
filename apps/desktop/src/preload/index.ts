@@ -258,6 +258,24 @@ const bridge = {
   copyImage: (src: { dataUrl?: string; url?: string }): Promise<boolean> =>
     ipcRenderer.invoke('clipboard:image', src),
 
+  /* ------------------------------------------------------------- files */
+
+  /**
+   * Ask where to put a downloaded attachment, and write it there.
+   *
+   * The renderer fetches the bytes — it is the side holding the bearer token —
+   * and main owns the dialog and the disk. Resolves to the path written, or
+   * null if the save was cancelled, which is not an error.
+   *
+   * A downloaded file is never opened, only saved. Anyone may upload anything
+   * here, including a program; opening one on the recipient's behalf would
+   * make this app the thing that ran it.
+   */
+  saveFile: (file: {
+    name: string;
+    bytes: ArrayBuffer;
+  }): Promise<string | null> => ipcRenderer.invoke('file:save', file),
+
   /* ------------------------------------------------------- push-to-talk */
 
   pttAvailable: (): Promise<boolean> => ipcRenderer.invoke('ptt:available'),

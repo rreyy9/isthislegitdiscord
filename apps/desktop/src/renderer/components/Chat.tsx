@@ -32,7 +32,7 @@ import {
   typingStop,
 } from '../socket';
 import { bridge } from '../bridge';
-import { noteUpdateAvailable } from '../updates';
+import { noteUpdateAvailable, type Updates } from '../updates';
 import { useVoice, type VoiceSettings } from '../voice';
 import type { NotificationSettings } from '../../preload';
 import {
@@ -50,10 +50,27 @@ type Status = 'connected' | 'disconnected' | 'connecting';
 
 /**
  * A message plus client-only fields for optimistic rendering: `pending` while
- * the server has not confirmed it, and `previews` so a pasted image is visible
- * immediately rather than after the round trip.
+ * the server has not confirmed it, `failed` with the reason if it never got
+ * there, and `previews` so a pasted image is visible immediately rather than
+ * after the round trip.
  */
-type Msg = MessageDto & { pending?: boolean; previews?: string[] };
+type Msg = MessageDto & {
+  pending?: boolean;
+  failed?: string;
+  previews?: string[];
+};
+
+/**
+ * The server's cap on one message, from `SendMessageInput` in
+ * `@isthislegit/shared`.
+ *
+ * Copied rather than imported for the reason given in mention-utils.ts: the
+ * renderer is an ESM bundle and nothing in that CommonJS package is imported
+ * at runtime. The server is still the side that enforces it -- this is only so
+ * the composer can say which limit was passed and by how much, instead of
+ * sending something that comes back a bare 400.
+ */
+const MAX_MESSAGE_CHARS = 4000;
 
 function timeOf(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -179,11 +196,14 @@ export function Chat({
   me,
   onMeChanged,
   onSignOut,
+  updates,
 }: {
   me: Me;
   /** Your own profile changed — here, or on another machine you are signed in on. */
   onMeChanged: (me: Me) => void;
   onSignOut: () => void;
+  /** What this build is and whether the server has a newer one. See updates.ts. */
+  updates: Updates;
 }) {
   const [guilds, setGuilds] = useState<GuildDto[]>([]);
   const [members, setMembers] = useState<MemberDto[]>([]);
@@ -242,9 +262,50 @@ export function Chat({
   const [atBottom, setAtBottom] = useState(true);
   /** A message arrived while the reader was scrolled back up. */
   const [hasNew, setHasNew] = useState(false);
+  /**
+   * True while the view is parked in the middle of history rather than at the
+   * live end — which is where a jump to a search result or an old pin leaves
+   * it.
+   *
+   * Two things must not happen while it is set. The reading position must not
+   * be overwritten with wherever the jump landed: somebody who looks up a
+   * message from March and closes the app should come back to where they were
+   * reading. And the channel must not be marked read to the newest loaded
+   * message, because everything below the window is still unseen. Both are
+   * lifted by `jumpToLatest`, which is what returns to the live end.
+   */
+  const [inHistory, setInHistory] = useState(false);
+  /** The search panel under the header, and what is in it. */
+  const [searchOpen, setSearchOpen] = useState(false);
+  /**
+   * Bumped to make the channel-load effect re-run for a jump within the
+   * channel that is already open, where `activeChannel` does not change and
+   * so nothing else would.
+   */
+  const [jumpNonce, setJumpNonce] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
-  /** Images pasted or dropped, held locally until the message is sent. */
-  const [pending, setPending] = useState<{ file: File; preview: string }[]>([]);
+  /**
+   * Files pasted, dropped or picked, held locally until the message is sent.
+   * `preview` is an object URL for a picture and null for everything else --
+   * there is nothing to show for a zip, and a made-up thumbnail helps nobody.
+   */
+  const [pending, setPending] = useState<
+    { file: File; preview: string | null }[]
+  >([]);
+  /** The hidden input behind the attach button. */
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  /**
+   * Messages that have left the composer but have not landed, keyed by nonce.
+   *
+   * Holds the row itself, and the files, because both outlive the list. The
+   * files because a failed send has to be retryable and a `File` cannot be
+   * rebuilt from the row; the row because the list is replaced wholesale every
+   * time a channel is opened, and the server has never heard of this message,
+   * so without a copy here it would go on the first channel switch and take
+   * whatever was typed with it. Dropped when the message lands, or when the
+   * sender throws it away.
+   */
+  const outboxRef = useRef(new Map<string, { row: Msg; files: File[] }>());
   /** channelId -> last message id this user has read. */
   const [reads, setReads] = useState<Record<string, string>>({});
   /** Newest message id seen per channel, so unread is a comparison of two ids. */
@@ -465,6 +526,14 @@ export function Chat({
 
   activeChannelRef.current = activeChannel;
   /**
+   * Whether the view is parked in history, for the scroll handler and the
+   * socket handlers to read. Same reason as the refs below: the scroll handler
+   * runs dozens of times a second and must not be reading a value from the
+   * render it happened to be created in.
+   */
+  const inHistoryRef = useRef(false);
+  inHistoryRef.current = inHistory;
+  /**
    * The socket handlers are registered once, on mount, so anything they read
    * has to be read through a ref or it is frozen at whatever it was then —
    * and these are switches somebody flips while the app is running.
@@ -535,7 +604,12 @@ export function Chat({
 
   /** Clicking a notification takes you to the message it was about. */
   useEffect(
-    () => bridge.onNotificationActivate(({ channelId }) => setActiveChannel(channelId)),
+    () =>
+      bridge.onNotificationActivate(({ channelId, messageId }) =>
+        // The messageId has been arriving here since notifications were
+        // added and was thrown away for want of anything able to use it.
+        messageId ? jumpTo(channelId, messageId) : setActiveChannel(channelId),
+      ),
     [],
   );
 
@@ -988,6 +1062,79 @@ export function Chat({
     return () => window.removeEventListener('click', close);
   }, [pinsOpen]);
 
+  // Same for the search popover: a click anywhere else puts it away. The
+  // panel itself stops propagation, so typing in it does not close it.
+  useEffect(() => {
+    if (!searchOpen) return;
+    const close = () => setSearchOpen(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [searchOpen]);
+
+  /* -------------------------------------------------------------- search */
+
+  const [searchText, setSearchText] = useState('');
+  const [searchResults, setSearchResults] = useState<MessageDto[] | null>(null);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  /** What the results on screen were a search for, so stale ones can be told. */
+  const searchSeqRef = useRef(0);
+
+  /**
+   * Search, debounced.
+   *
+   * Every keystroke is a query against a database on somebody's home box, so
+   * it waits for a pause rather than firing per character. The sequence number
+   * is what stops an earlier, slower query landing after a later one and
+   * putting the wrong results on screen -- which is the failure people
+   * actually see, in the form of results for a prefix of what they typed.
+   */
+  useEffect(() => {
+    if (!searchOpen) return;
+    const q = searchText.trim();
+    if (q.length < 2) {
+      setSearchResults(null);
+      setSearchError(null);
+      setSearchBusy(false);
+      return;
+    }
+
+    const seq = ++searchSeqRef.current;
+    setSearchBusy(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        const guildId = guilds.find((g) =>
+          g.channels.some((c) => c.id === activeChannel),
+        )?.id;
+        const page = await api.search({ q, guildId });
+        if (seq !== searchSeqRef.current) return;
+        setSearchResults(page.results);
+        setSearchError(null);
+      } catch (e: any) {
+        if (seq !== searchSeqRef.current) return;
+        setSearchResults(null);
+        setSearchError(
+          e?.status === 404
+            ? 'This server is too old to search. Update the server to use this.'
+            : (e?.message ?? 'That search did not work.'),
+        );
+      } finally {
+        if (seq === searchSeqRef.current) setSearchBusy(false);
+      }
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [searchOpen, searchText, activeChannel, guilds]);
+
+  // Closing it clears it: reopening the box to last week's search, already
+  // run, is never what somebody opening a search box wants.
+  useEffect(() => {
+    if (searchOpen) return;
+    setSearchText('');
+    setSearchResults(null);
+    setSearchError(null);
+  }, [searchOpen]);
+
   /**
    * Fetch the board while it is open — on opening it, on switching channel
    * with it open, and whenever `pinsVersion` says it has gone stale.
@@ -1094,6 +1241,47 @@ export function Chat({
     setPinsOpen(false);
     setPins(null);
     (async () => {
+      // A jump takes precedence over the remembered reading position: it is
+      // something the reader asked for just now, and the position is where
+      // they happened to be last time.
+      const jump =
+        pendingJumpRef.current?.channelId === activeChannel
+          ? pendingJumpRef.current
+          : null;
+      pendingJumpRef.current = null;
+
+      if (jump) {
+        const page = await api.historyAround(activeChannel, jump.messageId);
+        if (cancelled) return;
+        setMessages(page.messages);
+        setCursor(page.nextCursor);
+        // `prevCursor` set means there are newer messages below this window,
+        // so the view is in history rather than at the live end. An older
+        // server that ignored `around` sends none, which correctly reads as
+        // "this is the bottom" -- there, the reader lands in the right
+        // channel at the newest page, which is the better of the two failures.
+        const parked = Boolean(page.prevCursor);
+        setInHistory(parked);
+        // Only the live end counts as having been read. Landing in March says
+        // nothing about the fortnight below it.
+        if (!parked) {
+          const last = page.messages[page.messages.length - 1];
+          if (last) {
+            lastSeenIdRef.current = last.id;
+            setLatest((prev) => ({ ...prev, [activeChannel]: last.id }));
+            void markRead(activeChannel, last.id);
+          }
+        }
+        requestAnimationFrame(() => {
+          if (!scrollToMessage(jump.messageId)) scrollToBottom();
+          holdAt(jump.messageId);
+          flash(jump.messageId);
+          updateScrollState();
+        });
+        return;
+      }
+
+      setInHistory(false);
       const anchor = positionsRef.current[activeChannel] ?? null;
       const page = await api.history(activeChannel);
       if (cancelled) return;
@@ -1133,7 +1321,9 @@ export function Chat({
       releaseHold();
       leaveChannel(activeChannel);
     };
-  }, [activeChannel, settingsReady]);
+    // `jumpNonce` is here so a jump inside the channel that is already open
+    // re-runs this. Nothing else about it changes in that case.
+  }, [activeChannel, settingsReady, jumpNonce]);
 
   /**
    * Read state plus the newest message id per channel. Both are needed: unread
@@ -1301,11 +1491,42 @@ export function Chat({
     if (box) box.scrollTop = box.scrollHeight;
   }
 
-  /** What the jump button does: to the end, and stop counting arrivals. */
+  /**
+   * What the jump button does: back to the live end, and stop counting
+   * arrivals.
+   *
+   * Scrolling is enough when the newest message is already loaded, which is
+   * the ordinary case. After a jump into history it is not: the bottom of the
+   * list is the bottom of a window somewhere in March, and there may be
+   * thousands of messages below it. That case reloads the newest page, which
+   * is also what re-arms the reading position and the read marker.
+   */
   function jumpToLatest() {
     releaseHold();
-    scrollToBottom();
     setHasNew(false);
+
+    if (!inHistoryRef.current) {
+      scrollToBottom();
+      return;
+    }
+    if (!activeChannel) return;
+
+    setInHistory(false);
+    void (async () => {
+      const page = await api.history(activeChannel);
+      setMessages(page.messages);
+      setCursor(page.nextCursor);
+      const last = page.messages[page.messages.length - 1];
+      if (last) {
+        lastSeenIdRef.current = last.id;
+        setLatest((prev) => ({ ...prev, [activeChannel]: last.id }));
+        void markRead(activeChannel, last.id);
+      }
+      requestAnimationFrame(() => {
+        scrollToBottom();
+        updateScrollState();
+      });
+    })();
   }
 
   /* ------------------------------------------------- reading position */
@@ -1356,6 +1577,11 @@ export function Chat({
     setAtBottom(bottom);
     if (bottom) setHasNew(false);
 
+    // Not while parked in history. Somebody who jumped to a message from
+    // March and then closed the app should come back to where they had got to
+    // reading, not to March -- the jump was a look, not a new position.
+    if (inHistoryRef.current) return;
+
     const id = bottomVisibleId(box);
     if (!id || positionsRef.current[channelId] === id) return;
     positionsRef.current = { ...positionsRef.current, [channelId]: id };
@@ -1390,6 +1616,63 @@ export function Chat({
     holdTimerRef.current = null;
   }
 
+  /* -------------------------------------------------------------- jumping */
+
+  /**
+   * A jump waiting for the channel-load effect to act on it.
+   *
+   * A ref rather than state because it is a one-shot instruction, not
+   * something anything renders: setting state would run the effect again, and
+   * the effect is what consumes it.
+   */
+  const pendingJumpRef = useRef<{ channelId: string; messageId: string } | null>(
+    null,
+  );
+
+  /** The message to flash on arrival, cleared by a timer. */
+  const [flashId, setFlashId] = useState<string | null>(null);
+
+  function flash(id: string) {
+    setFlashId(id);
+    window.setTimeout(
+      () => setFlashId((current) => (current === id ? null : current)),
+      2000,
+    );
+  }
+
+  /**
+   * Land on a message, wherever it is: a search result, a pin, or the message
+   * behind a notification.
+   *
+   * Two paths. If it is already loaded this is a scroll, which is the common
+   * case for a pin. If it is not, the channel is opened with the jump left in
+   * a ref for the load effect to find, and that effect asks for a window
+   * centred on the message rather than the newest page.
+   */
+  function jumpTo(channelId: string, messageId: string) {
+    setPinsOpen(false);
+    setSearchOpen(false);
+
+    if (channelId === activeChannel && scrollToMessage(messageId)) {
+      // Held for a moment: attachments load after the messages they hang off,
+      // so the list keeps growing underneath and would otherwise slide the
+      // target back off screen a second after arriving on it.
+      holdAt(messageId);
+      flash(messageId);
+      return;
+    }
+
+    pendingJumpRef.current = { channelId, messageId };
+    if (channelId === activeChannel) {
+      // Same channel, but scrolled out of what is loaded -- so the effect will
+      // not re-run on its own. Bump it.
+      setJumpNonce((n) => n + 1);
+    } else {
+      setActiveChannel(channelId);
+    }
+  }
+
+
   useEffect(() => releaseHold, []);
 
   function savePositions() {
@@ -1420,40 +1703,57 @@ export function Chat({
 
   const MAX_FILES = 10;
 
-  /** Accepts pasted or dropped images, holding them until the message is sent. */
+  /**
+   * Stage pasted, dropped or picked files until the message is sent.
+   *
+   * Anything may be attached now, not only pictures. A picture gets an object
+   * URL so the composer can show it before it is sent; everything else gets
+   * null there and is drawn as a chip with its name, because there is nothing
+   * to look at and inventing a thumbnail for a zip helps nobody.
+   */
   function addFiles(files: File[]) {
-    const images = files.filter((f) => f.type.startsWith('image/'));
-    if (images.length === 0) return;
+    if (files.length === 0) return;
     setPending((prev) => {
       const room = MAX_FILES - prev.length;
-      const taken = images.slice(0, Math.max(0, room));
+      const taken = files.slice(0, Math.max(0, room));
       return [
         ...prev,
-        ...taken.map((file) => ({ file, preview: URL.createObjectURL(file) })),
+        ...taken.map((file) => ({
+          file,
+          preview: file.type.startsWith('image/')
+            ? URL.createObjectURL(file)
+            : null,
+        })),
       ];
     });
   }
 
   function removePending(index: number) {
     setPending((prev) => {
-      URL.revokeObjectURL(prev[index].preview);
+      const preview = prev[index]?.preview;
+      if (preview) URL.revokeObjectURL(preview);
       return prev.filter((_, i) => i !== index);
     });
   }
 
   function clearPending() {
     setPending((prev) => {
-      for (const p of prev) URL.revokeObjectURL(p.preview);
+      for (const p of prev) if (p.preview) URL.revokeObjectURL(p.preview);
       return [];
     });
   }
 
-  /** Ctrl+V of a screenshot: the clipboard carries it as a file item. */
+  /**
+   * Ctrl+V of a screenshot, or of a file copied in the file manager.
+   *
+   * Still only takes clipboard items that are files. Pasting text that happens
+   * to have come from a file manager must keep pasting text.
+   */
   function onPaste(e: React.ClipboardEvent) {
     const files = [...e.clipboardData.items]
       .filter((i) => i.kind === 'file')
       .map((i) => i.getAsFile())
-      .filter((f): f is File => f !== null && f.type.startsWith('image/'));
+      .filter((f): f is File => f !== null);
     if (files.length) {
       e.preventDefault(); // otherwise the filename lands in the textarea too
       addFiles(files);
@@ -1470,6 +1770,17 @@ export function Chat({
     const files = pending.map((p) => p.file);
     // A pasted screenshot with nothing typed is a perfectly good message.
     if ((!content && files.length === 0) || !activeChannel) return;
+    // Measured on the markup, because that is the string the server measures:
+    // a message full of tags is longer on the wire than it looks in the box.
+    // Refused here rather than sent, so a long message is never lost to a 400
+    // the sender cannot see the reason for.
+    if (content.length > MAX_MESSAGE_CHARS) {
+      setBanner(
+        `That message is ${content.length} characters and the limit is ` +
+          `${MAX_MESSAGE_CHARS}. Send it in two.`,
+      );
+      return;
+    }
     const nonce = crypto.randomUUID();
     const optimistic: Msg = {
       id: 'pending-' + nonce,
@@ -1490,24 +1801,47 @@ export function Chat({
       // be in it -- tagging yourself is not a tag.
       mentions: parseMentionIds(content).filter((id) => id !== me.id),
       attachments: [],
-      previews: pending.map((p) => p.preview),
+      // Only the pictures: everything else has nothing to preview, and the
+      // optimistic copy simply shows the text until the echo brings the
+      // real attachment rows back.
+      previews: pending.map((p) => p.preview).filter((u): u is string => Boolean(u)),
       pending: true,
     };
     setMessages((prev) => [...prev, optimistic]);
     setDraft('');
     pickedRef.current = new Set();
     setMentionPicker(null);
-    // Previews are shown from the optimistic copy until the echo replaces it.
-    const previews = pending.map((p) => p.preview);
+    // The object URLs now belong to the outbox entry rather than to `pending`,
+    // so this clears the staged list without revoking them -- the optimistic
+    // row is still drawing them, and a retry would need them again.
+    outboxRef.current.set(nonce, { row: optimistic, files });
     setPending([]);
     stopTyping();
     requestAnimationFrame(scrollToBottom);
 
+    await deliver(nonce, activeChannel);
+  }
+
+  /**
+   * Post one outbox entry and reconcile the optimistic row with what came back.
+   *
+   * A failure leaves the row where it is, marked with the reason and offering
+   * a retry, rather than dropping it: quietly losing something somebody typed
+   * is the worse of the two. What it must not do is leave the row looking like
+   * an ordinary message -- that was the old behaviour, and it produced a
+   * message that could not be deleted because there was nothing on the server
+   * to delete, and that only went away on a reload.
+   */
+  async function deliver(nonce: string, channelId: string) {
+    const entry = outboxRef.current.get(nonce);
+    if (!entry) return;
+    const { row, files } = entry;
     try {
       const saved = files.length
-        ? await api.sendWithFiles(activeChannel, content, nonce, files)
-        : await api.send(activeChannel, content, nonce);
-      for (const url of previews) URL.revokeObjectURL(url);
+        ? await api.sendWithFiles(channelId, row.content, nonce, files)
+        : await api.send(channelId, row.content, nonce);
+      outboxRef.current.delete(nonce);
+      for (const url of row.previews ?? []) URL.revokeObjectURL(url);
       // The socket echo usually lands first; reconcile either way by nonce.
       setMessages((prev) => {
         const i = prev.findIndex((x) => x.clientNonce === nonce);
@@ -1516,14 +1850,86 @@ export function Chat({
         next[i] = saved;
         return next;
       });
-    } catch {
+    } catch (e: any) {
+      // Marked on the outbox copy as well as the one on screen, because the
+      // outbox copy is what the list is rebuilt from after a channel switch.
+      const failed = { ...row, failed: e?.message || 'Could not send that message.' };
+      outboxRef.current.set(nonce, { row: failed, files });
       setMessages((prev) =>
-        prev.map((x) =>
-          x.clientNonce === nonce ? { ...x, content: content + '  (failed to send)' } : x,
-        ),
+        prev.map((x) => (x.clientNonce === nonce ? failed : x)),
       );
     }
   }
+
+  /** Send it again, with the same nonce so a message cannot be sent twice. */
+  function retrySend(m: Msg) {
+    const nonce = m.clientNonce;
+    const entry = nonce ? outboxRef.current.get(nonce) : undefined;
+    if (!nonce || !entry) return;
+    const row = { ...entry.row, failed: undefined };
+    outboxRef.current.set(nonce, { ...entry, row });
+    setMessages((prev) => prev.map((x) => (x.clientNonce === nonce ? row : x)));
+    void deliver(nonce, m.channelId);
+  }
+
+  /**
+   * Throw away a message that never reached the server.
+   *
+   * Purely local, and deliberately not routed through `askDelete`: there is
+   * nothing on the server to delete, so the confirmation would be promising to
+   * remove it "for everyone" when nobody else ever saw it, and the DELETE
+   * behind it would 404 on an id that only ever existed in this window.
+   *
+   * The text goes back to the composer when the composer is empty, which is
+   * the usual case and the difference between discarding a failed send and
+   * losing the paragraph it was carrying.
+   */
+  function discardFailed(m: Msg) {
+    const nonce = m.clientNonce;
+    const entry = nonce ? outboxRef.current.get(nonce) : undefined;
+    if (entry) {
+      for (const url of entry.row.previews ?? []) URL.revokeObjectURL(url);
+      outboxRef.current.delete(nonce!);
+      if (!draft.trim() && entry.row.content) {
+        setDraft(toPlain(entry.row.content, (id) => lookupUser(id)));
+      }
+    }
+    setMessages((prev) => prev.filter((x) => x.id !== m.id));
+  }
+
+  /**
+   * Put failed sends back after the list has been replaced.
+   *
+   * Opening a channel, jumping into history and coming back to the live end
+   * all reload the list from the server, and the server has never heard of
+   * these. Without this they would go on the first channel switch, which is
+   * the same disappearing act this whole path exists to stop -- only quieter,
+   * because the sender would not have pressed anything to cause it.
+   */
+  useEffect(() => {
+    if (!activeChannel) return;
+    const back = [...outboxRef.current.values()]
+      .map((e) => e.row)
+      .filter(
+        (row) =>
+          row.failed &&
+          row.channelId === activeChannel &&
+          !messages.some((m) => m.clientNonce === row.clientNonce),
+      );
+    if (back.length === 0) return;
+    setMessages((prev) => [...prev, ...back]);
+  }, [messages, activeChannel]);
+
+  /** Nothing is going to be retried after the window closes. */
+  useEffect(
+    () => () => {
+      for (const { row } of outboxRef.current.values()) {
+        for (const url of row.previews ?? []) URL.revokeObjectURL(url);
+      }
+      outboxRef.current.clear();
+    },
+    [],
+  );
 
   /**
    * Open, move or close the tag list from wherever the caret now is.
@@ -2014,10 +2420,24 @@ export function Chat({
                 // Or the window listener that closes it would see this very
                 // click and shut it again on the way up.
                 e.stopPropagation();
+                setSearchOpen(false);
                 setPinsOpen((open) => !open);
               }}
             >
               📌
+            </button>
+          )}
+          {activeChannelObj?.kind === 'TEXT' && (
+            <button
+              className={'pin-btn' + (searchOpen ? ' on' : '')}
+              title="Search messages"
+              onClick={(e) => {
+                e.stopPropagation();
+                setPinsOpen(false);
+                setSearchOpen((open) => !open);
+              }}
+            >
+              🔍
             </button>
           )}
           <div className={'status-dot ' + status} title={status} />
@@ -2031,6 +2451,24 @@ export function Chat({
                   : 'offline'}
           </span>
 
+          {searchOpen && (
+            <SearchPanel
+              text={searchText}
+              onText={setSearchText}
+              results={searchResults}
+              busy={searchBusy}
+              error={searchError}
+              channelName={(id) =>
+                guilds
+                  .flatMap((g) => g.channels)
+                  .find((c) => c.id === id)?.name ?? 'unknown'
+              }
+              onJump={jumpTo}
+              onClose={() => setSearchOpen(false)}
+              lookupMention={lookupMention}
+            />
+          )}
+
           {pinsOpen && activeChannelObj && (
             <PinsPanel
               channelName={activeChannelObj.name}
@@ -2038,6 +2476,7 @@ export function Chat({
               error={pinsError}
               canPin={iAmAdmin}
               onUnpin={(m) => void togglePin(m)}
+              onJump={(id) => jumpTo(activeChannel!, id)}
               onClose={() => setPinsOpen(false)}
               lookupMention={lookupMention}
             />
@@ -2079,7 +2518,15 @@ export function Chat({
                   // `data-mid` is how the reading position is both read off the
                   // list and restored to it. Unsent messages are left untagged:
                   // their ids do not survive the round trip.
-                  <div key={m.id} data-mid={m.pending ? undefined : m.id}>
+                  <div
+                    key={m.id}
+                    data-mid={m.pending ? undefined : m.id}
+                    // Landed on by a jump. A brief flash rather than a lasting
+                    // mark: it answers "which one" at the moment of arrival,
+                    // and a highlight still there five minutes later is a
+                    // second unread marker saying something else.
+                    className={m.id === flashId ? 'flash' : undefined}
+                  >
                     {newDay && (
                       <div className="day-sep">
                         <span>{dayLabel(m.createdAt)}</span>
@@ -2090,6 +2537,7 @@ export function Chat({
                         'msg' +
                         (grouped ? ' grouped' : '') +
                         (m.pending ? ' pending' : '') +
+                        (m.failed ? ' failed' : '') +
                         // Tinted, with a bar down the side. Scrolling back
                         // through an evening, this is what makes the message
                         // that was about you findable without reading them all.
@@ -2156,6 +2604,18 @@ export function Chat({
                             {m.previews?.map((url) => (
                               <PreviewImage key={url} url={url} />
                             ))}
+                            {/* A send that never landed. The buttons live here
+                                rather than in the hover row because that row is
+                                edit, pin and delete -- all of which need a
+                                message the server has, and this is the one
+                                message it has not. */}
+                            {m.failed && (
+                              <div className="msg-failed">
+                                <span>{m.failed}</span>
+                                <a onClick={() => retrySend(m)}>Retry</a>
+                                <a onClick={() => discardFailed(m)}>Discard</a>
+                              </div>
+                            )}
                           </>
                         )}
                       </div>
@@ -2225,8 +2685,19 @@ export function Chat({
           {pending.length > 0 && (
             <div className="staged">
               {pending.map((p, i) => (
-                <div className="staged-item" key={p.preview}>
-                  <img src={p.preview} alt="" />
+                // Keyed by index, not by preview: a file with no preview has
+                // no url to key on, and two of them would collide.
+                <div
+                  className={'staged-item' + (p.preview ? '' : ' as-file')}
+                  key={i}
+                >
+                  {p.preview ? (
+                    <img src={p.preview} alt="" />
+                  ) : (
+                    <span className="staged-name" title={p.file.name}>
+                      {p.file.name}
+                    </span>
+                  )}
                   <button
                     className="staged-x"
                     onClick={() => removePending(i)}
@@ -2248,6 +2719,28 @@ export function Chat({
               onPick={chooseMention}
             />
           )}
+          {/* Until now files only arrived by paste or drag, which are both
+              things you have to already know about. */}
+          <button
+            className="attach-btn"
+            title="Attach a file"
+            disabled={!activeChannelObj || activeChannelObj.kind !== 'TEXT'}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            📎
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              addFiles([...(e.target.files ?? [])]);
+              // Cleared, or picking the same file twice in a row fires no
+              // change event and looks exactly like a broken button.
+              e.target.value = '';
+            }}
+          />
           <textarea
             ref={composerRef}
             rows={1}
@@ -2537,6 +3030,7 @@ export function Chat({
           onChange={(patch) => void updateVoiceSettings(patch)}
           onNotificationsChange={(patch) => void updateNotifications(patch)}
           onProfileSaved={applyUserUpdate}
+          updates={updates}
           onClose={() => setShowSettings(false)}
         />
       )}
@@ -2638,6 +3132,115 @@ function PreviewImage({ url }: { url: string }) {
 /* ----------------------------------------------------------- pin board */
 
 /**
+ * Search, as a popover under the header.
+ *
+ * Deliberately the same shape as the pin board: both are "a list of messages
+ * somewhere else in this guild, click one to go there", and giving them two
+ * different presentations would be inventing a distinction that is not there.
+ *
+ * Results say which channel and when, because that is what the reader is
+ * matching against — a search result stripped of its context is a sentence
+ * with no way to judge whether it is the one being looked for.
+ */
+function SearchPanel({
+  text,
+  onText,
+  results,
+  busy,
+  error,
+  channelName,
+  onJump,
+  onClose,
+  lookupMention,
+}: {
+  text: string;
+  onText: (value: string) => void;
+  /** Null before anything has been searched for; empty for no matches. */
+  results: MessageDto[] | null;
+  busy: boolean;
+  error: string | null;
+  channelName: (channelId: string) => string;
+  onJump: (channelId: string, messageId: string) => void;
+  onClose: () => void;
+  lookupMention: (id: string) => { name: string; self: boolean } | null;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  // Opened to be typed in. Anything else means a click to open and a click to
+  // focus, for a box that has exactly one use.
+  useEffect(() => input.current?.focus(), []);
+
+  return (
+    <div className="pins-panel search-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="pins-head">
+        <input
+          ref={input}
+          className="search-input"
+          value={text}
+          placeholder="Search this server"
+          onChange={(e) => onText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') onClose();
+          }}
+        />
+        <button className="pins-x" title="Close" onClick={onClose}>
+          ×
+        </button>
+      </div>
+      <div className="pins-body">
+        {error && <div className="banner">{error}</div>}
+        {busy && !results && <div className="hint">Searching…</div>}
+        {!error && !busy && text.trim().length < 2 && (
+          <div className="pins-empty">
+            <div className="pins-empty-mark">🔍</div>
+            <div>Type at least two characters.</div>
+            <div className="hint">
+              Whole words. Quote a phrase to keep it together, and put a minus
+              in front of a word to leave it out.
+            </div>
+          </div>
+        )}
+        {results?.length === 0 && !busy && (
+          <div className="pins-empty">
+            <div className="pins-empty-mark">🔍</div>
+            <div>Nothing matched “{text.trim()}”.</div>
+          </div>
+        )}
+        {results?.map((m) => (
+          <button
+            className="pin-row"
+            key={m.id}
+            title="Go to this message"
+            onClick={() => onJump(m.channelId, m.id)}
+          >
+            <Avatar
+              name={m.author.displayName || m.author.username}
+              image={m.author.image}
+            />
+            <div className="pin-body">
+              <div className="msg-head">
+                <span className="msg-author">
+                  {m.author.displayName || m.author.username}
+                </span>
+                <span className="search-where">
+                  #{channelName(m.channelId)}
+                </span>
+                <span className="msg-time">{stamp(m.createdAt)}</span>
+              </div>
+              <MessageContent
+                content={m.content}
+                attachments={m.attachments}
+                edited={Boolean(m.editedAt)}
+                lookupMention={lookupMention}
+              />
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
  * The pinned messages in one channel, as a popover under the header.
  *
  * A popover rather than a modal because it is a reference, not a decision:
@@ -2656,6 +3259,7 @@ function PinsPanel({
   error,
   canPin,
   onUnpin,
+  onJump,
   onClose,
   lookupMention,
 }: {
@@ -2666,6 +3270,8 @@ function PinsPanel({
   /** Whether this user may take things off the board. Admins only. */
   canPin: boolean;
   onUnpin: (m: MessageDto) => void;
+  /** Go to the message in the channel. What the whole board is for. */
+  onJump: (messageId: string) => void;
   onClose: () => void;
   lookupMention: (id: string) => { name: string; self: boolean } | null;
 }) {
@@ -2694,7 +3300,15 @@ function PinsPanel({
           </div>
         )}
         {pins?.map((m) => (
-          <div className="pin-row" key={m.id}>
+          // A button, not a div with a click handler: it is a link to
+          // somewhere, and the pin board is a list somebody may well be
+          // tabbing through.
+          <button
+            className="pin-row"
+            key={m.id}
+            title="Go to this message"
+            onClick={() => onJump(m.id)}
+          >
             <Avatar
               name={m.author.displayName || m.author.username}
               image={m.author.image}
@@ -2714,15 +3328,29 @@ function PinsPanel({
               />
             </div>
             {canPin && (
-              <button
+              <span
                 className="pin-unpin"
+                role="button"
+                tabIndex={0}
                 title="Unpin"
-                onClick={() => onUnpin(m)}
+                // Or unpinning would also navigate to the message it just
+                // took off the board, which is the one place nobody wants to
+                // be sent.
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onUnpin(m);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter' && e.key !== ' ') return;
+                  e.stopPropagation();
+                  e.preventDefault();
+                  onUnpin(m);
+                }}
               >
                 ×
-              </button>
+              </span>
             )}
-          </div>
+          </button>
         ))}
       </div>
     </div>

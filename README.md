@@ -19,7 +19,8 @@ goes direct to the box; only signalling and the HTTP API go through the proxy.
 - [Running it](#running-it) · [The two installers](#the-two-installers)
 - [Updating the client](#updating-the-client) · [Older clients](#older-clients)
 - [Configuration](#configuration) · [Going public](#going-public) · [Database](#database) · [Retention](#retention)
-- [Voice quality](#voice-quality) · [Mentions](#mentions) · [Pinned messages](#pinned-messages) · [API](#api)
+- [Voice quality](#voice-quality) · [Mentions](#mentions) · [Pinned messages](#pinned-messages)
+- [Search](#search) · [Attachments](#attachments) · [API](#api)
 - [Decisions worth not re-litigating](#decisions-worth-not-re-litigating)
 - [Bugs that cost real time](#bugs-that-cost-real-time)
 - [What is left](#what-is-left)
@@ -79,6 +80,26 @@ npm run console          # just the console, headless, at http://127.0.0.1:4000
 The app spawns the console and adopts one already listening on 4000, so the two commands
 do not conflict. It is a shell, not a second implementation: closing the window hides it to
 the tray, and **Quit** from the tray stops the console and everything the console started.
+
+**Process control has two backends, and picks per action.** In a development checkout the
+console spawns the server, LiveKit and Caddy as its own children. On an installed box it
+drives the three SYSTEM scheduled tasks the installer registered — because that is what is
+actually running there, and what will be running again after the next reboot. Spawning a
+child instead would give a server that dies with the console and a task that fights it for
+the port.
+
+> This is why it is two backends and not one. The console only ever managed its own
+> children, so on every installed box **Stop** and **Restart** were greyed out over a
+> status line reading *"running, but not started by this console — stop it in its own
+> terminal to manage it here"*. There is no terminal: the task scheduler started it before
+> anybody logged in. Stopping is now layered — end the task, wait for the port to go quiet,
+> and force-kill whatever still holds it, which also clears a copy somebody left running
+> elsewhere.
+
+The tasks run as SYSTEM, so **starting and stopping them needs an elevated console.** It
+checks with `fltmc` and says so on the Process card before anything is clicked, rather than
+letting the first press come back "Access is denied"; either way the error carries the
+`schtasks` command to run by hand.
 
 **Start server** starts the chat server, LiveKit, and — in internet mode only — Caddy.
 **Start database** starts the PostgreSQL service. The rest of it is build, migrate, seed,
@@ -313,8 +334,15 @@ publishing stay two steps throughout, so a half-finished build cannot reach ten 
 merely by landing in the right folder.
 
 The console's **Updates** tab shows what is published, what is uploaded and waiting, and who
-is running what. It also keeps a *publish from a folder on this machine* box, which is only
-useful in a development checkout where the client and the server live in one tree.
+is running what.
+
+It used to also offer *publish from a folder on this machine*, which is gone. It was only
+ever useful in a development checkout where the client and the server live in one tree, and
+on the box this actually runs on the release folder is not there — so what it really was is
+a route that took a filesystem path from the network and read files from it, for a
+convenience that applied on one machine. Uploading is now the only way in, which is the way
+that works everywhere. `UpdatesService.publish(sourceDir)` stayed: `publishStaged()` is that
+method pointed at the staging directory.
 
 **`electron-builder` needs a `publish` block or it writes no `latest.yml` at all.** There is
 one in `apps/desktop/package.json`, pointing at the public deployment. That URL is never
@@ -576,18 +604,36 @@ One read-only endpoint, `GET /api/admin/storage`, behind the console's **Storage
   row. This is the number that says whether a cleanup is safe to run, and it is the one
   nothing currently knows.
 
-Then the actions, each of which counts first, shows what it found, and asks before it
-deletes anything: purge orphaned files, purge orphaned rows, hard-delete tombstones older
-than *n* days, and `VACUUM ANALYZE`. Plain, not `FULL` — `VACUUM FULL` takes an exclusive
-lock on the table, which belongs in a maintenance window rather than behind a button.
-`POST /api/admin/storage/purge` defaults to a dry run and the caller has to pass
-`dryRun: false` on purpose; a destructive endpoint whose safe mode is opt-in is one that
-eventually runs by accident.
+Then one action: **Empty the bin**. It counts first, shows the real numbers — *"Permanently
+remove 27 deleted message(s) and 4 picture(s), freeing about 1.1 MB?"* — and only then
+deletes those messages, their files on disk, and any file left behind by one, before running
+`VACUUM ANALYZE` so the space is actually handed back rather than left inside the tables.
+
+That is deliberately the whole tab. It used to offer four buttons — orphaned files, orphaned
+rows, tombstones older than *n* days, and a bare Vacuum — which is an accurate description of
+four internal states and no help at all to the person looking at it, who has one question:
+*I deleted things, why is the disk still full.* The other purge kinds still exist on
+`POST /api/admin/storage/purge` and the retention sweeper still uses them; they are no
+longer four decisions asked of somebody at eleven at night.
+
+The endpoint defaults to a dry run and the caller has to pass `dryRun: false` on purpose; a
+destructive endpoint whose safe mode is opt-in is one that eventually runs by accident. The
+vacuum is plain, never `FULL` — `VACUUM FULL` takes an exclusive lock on every table it
+touches, which belongs in a maintenance window rather than behind a button.
 
 **The orphan sweep ignores anything written in the last hour.** A file is written before the
 row that points at it exists, so a sweep landing in that window would delete somebody's
 upload mid-post and leave them looking at a broken image. An orphan is still an orphan an
 hour later.
+
+**And it knows about avatars, which it did not at first.** An avatar is written by the same
+`store()` into the same directory, but its only reference is `user.image` — never an
+`Attachment` row, deliberately, because it belongs to a person rather than to a message.
+The sweep built its list of live files from attachment rows alone, so every avatar was a
+stray: counted as waste in the report, deleted by the cleanup button, and deleted by every
+nightly retention run. Both the report and the sweep now ask one shared question that
+includes `user.image`. Anything else that ever lands in that directory has to be added to
+it too.
 
 **A deleted message is still a row, and its images are still on the disk.** `deletedAt` is
 a tombstone: the row survives so that a deletion can be looked into later, and the
@@ -628,11 +674,15 @@ serve it.
 |---|---|
 | `attachments.maxAgeDays` | Media is nearly all of the bytes. Expiring images while text lives forever is the policy most people actually want, and it is not the same knob as messages. |
 | `messages.maxAgeDays` | Null means forever, and probably stays null. |
-| `softDeleted.maxAgeDays` | Tombstones. Short — thirty days. |
+| `softDeleted.maxAgeDays` | Tombstones. **The one field that defaults to a number** — thirty days. A tombstone is a message somebody already chose to delete, kept only so the deletion can be looked into, and a month is longer than anyone looks. It still does nothing until `enabled` is on: this is what the switch does when it is thrown, not something that happens by itself. |
 | `uploads.maxTotalBytes` | The one that actually bounds the disk. Oldest-first eviction once over the cap. |
 
 Both kinds are needed. Age is the policy; the cap is the safety net. An age limit bounds
 nothing if ten people paste two hundred screenshots in a week.
+
+Expiring uploads are **not** part of this. The 48-hour deadline on a non-image attachment is
+a promise made to the uploader at the moment of upload, not a policy an operator opted into,
+so its sweeper runs hourly regardless of `enabled` — see [Attachments](#attachments).
 
 **The sweeper is a nightly `@Cron`** from `@nestjs/schedule` at 4am, deleting in batches of
 500 with a pause between them — a home box should not spend the night holding a lock on
@@ -885,6 +935,95 @@ npm run db:migrate
 
 ---
 
+## Search
+
+A magnifying glass next to the pin in the channel header. Type two characters and results
+appear under it: who, which channel, when, and the message. Click one and the app goes
+there.
+
+**Matching is Postgres full-text**, on a `tsvector` column generated from `content` with a
+GIN index over it. Generated rather than maintained by us: Postgres recomputes it on every
+insert and every edit, so it cannot drift from the text, and nothing in the application has
+to remember to write it.
+
+**The configuration is `simple`, not `english`.** English stemming makes "running" find
+"ran", which demonstrates well and behaves badly here — what people search a chat server for
+is a username, a filename, a link, a version number, and stemming mangles all four. It is
+`websearch_to_tsquery`, so quoted phrases, `or`, and a leading `-` to exclude all work, and
+malformed input cannot throw the way `to_tsquery` does.
+
+**Permissions are resolved once, not per result.** The caller's readable channels become the
+`IN` list, so the database never considers a message they cannot read — rather than searching
+everything and filtering after, which is a query per row. **Deleted messages are excluded,
+and that is load-bearing:** somebody removed them on purpose, and a search that returned them
+would be a way to read everything a moderator has ever deleted.
+
+Ordered by id, not by rank. Chat search is a chronological question, ids are UUIDv7, and
+ranking would need a second sort key to page stably.
+
+> Prisma has no `tsvector` type, so the column is `Unsupported("tsvector")` and the `@@`
+> comparison runs as raw SQL that returns ids only; Prisma then loads those rows. If a
+> future `prisma migrate dev` offers to alter that column, it is wrong — the definition,
+> including the `GENERATED ALWAYS`, lives in the migration.
+
+### Landing on a message
+
+Search results, pinned messages, and clicking a notification all do the same thing, and none
+of them could before: **`GET /api/channels/:id/messages?around=<id>`** returns a window
+centred on one message — half the page older, half newer — which is what `before` cannot
+express. Paging backwards to reach something said in March means fetching March through
+today to get there.
+
+The window is the only page with both cursors set, because it is the only one with history
+above it *and* live messages below it. While parked in one, two things are suppressed: the
+reading position is not overwritten (look up a message from March, close the app, and you
+come back to where you were reading), and the channel is not marked read to the newest
+loaded message, because everything below the window is still unseen. The jump-to-latest
+button lifts both, and reloads the newest page rather than only scrolling.
+
+---
+
+## Attachments
+
+Anything can be sent — paperclip, paste, or drag. **Pictures are kept. Everything else is
+deleted after 48 hours**, and the message says how long is left. The point is handing a file
+to somebody, not becoming the place that file lives.
+
+Two rules make accepting arbitrary bytes safe on a box with ports open, and neither can be
+relaxed without the other:
+
+1. **Nothing is stored under an extension the server did not choose.** A picture keeps a real
+   one; everything else is `.bin`, with the real name and type in the database row. The file
+   layer checks that extension before opening or deleting anything, and that check is what
+   stops a bad row turning the download route into a general file server.
+2. **Nothing but a picture is served in a form a browser would render.** Pictures go out
+   inline as themselves; everything else goes out as `application/octet-stream` with
+   `Content-Disposition: attachment`, `nosniff`, and a `default-src 'none'; sandbox` CSP. An
+   uploaded HTML page handed back inline would be script running against this API's own
+   origin.
+
+The client matches: a file is **saved and never opened**. No preview, no reveal-in-folder,
+no shell. Anyone with an invite can upload a program, and an app that opens one on the
+recipient's behalf is the thing that ran it. Uploaded filenames are stripped of path
+separators, control characters and the bidirectional overrides — one of those is how a file
+genuinely named `annexe<RLO>txt.exe` draws in a list as `annexe.exe.txt`.
+
+**The expiry sweeper is hourly, and deliberately outside the retention policy.** Retention is
+an operator's decision, switched off until somebody turns it on; this is the deal the
+uploader was shown at the moment they sent the file, and a promise that only happens if an
+administrator opted in is not one. Hourly rather than nightly because nightly makes "48
+hours" mean anything from 48 to 72, and the client is showing a countdown.
+
+**The file goes, the row stays**, stamped `expiredAt`. Deleting the row would leave a message
+that was only a file rendering as a blank gap; instead it reads *"build.zip — no longer on
+the server"*. Asking for the bytes then gets a 410, not a 404: the difference between "there
+was never such a file" and "its time ran out" is the thing the reader wants to know.
+
+Avatars are the one upload path that still takes pictures only — they are drawn inline for
+every signed-in member, which is exactly what rule 2 forbids for anything else.
+
+---
+
 ## API
 
 | Method | Route | Notes |
@@ -896,7 +1035,8 @@ npm run db:migrate
 | GET | `/api/me` | Current session |
 | GET | `/api/guilds` | Guilds with their channels |
 | GET | `/api/members` | Members, with online state |
-| GET | `/api/channels/:id/messages` | Cursor paged: `?before=<id>&limit=50` |
+| GET | `/api/channels/:id/messages` | Cursor paged: `?before=<id>&limit=50`. Also `?after=<id>` and `?around=<id>`, which is what jumping to a message uses |
+| GET | `/api/search` | `?q=&guildId=&channelId=&before=&limit=`. Only channels the caller can read; never deleted messages |
 | POST | `/api/channels/:id/messages` | Broadcasts over Socket.IO |
 | PATCH | `/api/channels/:id/messages/:msgId` | Edit — the author only, never an admin |
 | DELETE | `/api/channels/:id/messages/:msgId` | Delete — the author, or a guild admin |
@@ -1030,8 +1170,9 @@ Socket.IO events are declared in `packages/shared/src/index.ts`.
   so unknown keys already strip and unheard-of events already drop. That compatibility is
   free until somebody renames something or reaches for `.strict()`.
 - **Unrecognised content renders as a placeholder**, never as nothing. An old client drawing
-  a blank where a message has a reaction or a non-image attachment is lying about what was
-  said.
+  a blank where a message has a reaction is lying about what was said. Non-image
+  attachments used to hit this branch and now have a real one — see
+  [Attachments](#attachments).
 - **The orphan sweep has an hour's grace.** A file exists before its row does, and sweeping
   that window deletes a live upload.
 - **Row counts are counted, not estimated.** `n_live_tup` reads zero on a database that has
@@ -1054,6 +1195,15 @@ Ten friends and one box is the whole design.
 
 Kept because each one failed silently, and the next person to hit the same shape deserves
 the shortcut.
+
+**The file sweeper deleted every avatar.** An avatar is written by the same `store()` into
+the same directory as message attachments, but it is referenced only by `user.image` and
+never by an `Attachment` row — which is deliberate and was documented, and which the sweeper
+did not know. Building the live-file list from attachment rows alone made every avatar a
+stray: reported as waste, removed by the console's cleanup, and removed by every nightly
+retention run. It failed silently in the worst way available — the console said *"safe to
+sweep"* about it. **When a directory has more than one kind of owner, the sweep has to ask
+all of them.**
 
 **Encoding and regex, three times in the same files**
 
@@ -1148,7 +1298,8 @@ Ordered by what hurts soonest.
 10. `Chat.tsx` is past 1300 lines and holds the message list, editing, moderation,
     attachments, unread markers, embeds and now the per-person volume popup. Split it
     before adding reactions.
-11. Emoji reactions, theme toggle, non-image attachments, mentions and notifications, search.
+11. Emoji reactions and a theme toggle. Non-image attachments, mentions and notifications,
+    and search are done — see [Attachments](#attachments) and [Search](#search).
     Images in a message now open full size on click and copy on right-click — the copy goes
     through main, because an uploaded image is a blob: URL the renderer can rasterise but a
     linked one is another origin, where a canvas is tainted and `fetch` is a CORS failure.

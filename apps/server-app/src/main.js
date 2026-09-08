@@ -217,6 +217,7 @@ function showWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'isthislegit Server',
+    icon: path.join(__dirname, 'icon.ico'),
     backgroundColor: '#14161a',
     autoHideMenuBar: true,
     webPreferences: {
@@ -260,14 +261,10 @@ function showWindow() {
 }
 
 function buildTray(root) {
-  // A one-pixel transparent image rather than a shipped .ico: the tray needs
-  // an image, and an icon file is a build asset this app does not otherwise
-  // need. Windows shows the app's own icon for the window and taskbar.
-  const icon = nativeImage.createFromDataURL(
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAWklEQVR42mNkYPhfz0AEYBxVSF' +
-      'BhIQNJgImBRMCEy2ZGRkbUAIzYFOJUiE0hTgVYFeJSgFUhLgVYFeJSgFUhLgVYFeJSgFUhLgVYFeJSgFUhLgUAy1kV0Q0k' +
-      'SIkAAAAASUVORK5CYII=',
-  );
+  // A PNG rather than the .ico: the tray wants one bitmap at roughly 16px and
+  // picking it here is more predictable than letting Windows choose out of a
+  // multi-size icon.
+  const icon = nativeImage.createFromPath(path.join(__dirname, 'tray.png'));
 
   tray = new Tray(icon);
   tray.setToolTip('isthislegit Server');

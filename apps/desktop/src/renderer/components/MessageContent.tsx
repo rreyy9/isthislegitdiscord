@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react';
-import { attachmentUrl, type AttachmentDto } from '../api';
+import {
+  attachmentUrl,
+  fetchAttachmentBytes,
+  type AttachmentDto,
+} from '../api';
+import { bridge } from '../bridge';
 import { IMAGE_EXT_RE, URL_RE, youtubeId, youtubeStart } from '../link-utils';
 import { MENTION_RE } from '../mention-utils';
 import { useImageActions } from './ImageViewer';
@@ -132,31 +137,125 @@ export function AttachmentImage({ file }: { file: AttachmentDto }) {
   );
 }
 
-/* ------------------------------------------------------ forward compat */
+/** The types this build knows how to put on screen. */
+const RENDERABLE = /^image\/(png|jpeg|gif|webp)$/i;
 
 /**
- * Something this build cannot draw.
+ * Whether to draw an attachment as a picture.
  *
- * The server adds fields and events; it never renames or removes them, so an
- * older client keeps working and simply does not see what is new. That covers
- * almost everything -- but not the case where a message *has* content this
- * build has no idea how to render. Drawing nothing there is a lie about what
- * was said, so it says so instead.
+ * The server's answer wins. It is the side that decides what it will hand back
+ * as a renderable type and what it will only ever hand back as bytes to save,
+ * and those two answers have to be the same one -- a client that put an
+ * uploaded file in an `<img>` against the server's judgement is exactly the
+ * case the download rules exist to prevent.
  *
- * One branch, written once, covers every future case: anything unrecognised
- * lands here rather than needing its own handling in the version that predates
- * it.
+ * `inline` is absent from a server older than the feature, where every
+ * attachment was a picture. Falling back to the content type is what this
+ * build did before being told, so an old server behaves as it always did.
  */
-function Unrenderable({ what }: { what: string }) {
+const drawInline = (file: AttachmentDto): boolean =>
+  file.inline ?? RENDERABLE.test(file.contentType);
+
+/* --------------------------------------------------------------- files */
+
+const SIZE_UNITS = ['B', 'KB', 'MB', 'GB'];
+
+function fileSize(bytes: number): string {
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < SIZE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${SIZE_UNITS[unit]}`;
+}
+
+/**
+ * How long is left, in the largest unit that is still true.
+ *
+ * Rounded down, never up: "expires in 1 hour" on something with fifty-nine
+ * minutes left is a promise that can be kept, and the reverse is not.
+ */
+function timeLeft(iso: string): string | null {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return null;
+  if (ms <= 0) return 'expiring now';
+  const hours = Math.floor(ms / 3_600_000);
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    return `expires in ${days} day${days === 1 ? '' : 's'}`;
+  }
+  if (hours >= 1) return `expires in ${hours} hour${hours === 1 ? '' : 's'}`;
+  const minutes = Math.max(1, Math.floor(ms / 60_000));
+  return `expires in ${minutes} minute${minutes === 1 ? '' : 's'}`;
+}
+
+/**
+ * One uploaded file that is not a picture.
+ *
+ * Save, and only save. The server hands these back as an octet-stream
+ * attachment that nothing will render, and this end matches that: there is no
+ * open, no preview, and no reveal-in-folder. Anyone with an invite may upload
+ * anything, including a program, and an app that opens one of those on the
+ * reader's behalf is the thing that ran it.
+ */
+export function AttachmentFile({ file }: { file: AttachmentDto }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedTo, setSavedTo] = useState<string | null>(null);
+
+  const expired = Boolean(file.expiredAt);
+  const left = file.expiresAt && !expired ? timeLeft(file.expiresAt) : null;
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const bytes = await fetchAttachmentBytes(file.url);
+      const path = await bridge.saveFile({ name: file.fileName, bytes });
+      // Null is a cancelled dialog, which is not a failure and gets no
+      // message: the person who cancelled it knows what they did.
+      if (path) setSavedTo(path);
+    } catch (e: any) {
+      setError(e?.message ?? 'That file could not be downloaded.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="attach-failed">
-      This message has {what} this version cannot show — update to see it.
+    <div className={'attach-file' + (expired ? ' expired' : '')}>
+      <div className="attach-file-icon" aria-hidden>
+        {expired ? '✕' : '▤'}
+      </div>
+      <div className="attach-file-body">
+        <div className="attach-file-name" title={file.fileName}>
+          {file.fileName}
+        </div>
+        <div className="attach-file-meta">
+          {expired ? (
+            <span className="attach-file-gone">
+              No longer on the server — files that are not pictures are kept
+              for a limited time.
+            </span>
+          ) : (
+            <>
+              <span>{fileSize(file.size)}</span>
+              {left && <span className="attach-file-clock">· {left}</span>}
+            </>
+          )}
+        </div>
+        {savedTo && <div className="attach-file-saved">Saved to {savedTo}</div>}
+        {error && <div className="attach-file-error">{error}</div>}
+      </div>
+      {!expired && (
+        <button className="attach-file-save" disabled={busy} onClick={save}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      )}
     </div>
   );
 }
-
-/** The types this build knows how to put on screen. */
-const RENDERABLE = /^image\/(png|jpeg|gif|webp)$/i;
 
 /* ------------------------------------------------------------ mentions */
 
@@ -282,12 +381,14 @@ export function MessageContent({
         </div>
       )}
       {attachments.map((a) =>
-        RENDERABLE.test(a.contentType) ? (
+        drawInline(a) ? (
           <AttachmentImage key={a.id} file={a} />
         ) : (
-          // A newer server accepting a file type this build was never taught
-          // to draw. Naming it beats an empty space where a file should be.
-          <Unrenderable key={a.id} what={`a ${a.contentType} attachment`} />
+          // Everything that is not a picture: named, sized, and offered as a
+          // download. This used to be the "cannot draw this" branch, which was
+          // the right answer when pictures were the only thing that could be
+          // sent and is the wrong one now that files can.
+          <AttachmentFile key={a.id} file={a} />
         ),
       )}
       {embeds}

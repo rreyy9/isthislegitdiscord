@@ -1,6 +1,6 @@
 {
   "name": "@isthislegit/desktop",
-  "version": "0.2.6",
+  "version": "0.2.8",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",

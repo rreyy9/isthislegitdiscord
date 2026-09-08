@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   clipboard,
   ClipboardItem,
+  dialog,
   ipcMain,
   nativeImage,
   net,
@@ -11,7 +12,7 @@ import {
   session,
   shell,
 } from 'electron';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import {
   registerPushToTalk,
@@ -375,6 +376,27 @@ function watchBounds(win: BrowserWindow) {
   });
 }
 
+/**
+ * The window and taskbar icon.
+ *
+ * A packaged build takes its icon from the .exe, which electron-builder stamps
+ * from build/icon.ico, so this only has to cover the case Windows cannot: a
+ * dev run, where there is no .exe and the window would otherwise wear the
+ * default Electron icon. The renderer copy is the one that ships; build/ is a
+ * build resource and is not packaged, and in dev the renderer is served from
+ * memory so out/renderer does not exist. Hence both paths, first hit wins.
+ */
+function appIcon() {
+  for (const path of [
+    join(__dirname, '../renderer/icon.png'),
+    join(app.getAppPath(), 'build', 'icon.png'),
+  ]) {
+    const image = nativeImage.createFromPath(path);
+    if (!image.isEmpty()) return image;
+  }
+  return undefined;
+}
+
 function createWindow() {
   const saved = loadSettings().window;
   const win = new BrowserWindow({
@@ -383,6 +405,7 @@ function createWindow() {
     minHeight: MIN_HEIGHT,
     backgroundColor: '#14161a',
     title: 'isthislegit',
+    icon: appIcon(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       sandbox: false,
@@ -528,6 +551,46 @@ ipcMain.handle(
       return true;
     } catch {
       return false;
+    }
+  },
+);
+
+/**
+ * Save a downloaded attachment.
+ *
+ * The renderer fetched the bytes, because it is the side that holds the bearer
+ * token; main puts up the dialog and writes the file, because it is the side
+ * with a window to be modal to and a disk to write to.
+ *
+ * It saves and stops there. Nothing here opens the file, reveals it, or hands
+ * it to the shell: anybody with an invite can upload anything, including a
+ * program, and the moment this app opens one of those on the recipient's
+ * behalf it is the thing that ran it. Saving is the whole feature.
+ */
+ipcMain.handle(
+  'file:save',
+  async (_e, file: { name: string; bytes: ArrayBuffer }) => {
+    try {
+      const window = BrowserWindow.getFocusedWindow() ?? mainWindow;
+      // The name is attacker-controlled text that has already been stripped
+      // of separators by the server. `basename` again here anyway, because
+      // this is the call that turns it into a path.
+      const suggested = basename(String(file?.name || 'download'));
+
+      const result = await dialog.showSaveDialog(window!, {
+        defaultPath: suggested,
+        // The dialog is where somebody decides; a warning after they have
+        // decided is a warning nobody reads.
+        title: 'Save attachment',
+      });
+      if (result.canceled || !result.filePath) return null;
+
+      writeFileSync(result.filePath, Buffer.from(file.bytes));
+      return result.filePath;
+    } catch {
+      // A disk that is full or a folder that is not writable. The renderer
+      // says so; there is nothing useful to do about it here.
+      return null;
     }
   },
 );

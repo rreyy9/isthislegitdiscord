@@ -68,6 +68,10 @@ export function App() {
         me={state.me}
         onMeChanged={onMeChanged}
         onSignOut={() => setState({ phase: 'login' })}
+        // Handed down so the settings screen can show what this build is and
+        // offer the update, rather than the banner being the only place an
+        // update is ever mentioned.
+        updates={updates}
       />
       <UpdateBanner updates={updates} />
     </ImageViewerProvider>

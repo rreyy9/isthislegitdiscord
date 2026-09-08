@@ -19,6 +19,7 @@ import { StorageModule } from './storage/storage.module';
 import { UpdatesModule } from './updates/updates.module';
 import { MentionsModule } from './mentions/mentions.module';
 import { ChannelsModule } from './channels/channels.module';
+import { SearchController } from './search/search.controller';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { ChannelsModule } from './channels/channels.module';
     AdminController,
     ModerationController,
     ProfileController,
+    SearchController,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

@@ -166,6 +166,24 @@ export interface AttachmentDto {
   height: number | null;
   /** A path on the API, e.g. /api/attachments/<id>. */
   url: string;
+  /**
+   * When the server will remove the file, or null for one it keeps. Only
+   * pictures are kept; anything else is here to be handed over, not stored.
+   *
+   * Optional because a server older than the feature sends no such field, and
+   * this client has to draw the attachment anyway. Read it with `?.` — the
+   * same rule as `mentions` and `pinnedAt`.
+   */
+  expiresAt?: string | null;
+  /** Set once the deadline passed and the bytes went. The row stays. */
+  expiredAt?: string | null;
+  /**
+   * Whether the server will hand this back as something drawable. Absent from
+   * an older server, where every attachment was a picture — so undefined
+   * means "decide from the content type", which is what this build used to do
+   * on its own.
+   */
+  inline?: boolean;
 }
 export interface MessageDto {
   id: string;
@@ -193,6 +211,23 @@ export interface MessageDto {
   pinnedAt?: string | null;
   attachments: AttachmentDto[];
 }
+export interface MessagePageDto {
+  messages: MessageDto[];
+  /** Pass as `before` for older messages. Null once fully scrolled back. */
+  nextCursor: string | null;
+  /**
+   * Pass as `after` for newer ones. Null at the live end of the channel — and
+   * absent entirely from a server older than the feature, which only ever
+   * served the live end, so undefined reads correctly as null.
+   */
+  prevCursor?: string | null;
+}
+
+export interface SearchPageDto {
+  results: MessageDto[];
+  nextCursor: string | null;
+}
+
 /** Unread tags in one channel. Absent from the list when there are none. */
 export interface ChannelMentionsDto {
   channelId: string;
@@ -315,9 +350,52 @@ export const api = {
     request<{ ok: boolean }>(`/api/channels/${id}`, { method: 'DELETE' }),
   members: () => request<MemberDto[]>('/api/members'),
   history: (channelId: string, before?: string, limit = 50) =>
-    request<{ messages: MessageDto[]; nextCursor: string | null }>(
+    request<MessagePageDto>(
       `/api/channels/${channelId}/messages?limit=${limit}${before ? `&before=${before}` : ''}`,
     ),
+  /**
+   * A page centred on one message: what landing on a search result or a pin
+   * needs. Both cursors come back set, because a window in the middle of a
+   * channel has history above it and live messages below it.
+   *
+   * Against a server too old to know `around`, the parameter is ignored and
+   * the newest page comes back instead — the reader ends up at the bottom of
+   * the right channel rather than seeing an error, which is the better of the
+   * two failures.
+   */
+  historyAround: (channelId: string, around: string, limit = 50) =>
+    request<MessagePageDto>(
+      `/api/channels/${channelId}/messages?limit=${limit}&around=${encodeURIComponent(around)}`,
+    ),
+  /** The next page of newer messages, for walking back down to the live end. */
+  historyAfter: (channelId: string, after: string, limit = 50) =>
+    request<MessagePageDto>(
+      `/api/channels/${channelId}/messages?limit=${limit}&after=${encodeURIComponent(after)}`,
+    ),
+
+  /* ------------------------------------------------------------- search */
+
+  /**
+   * Find a message. Scoped to one guild, newest first, paged by message id.
+   *
+   * The server decides what this account may read; there is no client-side
+   * filtering to forget. Results carry the channel id, and this app already
+   * holds the channel list, so "in #general" is drawn without asking.
+   */
+  search: (params: {
+    q: string;
+    guildId?: string;
+    channelId?: string;
+    before?: string;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams({ q: params.q });
+    if (params.guildId) qs.set('guildId', params.guildId);
+    if (params.channelId) qs.set('channelId', params.channelId);
+    if (params.before) qs.set('before', params.before);
+    qs.set('limit', String(params.limit ?? 25));
+    return request<SearchPageDto>(`/api/search?${qs}`);
+  },
   send: (channelId: string, content: string, clientNonce: string) =>
     request<MessageDto>(`/api/channels/${channelId}/messages`, {
       method: 'POST',
@@ -470,4 +548,28 @@ export function attachmentUrl(id: string, path: string): Promise<string> {
   // A failed fetch must not be cached as permanent: a reconnect should retry.
   pending.catch(() => objectUrls.delete(id));
   return pending;
+}
+
+/**
+ * Fetch a file attachment's bytes so main can write them somewhere.
+ *
+ * Not an object URL and not the cache above: this is a file somebody is
+ * saving once, and holding a 25 MB blob for the rest of the session because
+ * they downloaded it is the opposite of what is wanted. The bytes go straight
+ * across to main, which owns the save dialog and the disk.
+ *
+ * An `<a download>` is not the alternative. The renderer has no permission to
+ * write anywhere, the file has to be fetched with a bearer token no anchor can
+ * send, and a save that silently lands in Downloads is not what "Save" means
+ * on a desktop application.
+ */
+export async function fetchAttachmentBytes(path: string): Promise<ArrayBuffer> {
+  const res = await send(`${serverUrl}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (res.status === 410) {
+    throw new ApiError(410, 'That file expired and is no longer on the server.');
+  }
+  if (!res.ok) throw new ApiError(res.status, `Could not download that file.`);
+  return res.arrayBuffer();
 }

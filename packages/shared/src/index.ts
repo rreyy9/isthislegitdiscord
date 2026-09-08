@@ -50,8 +50,58 @@ export const Attachment = z.object({
   height: z.number().int().nullable(),
   /** Path on the API, not a full URL — the client knows its own server address. */
   url: z.string(),
+  /**
+   * When this file will be removed from the server, or null for one that is
+   * kept indefinitely.
+   *
+   * Only pictures are kept. Everything else is a courier: it is here so
+   * somebody can hand a file to somebody else, not so this box becomes the
+   * place that file lives. The client is told the deadline at the moment of
+   * upload and shows it on the message, because a file that disappears
+   * without warning is worse than one that was never accepted.
+   */
+  expiresAt: z.string().nullable(),
+  /**
+   * Set once the deadline passed and the bytes were removed. The row survives
+   * so the message still says what was there -- deleting it would leave a
+   * message that was only a file rendering as a blank gap.
+   */
+  expiredAt: z.string().nullable(),
+  /**
+   * Whether this build should try to draw the file inline. False for
+   * everything the server will only ever hand back as a download.
+   */
+  inline: z.boolean(),
 });
 export type Attachment = z.infer<typeof Attachment>;
+
+/**
+ * How long a non-image upload lives.
+ *
+ * Two days: long enough to cover "I will grab it tomorrow", short enough that
+ * nobody starts treating the server as a file share. Shared rather than kept
+ * on the server so the client can say "expires in 47 hours" without being
+ * told the policy separately.
+ */
+export const EPHEMERAL_FILE_HOURS = 48;
+
+/**
+ * The types drawn in the message list rather than offered as a download.
+ *
+ * This is the whole safety boundary for accepting arbitrary uploads: anything
+ * not on this list is served as an octet-stream attachment that no browser
+ * will render, so an uploaded page cannot become script running against the
+ * API's own origin. Keep it to formats an <img> can display.
+ */
+export const INLINE_TYPES = [
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+] as const;
+
+export const isInlineType = (contentType: string): boolean =>
+  (INLINE_TYPES as readonly string[]).includes(contentType);
 
 export const Message = z.object({
   id: z.string(),
@@ -186,27 +236,76 @@ export const LoginInput = z.object({
 });
 export type LoginInput = z.infer<typeof LoginInput>;
 
+/**
+ * How long one message may be.
+ *
+ * Named rather than repeated as a literal because the client checks it too:
+ * the composer refusing an over-long message with a count in the message is a
+ * far better answer than a 400 the sender has to guess at.
+ */
+export const MAX_MESSAGE_CHARS = 4000;
+
 export const SendMessageInput = z.object({
   channelId: z.string(),
   // Empty content is allowed when there are attachments: a pasted screenshot
   // with nothing typed is a normal thing to send.
-  content: z.string().max(4000),
+  content: z.string().max(MAX_MESSAGE_CHARS),
   clientNonce: z.string().max(64).optional(),
   attachmentIds: z.array(z.string()).max(10).optional(),
 });
 export type SendMessageInput = z.infer<typeof SendMessageInput>;
 
 export const EditMessageInput = z.object({
-  content: z.string().max(4000),
+  content: z.string().max(MAX_MESSAGE_CHARS),
 });
 export type EditMessageInput = z.infer<typeof EditMessageInput>;
 
 export const MessageHistoryQuery = z.object({
   /** Cursor: return messages older than this id. Omit for the newest page. */
   before: z.string().optional(),
+  /**
+   * Cursor the other way: messages newer than this id, oldest first. Used to
+   * fill in the gap after landing somewhere in the middle of a channel.
+   */
+  after: z.string().optional(),
+  /**
+   * A window centred on one message, which is what jumping to a search result
+   * or a pin needs.
+   *
+   * Paging backwards cannot express it: `before` walks from the newest message
+   * and would have to fetch everything in between to reach something said in
+   * March. This asks for that message with half a page either side of it.
+   *
+   * Takes precedence over `before` and `after` when more than one is sent,
+   * rather than erroring -- the three are cursors into the same list and a
+   * client that sends two has a bug worth surviving.
+   */
+  around: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 export type MessageHistoryQuery = z.infer<typeof MessageHistoryQuery>;
+
+/* ------------------------------------------------------------------ search */
+
+export const SearchQuery = z.object({
+  /** What was typed. Parsed by Postgres, not by us. */
+  q: z.string().trim().min(1).max(200),
+  /** Narrow to one guild; omitted, it searches everywhere the caller can read. */
+  guildId: z.string().optional(),
+  channelId: z.string().optional(),
+  authorId: z.string().optional(),
+  /** Cursor: results older than this message id. */
+  before: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(50).default(25),
+});
+export type SearchQuery = z.infer<typeof SearchQuery>;
+
+export const SearchPage = z.object({
+  /** Newest first -- the opposite of history, because a search is a list. */
+  results: z.array(Message),
+  nextCursor: z.string().nullable(),
+});
+export type SearchPage = z.infer<typeof SearchPage>;
 
 export const CreateInviteInput = z.object({
   maxUses: z.number().int().min(1).max(100).default(1),
@@ -386,6 +485,13 @@ export const MessagePage = z.object({
   messages: z.array(Message),
   /** Pass as `before` to fetch the next older page. Null when fully scrolled back. */
   nextCursor: z.string().nullable(),
+  /**
+   * Pass as `after` to fetch the next newer page. Null at the live end of the
+   * channel, which is where every page used to start -- so this is null for
+   * every request that does not use `around`, and an older client that never
+   * reads it is unaffected.
+   */
+  prevCursor: z.string().nullable(),
 });
 export type MessagePage = z.infer<typeof MessagePage>;
 
@@ -460,7 +566,16 @@ export type RetentionPolicy = z.infer<typeof RetentionPolicy>;
 export const RETENTION_DEFAULTS: RetentionPolicy = {
   attachmentsMaxAgeDays: null,
   messagesMaxAgeDays: null,
-  softDeletedMaxAgeDays: null,
+  /**
+   * Thirty days rather than null, alone among these.
+   *
+   * A tombstone is a message somebody already chose to delete; it is kept only
+   * so the deletion can be looked into, and a month is longer than anyone
+   * looks. The others destroy things people still expect to have, so they stay
+   * null. None of it happens until `enabled` is switched on -- this is what
+   * the switch does when it is, not something it does by itself.
+   */
+  softDeletedMaxAgeDays: 30,
   uploadsMaxTotalBytes: null,
   enabled: false,
 };
@@ -474,6 +589,21 @@ export const RetentionPreview = z.object({
 export type RetentionPreview = z.infer<typeof RetentionPreview>;
 
 export const PURGE_KINDS = [
+  /**
+   * The one the console offers, and the only one somebody has to understand:
+   * everything that was already deleted, actually removed.
+   *
+   * Deleting a message hides it and keeps the row, so the images stay on the
+   * disk and nothing is freed — which is right, because it is what lets a
+   * deletion be looked into afterwards, and wrong as a permanent state. This
+   * finishes the job: the rows go, their files go, and the space is handed
+   * back to the operating system rather than left inside the tables.
+   *
+   * `tombstones` below does the same selection with an age filter. This one
+   * takes no age on purpose: "remove what I deleted" is not a question about
+   * dates, and an operator who wants one has the retention policy.
+   */
+  'deleted',
   'orphaned-files',
   'orphaned-rows',
   'tombstones',

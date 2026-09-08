@@ -8,22 +8,73 @@ import { imageSize } from './image-size';
 /**
  * Files on local disk, named by id.
  *
- * Only images are accepted. That is partly the feature people asked for
- * (pasting a screenshot) and partly a decision: this server speaks plain HTTP
- * on a box with ports open, and a general-purpose file host that anyone with
- * an invite can write to is a bigger thing to own than a screenshot pipe.
+ * Anything may be uploaded. Only pictures are kept: everything else is given a
+ * deadline at upload time, because the point is handing a file to somebody,
+ * not becoming the place that file lives.
+ *
+ * Two rules make accepting arbitrary bytes safe on a server that speaks plain
+ * HTTP on a box with ports open, and neither may be relaxed without thinking
+ * about the other:
+ *
+ *  1. Nothing is stored under an extension this file does not choose. A
+ *     picture keeps a real one; everything else is `.bin`. `resolveStored`
+ *     below checks that extension before opening or deleting anything, and
+ *     that check is what stops a bad row turning the download route into a
+ *     general file server. It stays a closed set.
+ *  2. Nothing but a picture is ever served in a form a browser would render.
+ *     See the attachments controller: an uploaded page handed back inline
+ *     would be script running against this API's own origin.
  */
 
-export const ALLOWED_TYPES: Record<string, string> = {
+/** Pictures: kept indefinitely, drawn in the message list, real extension. */
+export const IMAGE_TYPES: Record<string, string> = {
   'image/png': '.png',
   'image/jpeg': '.jpg',
   'image/gif': '.gif',
   'image/webp': '.webp',
 };
 
+/**
+ * Avatars are still pictures only, and this is the map that says so.
+ *
+ * Kept under the old name because the profile routes gate on it and mean
+ * exactly this: the crop editor produces a PNG, and an avatar is drawn inline
+ * for every signed-in member, which is the one thing rule 2 above forbids for
+ * anything else.
+ */
+export const ALLOWED_TYPES = IMAGE_TYPES;
+
+/** What everything else is stored as, whatever it claims to be. */
+const OPAQUE_EXT = '.bin';
+
+/** Every extension this server will open or delete. A closed set, by design. */
+const STORED_EXTENSIONS = new Set([...Object.values(IMAGE_TYPES), OPAQUE_EXT]);
+
 export const UPLOAD_DIR = path.resolve(
   process.env.UPLOAD_DIR ?? path.join(process.cwd(), '..', '..', 'data', 'uploads'),
 );
+
+/**
+ * The prefix `user.image` holds for an avatar this server stores.
+ *
+ * Here rather than beside the route that serves them, because it is the only
+ * way anything outside the profile controller can tell which files in
+ * UPLOAD_DIR are avatars — and the file sweeper has to know. It got this
+ * wrong once: counting only Attachment rows made every avatar look like a
+ * file nothing pointed at, which is a stray, which is something the sweeper
+ * deletes.
+ */
+export const AVATAR_PATH = '/api/avatars/';
+
+/** The stored file name inside a `user.image`, or null if it is not one of ours. */
+export function avatarStoredName(image: string | null): string | null {
+  if (!image || !image.startsWith(AVATAR_PATH)) return null;
+  const name = image.slice(AVATAR_PATH.length);
+  // The column has held a plain URL in the past — Better Auth writes one for
+  // an OAuth account — so a value that is not one of ours must not reach the
+  // file layer.
+  return /^[A-Za-z0-9_-]+\.[a-z]{3,4}$/.test(name) ? name : null;
+}
 
 export const maxUploadBytes = () =>
   Number(process.env.MAX_UPLOAD_BYTES ?? 26214400);
@@ -36,16 +87,32 @@ export interface StoredFile {
   size: number;
   width: number | null;
   height: number | null;
+  /** True for the picture types. Decides both how it is served and whether it is kept. */
+  isImage: boolean;
 }
 
-/** Write one uploaded buffer to disk and describe it. */
-export async function store(file: {
-  originalname: string;
-  mimetype: string;
-  buffer: Buffer;
-}): Promise<StoredFile> {
-  const ext = ALLOWED_TYPES[file.mimetype];
-  if (!ext) throw new Error(`Unsupported file type: ${file.mimetype}`);
+/**
+ * Write one uploaded buffer to disk and describe it.
+ *
+ * `imagesOnly` is what the avatar route passes: an avatar is drawn inline for
+ * every signed-in member, so it is the one upload path that cannot accept
+ * arbitrary bytes.
+ */
+export async function store(
+  file: { originalname: string; mimetype: string; buffer: Buffer },
+  opts: { imagesOnly?: boolean } = {},
+): Promise<StoredFile> {
+  const imageExt = IMAGE_TYPES[file.mimetype];
+  if (opts.imagesOnly && !imageExt) {
+    throw new Error(`Unsupported file type: ${file.mimetype}`);
+  }
+
+  // A picture keeps a real extension because something may legitimately want
+  // to look at it as one. Everything else is stored opaque -- the name on
+  // disk says nothing about what is inside, which is the point: the row
+  // carries the real name and type, and the file layer keeps a closed set of
+  // extensions it is willing to touch.
+  const ext = imageExt ?? OPAQUE_EXT;
 
   await mkdir(UPLOAD_DIR, { recursive: true });
 
@@ -53,19 +120,61 @@ export async function store(file: {
   const storedName = id + ext;
   await writeFile(path.join(UPLOAD_DIR, storedName), file.buffer);
 
-  const dims = imageSize(file.buffer);
+  // Only meaningful for pictures, and it reads the header rather than
+  // trusting the type -- so something claiming to be a PNG and not being one
+  // simply has no dimensions rather than breaking the list.
+  const dims = imageExt ? imageSize(file.buffer) : null;
 
   return {
     id,
     storedName,
-    // The original name is only ever shown or used as a download filename, so
-    // strip any path from it: it is attacker-controlled text.
-    fileName: path.basename(file.originalname || 'image' + ext).slice(0, 200),
+    // The original name is only ever shown, or offered as a download
+    // filename, so strip any path from it: it is attacker-controlled text.
+    // Separators of both kinds, because a name typed on one platform arrives
+    // on the other and `path.basename` on Linux keeps backslashes.
+    fileName: sanitiseName(file.originalname) || 'file' + ext,
     contentType: file.mimetype,
     size: file.buffer.length,
     width: dims?.width ?? null,
     height: dims?.height ?? null,
+    isImage: Boolean(imageExt),
   };
+}
+
+/**
+ * An uploaded name reduced to something safe to show and to save as.
+ *
+ * Never used to open anything -- the file on disk is named by id -- but it is
+ * handed to the client as a download filename, so it must not carry a path,
+ * and it must not carry the control characters that would let it lie about
+ * its own extension in a list.
+ */
+function sanitiseName(name: string): string {
+  // Separators of both kinds. A name typed on Windows arrives on a Linux
+  // server, where `path.basename` keeps backslashes and would hand back the
+  // whole "C:\Users\me\thing.exe" as the filename.
+  const base = path.basename(String(name ?? '').replace(/\\/g, '/'));
+
+  // Written as a scan rather than one regular expression on purpose: the
+  // interesting characters here are invisible ones, and a character class
+  // full of literal control codes is unreadable and easy to get wrong.
+  let out = '';
+  for (const ch of base) {
+    const code = ch.codePointAt(0)!;
+    // Control characters, including DEL.
+    if (code < 0x20 || code === 0x7f) continue;
+    // What Windows refuses in a filename, so a save dialog cannot be handed
+    // something it will reject.
+    if ('<>:"/\\|?*'.includes(ch)) continue;
+    // The bidirectional overrides. One of these is how a file genuinely
+    // named "annexe<RLO>txt.exe" is drawn in a list as "annexe.exe.txt" --
+    // the reader sees a text file and downloads a program.
+    if (code >= 0x202a && code <= 0x202e) continue;
+    if (code >= 0x2066 && code <= 0x2069) continue;
+    out += ch;
+  }
+
+  return out.trim().slice(0, 200);
 }
 
 /**
@@ -81,7 +190,7 @@ function resolveStored(storedName: string): string {
   if (!full.startsWith(UPLOAD_DIR + path.sep)) {
     throw new Error('Refusing to touch a file outside the upload directory.');
   }
-  if (!Object.values(ALLOWED_TYPES).includes(extname(full))) {
+  if (!STORED_EXTENSIONS.has(extname(full))) {
     throw new Error('Refusing to touch an unexpected file type.');
   }
   return full;
