@@ -25,15 +25,29 @@ import { AppModule } from './app.module';
 import { AUTH, type Auth } from './auth/auth.factory';
 import { maxUploadBytes } from './attachments/storage';
 import { describeBytes } from './common/upload-limit.filter';
+import { allowedOrigins, isOriginAllowed } from './common/cors';
+import { FileLogger, LOG_DIR } from './common/file-logger';
+import { loginThrottle } from './auth/login-throttle';
 
 async function bootstrap() {
   // bodyParser is off so Better Auth's handler can read the raw request; our
   // own JSON parser is added immediately after it, below.
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
+    // Same console output as before, plus a file that outlives the window.
+    logger: new FileLogger(),
   });
 
-  app.enableCors({ origin: true, credentials: true });
+  // An allowlist, not a mirror. See common/cors.ts for why `null` is on it
+  // and why a request with no Origin at all is let through.
+  const origins = allowedOrigins();
+  app.enableCors({
+    origin: (origin, callback) =>
+      isOriginAllowed(origin, origins)
+        ? callback(null, true)
+        : callback(null, false),
+    credentials: true,
+  });
 
   // Behind a TLS-terminating reverse proxy on the same box, every request
   // arrives from 127.0.0.1. Without this, ThrottlerGuard sees one client and
@@ -48,6 +62,20 @@ async function bootstrap() {
 
   const auth = app.get<Auth>(AUTH);
   const http = app.getHttpAdapter().getInstance();
+
+  // Ahead of both the Better Auth mount below and Nest's router, which is the
+  // only position from which it covers both. `ThrottlerGuard` cannot: it is an
+  // APP_GUARD, and the Better Auth handler never enters Nest's pipeline. See
+  // auth/login-throttle.ts.
+  const throttleLog = new Logger('login');
+  http.use(
+    loginThrottle({
+      limit: Number(process.env.LOGIN_RATE_LIMIT ?? 10),
+      windowMs: Number(process.env.LOGIN_RATE_WINDOW_MS ?? 5 * 60_000),
+      onBlocked: (key, path) =>
+        throttleLog.warn(`rate limited ${key} on ${path}`),
+    }),
+  );
 
   // Better Auth owns everything under /api/auth (sign-in, sign-out, session).
   // Express 5 requires a named wildcard.
@@ -82,8 +110,10 @@ async function bootstrap() {
   // is genuinely too big. One line in the log answers it before it is asked.
   new Logger('bootstrap').log(
     `listening on http://0.0.0.0:${port} ` +
-      `(attachment limit ${describeBytes(maxUploadBytes())})`,
+      `(attachment limit ${describeBytes(maxUploadBytes())}, ` +
+      `cors: ${origins.join(', ')})`,
   );
+  new Logger('bootstrap').log(`logging to ${LOG_DIR}`);
 }
 
 void bootstrap();

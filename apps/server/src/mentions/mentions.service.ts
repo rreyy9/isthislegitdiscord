@@ -29,7 +29,23 @@ export class MentionsService {
    * draw them in and the order a "you and two others" summary would read.
    */
   async resolve(channelId: string, content: string): Promise<string[]> {
-    const claimed = parseMentionIds(content);
+    return this.membersAmong(channelId, parseMentionIds(content));
+  }
+
+  /**
+   * Of these ids, the ones that belong to the channel's guild, in the order
+   * they were given.
+   *
+   * Separate from `resolve` because a reply pings somebody whose id came from
+   * a message row rather than from the text, and that id has to be checked the
+   * same way: the author of a message from March may well have left since, and
+   * a ping stored for them would sit in the table waiting to go off if they
+   * ever came back.
+   */
+  private async membersAmong(
+    channelId: string,
+    claimed: string[],
+  ): Promise<string[]> {
     if (claimed.length === 0) return [];
 
     const channel = await this.prisma.channel.findUnique({
@@ -57,15 +73,34 @@ export class MentionsService {
    * `pinged` is everyone the message tags; `newlyPinged` is only those who
    * were not tagged by it a moment ago, so fixing a typo in a message does not
    * ping everybody in it a second time.
+   *
+   * `alsoPing` and `keepPinged` are how a reply gets in here. Replying to
+   * somebody pings them, and that ping is the same thing as a tag in every way
+   * that matters afterwards -- the badge, the tint, the toast and the clearing
+   * on read are all one table -- so it is a row in that table rather than a
+   * second mechanism doing the same job slightly differently.
+   *
+   * They are two options rather than one because the two callers want opposite
+   * things. Sending a reply asks for the row (`alsoPing`). Editing one must
+   * not: the ping either happened or was switched off at the time, and neither
+   * is a decision an edit gets to revisit -- so it says only that the row, if
+   * there is one, is not to be swept away by a re-resolve of text that never
+   * named that person (`keepPinged`).
    */
   async sync(
     messageId: string,
     channelId: string,
     content: string,
     authorId: string,
+    opts: { alsoPing?: string[]; keepPinged?: string[] } = {},
   ): Promise<{ pinged: string[]; newlyPinged: string[] }> {
-    // Your own name in your own message is not something you need telling.
-    const pingable = (await this.resolve(channelId, content)).filter(
+    // Your own name in your own message is not something you need telling --
+    // and neither is your own reply to yourself, which is why `alsoPing` goes
+    // through the same filter rather than around it.
+    const claimed = [
+      ...new Set([...parseMentionIds(content), ...(opts.alsoPing ?? [])]),
+    ];
+    const pingable = (await this.membersAmong(channelId, claimed)).filter(
       (id) => id !== authorId,
     );
 
@@ -79,7 +114,10 @@ export class MentionsService {
     );
 
     const wanted = new Set(pingable);
-    const gone = [...before].filter((id) => !wanted.has(id));
+    // Kept even though the text does not name them: this is the reply ping,
+    // and an edit of the words is not a decision about who was answered.
+    const keep = new Set(opts.keepPinged ?? []);
+    const gone = [...before].filter((id) => !wanted.has(id) && !keep.has(id));
 
     if (gone.length > 0) {
       await this.prisma.messageMention.deleteMany({
@@ -101,7 +139,13 @@ export class MentionsService {
       });
     }
 
-    return { pinged: pingable, newlyPinged: added };
+    // Everything the message now pings, which is not the same list as the one
+    // resolved from the text: a kept reply ping is a row this message has and
+    // the words do not explain. It has to be in here, because this is what
+    // becomes `Message.mentions` and that is what tints the message for the
+    // person it was addressed to -- an edit must not quietly untint it.
+    const kept = [...before].filter((id) => keep.has(id) && !wanted.has(id));
+    return { pinged: [...pingable, ...kept], newlyPinged: added };
   }
 
   /**

@@ -44,6 +44,31 @@ rtc:
   # LocalSubnet -- infra/allow-lan.ps1 -Internet does the second half.
   # use_external_ip: true
 
+  # Which of this box's addresses may be advertised as ICE candidates.
+  #
+  # use_external_ip decides what the *public* candidate is. It does not stop
+  # LiveKit also offering every local interface it can find, and this box has
+  # several -- VirtualBox's host-only network and the Hyper-V default switch
+  # among them, neither of which any remote peer can reach.
+  #
+  # Offering them is usually just waste: ICE tries them, they fail, and the
+  # candidate that works wins a second later. It stops being harmless when the
+  # person at the other end sits on a network using the same private range,
+  # because then the address *is* reachable there and points at their own
+  # machine. 192.168.56.x is VirtualBox's default on every machine that has it,
+  # so this lands on precisely the friend who also runs VMs, and 172.16/12 is
+  # where hotel and office wifi lives -- the two places you cannot debug it.
+  #
+  # Excludes rather than an includes allowlist: node_ip already names the
+  # address that matters, and an allowlist would need editing every time a DHCP
+  # lease moved. If your own LAN sits inside one of these ranges -- some
+  # routers hand out 172.20.x -- delete that line, or node_ip goes with it.
+  ips:
+    excludes:
+      - 192.168.56.0/24   # VirtualBox host-only
+      - 172.16.0.0/12     # Hyper-V default switch, WSL, Docker
+      - 169.254.0.0/16    # link-local: an interface that never got a lease
+
 # The API key this server accepts tokens signed with. Must match
 # LIVEKIT_API_KEY / LIVEKIT_API_SECRET in apps/server/.env — the chat server
 # signs join tokens with it and LiveKit verifies them here. Mismatched, voice

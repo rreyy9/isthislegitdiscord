@@ -32,7 +32,19 @@ export interface SocketEvents {
    * the point — it has to arrive for a channel this client is not looking at,
    * and `onMessage` only ever fires for the one it is.
    */
-  onMention: (p: { message: MessageDto; channelName: string }) => void;
+  onMention: (p: {
+    message: MessageDto;
+    channelName: string;
+    /**
+     * Why: somebody said your name, or somebody answered you. The same row in
+     * the same table reaches you either way, and the only difference is the
+     * sentence on the toast -- which is what this field is for.
+     *
+     * Absent from a server older than replies, where the only thing it could
+     * have meant is a tag.
+     */
+    kind?: 'mention' | 'reply';
+  }) => void;
   /**
    * A message in the open channel was pinned or unpinned. Per channel rather
    * than per user: a pin only changes what is drawn for the channel on screen,

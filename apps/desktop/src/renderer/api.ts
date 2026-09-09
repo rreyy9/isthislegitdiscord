@@ -185,6 +185,45 @@ export interface AttachmentDto {
    */
   inline?: boolean;
 }
+/**
+ * A message quoted by another one: what a reply shows above itself, and what a
+ * forward carries into the channel it was sent to.
+ *
+ * One type for both, because they are one idea -- a pointer at another
+ * message, one level deep and no deeper. It carries no ref of its own, so a
+ * chain of replies cannot nest here however long it is in the channel.
+ *
+ * Optional on `MessageDto` for the reason `mentions` and `pinnedAt` are: a
+ * server older than the feature sends no such field, and this client has to
+ * draw the message anyway. Read it with `?.`.
+ */
+export interface MessageRefDto {
+  id: string;
+  /** Where the original lives. A forward's may be a different channel. */
+  channelId: string;
+  author: { id: string; username: string; displayName: string | null; image: string | null };
+  /** Empty when `deleted`: the server does not hand back removed content. */
+  content: string;
+  createdAt: string;
+  editedAt: string | null;
+  attachments: AttachmentDto[];
+  /** The original was deleted. The pointer stays, the quote becomes a line. */
+  deleted: boolean;
+}
+
+/** What a send may say about other messages: an answer, or a forward. */
+export interface SendExtrasDto {
+  /** The message being answered. Must be in the channel being sent to. */
+  replyToId?: string;
+  /**
+   * Whether the reply tags the person being answered. Omitted means yes, which
+   * is what replying is for; false is the "@ off" switch on the reply bar.
+   */
+  replyPing?: boolean;
+  /** A message from elsewhere in this guild, carried into this channel. */
+  forwardedFromId?: string;
+}
+
 export interface MessageDto {
   id: string;
   channelId: string;
@@ -210,6 +249,14 @@ export interface MessageDto {
    */
   pinnedAt?: string | null;
   attachments: AttachmentDto[];
+  /**
+   * The message this one answers, or null. Always in the same channel.
+   * Undefined from a server older than replies, which reads as "not a reply"
+   * and is the only thing such a server could have meant.
+   */
+  replyTo?: MessageRefDto | null;
+  /** The message this one carries from elsewhere in the guild, or null. */
+  forwardedFrom?: MessageRefDto | null;
 }
 export interface MessagePageDto {
   messages: MessageDto[];
@@ -396,10 +443,18 @@ export const api = {
     qs.set('limit', String(params.limit ?? 25));
     return request<SearchPageDto>(`/api/search?${qs}`);
   },
-  send: (channelId: string, content: string, clientNonce: string) =>
+  send: (
+    channelId: string,
+    content: string,
+    clientNonce: string,
+    extra: SendExtrasDto = {},
+  ) =>
     request<MessageDto>(`/api/channels/${channelId}/messages`, {
       method: 'POST',
-      body: { content, clientNonce },
+      // Spread rather than listed, so a field added to `SendExtrasDto` needs
+      // no edit here. Absent keys are dropped by JSON.stringify, which is what
+      // keeps an ordinary message an ordinary message on the wire.
+      body: { content, clientNonce, ...extra },
     }),
   /**
    * Send with files. Multipart rather than the JSON route, because upload and
@@ -419,11 +474,20 @@ export const api = {
     content: string,
     clientNonce: string,
     files: File[],
+    extra: SendExtrasDto = {},
     onProgress?: (fraction: number) => void,
   ): Promise<MessageDto> => {
     const form = new FormData();
     form.append('content', content);
     form.append('clientNonce', clientNonce);
+    // Every multipart field is a string, including this one. The server's
+    // schema accepts "true"/"false" for exactly this reason -- a reply with a
+    // screenshot on it comes this way rather than as JSON.
+    if (extra.replyToId) form.append('replyToId', extra.replyToId);
+    if (extra.replyPing === false) form.append('replyPing', 'false');
+    if (extra.forwardedFromId) {
+      form.append('forwardedFromId', extra.forwardedFromId);
+    }
     for (const f of files) form.append('files', f, f.name);
 
     const url = `${serverUrl}/api/channels/${channelId}/messages`;

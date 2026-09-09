@@ -532,25 +532,35 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
   /* --------------------------------------------------------- mic policy */
 
   /**
-   * Should a microphone track exist at all? Exactly the old rule.
+   * Should a microphone track exist at all?
    *
    * Read as a function rather than computed once, because opening the device
    * now spans a settle window and every one of these can change during it.
+   *
+   * Deafen is a term here in its own right, not something inherited from the
+   * mute it also sets. It used to be the latter, and that was the whole bug:
+   * anything that cleared `muted` without knowing about deafen -- the mute
+   * button, which reads "Unmute" precisely because deafening muted you --
+   * put the microphone back on the air while every incoming track was still
+   * silenced. Stated here it holds for push-to-talk and the gate alike,
+   * because both of them come through this function and `liveNow`.
    */
   const wantsTrackNow = useCallback(
     () =>
       !serverMutedRef.current &&
       !mutedRef.current &&
+      !deafenedRef.current &&
       (!settingsRef.current.pushToTalk || talkingRef.current),
     [],
   );
 
-  /** Should that track be transmitting this instant? Same reason. */
+  /** Should that track be transmitting this instant? Same reason, same rules. */
   const liveNow = useCallback(() => {
     const s = settingsRef.current;
     return (
       !serverMutedRef.current &&
       !mutedRef.current &&
+      !deafenedRef.current &&
       (s.pushToTalk
         ? talkingRef.current
         : s.gateMode === 'off' || gateOpenRef.current)
@@ -762,8 +772,14 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
         // timer, and skipping readings while muted would leave it stale. Being
         // loud while muted is still not talking, so the two combine after.
         const loud = localSpeechRef.current.update(db);
+        // The same rule the microphone itself is under, and it has to stay
+        // that way: this decides whether your own portrait lights up, and a
+        // portrait that lights while nothing is going out is the client
+        // telling you that you are being heard when you are not.
         const live =
+          !serverMutedRef.current &&
           !mutedRef.current &&
+          !deafenedRef.current &&
           micSettleRef.current === 0 &&
           (s.pushToTalk ? talkingRef.current : s.gateMode === 'off' || open);
         setSpeaking(roomRef.current?.localParticipant.identity, loud && live);
@@ -1116,20 +1132,46 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
 
   /* ------------------------------------------------------------ controls */
 
+  /**
+   * Mute and unmute, and the one place the two states are tied together.
+   *
+   * Unmuting while deafened un-deafens. Muting is left alone -- being able to
+   * go quiet without giving up hearing everyone is the point of having two
+   * buttons. Asking to talk while deaf is the case with no coherent answer,
+   * and this is the one people expect: the only reason the button says
+   * "Unmute" in the first place is that deafening muted you, so the click
+   * that undoes the mute undoes what caused it.
+   */
   const setMuted = useCallback(
     async (next: boolean) => {
+      const undeafening = !next && deafenedRef.current;
       mutedRef.current = next;
-      setState((s) => ({ ...s, muted: next }));
+      if (undeafening) deafenedRef.current = false;
+      setState((s) => ({
+        ...s,
+        muted: next,
+        deafened: undeafening ? false : s.deafened,
+      }));
+      if (undeafening) {
+        // Everything setDeafened(false) would have done, because this is that
+        // -- the volumes have to come back up and the channel has to be told.
+        applyVolumes();
+        void publishDeafened(roomRef.current);
+        sync();
+      }
       await applyMic();
     },
-    [applyMic],
+    [applyMic, applyVolumes, publishDeafened, sync],
   );
 
   const setDeafened = useCallback(
     async (next: boolean) => {
       deafenedRef.current = next;
       // Deafening implies muting; un-deafening does not un-mute, which matches
-      // what people expect from every other client they have used.
+      // what people expect from every other client they have used. The mute is
+      // for what happens after: it is what leaves somebody who un-deafens able
+      // to hear and still silent. It is no longer what keeps them silent while
+      // deafened -- the mic policy reads `deafened` itself now.
       if (next) {
         mutedRef.current = true;
         setState((s) => ({ ...s, deafened: true, muted: true }));

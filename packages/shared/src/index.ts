@@ -147,6 +147,46 @@ export const isInlineVideoType = (contentType: string): boolean =>
 export const isKeptType = (contentType: string): boolean =>
   (INLINE_IMAGE_TYPES as readonly string[]).includes(contentType);
 
+/**
+ * One message pointing at another: what a reply quotes above itself, and what
+ * a forward carries into the channel it was sent to.
+ *
+ * One type for both, deliberately. They are the same thing — a bounded,
+ * one-level-deep pointer to another message — and writing two would be
+ * inventing a distinction that is not there and then maintaining it.
+ *
+ * It is `Message` minus the fields that would make it recursive, so a chain of
+ * replies cannot nest: a ref never carries a ref. That is a property of the
+ * shape rather than of a depth check somewhere, which is the point.
+ *
+ * Derived on every read from a join, never stored. A copy of the text taken at
+ * send time would say something the original no longer says the moment it is
+ * edited, and would keep a name its author has since changed — the same reason
+ * tags travel as ids. The parent row is looked up by primary key, so the join
+ * costs nothing worth denormalising for.
+ */
+export const MessageRef = z.object({
+  id: z.string(),
+  /**
+   * Where the original lives. A reply's is always this channel; a forward's is
+   * wherever it was taken from, and it is what makes the card clickable.
+   */
+  channelId: z.string(),
+  author: PublicUser,
+  /** Empty when `deleted` — a removed message must not come back out here. */
+  content: z.string(),
+  createdAt: z.string(),
+  editedAt: z.string().nullable(),
+  attachments: z.array(Attachment),
+  /**
+   * The original was deleted. The pointer survives, because a reply with its
+   * quote silently removed reads as an answer to nothing; what goes is the
+   * content, which the client replaces with a line saying so.
+   */
+  deleted: z.boolean(),
+});
+export type MessageRef = z.infer<typeof MessageRef>;
+
 export const Message = z.object({
   id: z.string(),
   channelId: z.string(),
@@ -175,6 +215,21 @@ export const Message = z.object({
    * socket echo, the pin list itself) then carries its pin state for free.
    */
   pinnedAt: z.string().nullable(),
+  /**
+   * The message this one answers, or null. Always in the same channel: a reply
+   * is part of a conversation, and one that pointed somewhere else would be a
+   * quote wearing the wrong word.
+   */
+  replyTo: MessageRef.nullable(),
+  /**
+   * The message this one carries into this channel from elsewhere, or null.
+   *
+   * A forward is a pointer, not a copy: the card draws the original's author,
+   * text and files, so nobody's words can be re-posted under somebody else's
+   * name. Forwarding a forward follows the chain at the moment it is sent, so
+   * this is always the original and never another forward.
+   */
+  forwardedFrom: MessageRef.nullable(),
 });
 export type Message = z.infer<typeof Message>;
 
@@ -296,6 +351,43 @@ export const SendMessageInput = z.object({
   content: z.string().max(MAX_MESSAGE_CHARS),
   clientNonce: z.string().max(64).optional(),
   attachmentIds: z.array(z.string()).max(10).optional(),
+  /**
+   * The message being answered. Must be in the channel being sent to; the
+   * server checks rather than trusts, since this arrives from a client.
+   */
+  replyToId: z.string().optional(),
+  /**
+   * Whether the reply tags whoever wrote the message it answers.
+   *
+   * Defaults to true, because that is what replying is for and a reply nobody
+   * hears about is a message that happens to sit under another one. The switch
+   * exists for the second and third message of a back-and-forth, where the
+   * other person is already reading.
+   *
+   * Not stored anywhere: it decides whether one `MessageMention` row is
+   * written, and that row is the record. An edit re-resolves the text and
+   * leaves the row alone either way, so this cannot be changed afterwards --
+   * which is right, since the ping has either already happened or already not.
+   *
+   * Preprocessed rather than a plain boolean because a reply with a file on it
+   * is sent as multipart, and every field of a multipart body is a string. The
+   * two spellings accepted here are what a `FormData` append of a boolean
+   * produces; anything else falls through to the boolean check and is refused.
+   */
+  replyPing: z
+    .preprocess(
+      (v) => (v === 'true' ? true : v === 'false' ? false : v),
+      z.boolean(),
+    )
+    .optional(),
+  /**
+   * A message to carry into this channel from elsewhere in the same guild.
+   *
+   * Sent through the ordinary send route rather than one of its own, because
+   * that is exactly what a forward is: a message in the target channel. It
+   * gets the same broadcast, the same optimistic echo and the same nonce.
+   */
+  forwardedFromId: z.string().optional(),
 });
 export type SendMessageInput = z.infer<typeof SendMessageInput>;
 
@@ -816,6 +908,16 @@ export interface ServerToClientEvents {
     message: Message;
     /** For the notification's title; the client may not know this channel. */
     channelName: string;
+    /**
+     * Why they are being told. A reply is a tag by another route -- same row
+     * in the same table, same badge, same sound -- and the only thing that
+     * differs is the sentence on the toast, which is what this is for.
+     *
+     * Optional, because a server older than replies sends no such field and a
+     * client reading it with `??` gets the only thing that server could have
+     * meant.
+     */
+    kind?: 'mention' | 'reply';
   }) => void;
   /**
    * A message in this channel was pinned or unpinned.

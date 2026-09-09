@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
   setToken,
-  type BanDto,
   type ChannelDto,
   type GuildDto,
   type MemberDto,
   type MessageDto,
   type Me,
   type PublicUserDto,
+  type SendExtrasDto,
 } from '../api';
 import { MessageContent } from './MessageContent';
 import {
@@ -45,152 +45,31 @@ import {
 import { Avatar } from './Avatar';
 import { useImageActions } from './ImageViewer';
 import { NetworkButton } from './NetworkStats';
+import {
+  MAX_MESSAGE_CHARS,
+  dayLabel,
+  describeBytes,
+  isForever,
+  lastSeenLabel,
+  muteLabel,
+  quoteLine,
+  sameDay,
+  stamp,
+  timeOf,
+} from './chat-format';
+import type { Confirmation, Msg, Staged, Status } from './chat-types';
+import { PinsPanel, SearchPanel } from './ChatPanels';
+import {
+  BansModal,
+  ChannelModal,
+  ConfirmModal,
+  ForwardModal,
+} from './ChatModals';
+import { ForwardCard, ReplyStrip, requoted, toRef } from './MessageRefs';
 
-type Status = 'connected' | 'disconnected' | 'connecting';
 
-/**
- * A message plus client-only fields for optimistic rendering: `pending` while
- * the server has not confirmed it, `failed` with the reason if it never got
- * there, and `previews` so a pasted image is visible immediately rather than
- * after the round trip.
- */
-type Msg = MessageDto & {
-  pending?: boolean;
-  failed?: string;
-  previews?: string[];
-};
 
-/**
- * The server's cap on one message, from `SendMessageInput` in
- * `@isthislegit/shared`.
- *
- * Copied rather than imported for the reason given in mention-utils.ts: the
- * renderer is an ESM bundle and nothing in that CommonJS package is imported
- * at runtime. The server is still the side that enforces it -- this is only so
- * the composer can say which limit was passed and by how much, instead of
- * sending something that comes back a bare 400.
- */
-const MAX_MESSAGE_CHARS = 4000;
 
-/**
- * Bytes as somebody would say them, matching the wording the server uses when
- * it refuses an upload -- the two numbers are compared by whoever reads them,
- * so they have to be written the same way.
- */
-function describeBytes(bytes: number): string {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const rounded =
-    value >= 100 || Number.isInteger(value) ? Math.round(value) : Number(value.toFixed(1));
-  return `${rounded} ${units[unit]}`;
-}
-
-/**
- * A file waiting in the composer.
- *
- * `ready` is the whole reason this is an object rather than a `File`. A file
- * picked from a network share or a drive that has since been unplugged looks
- * perfectly fine until something tries to read it, and the something used to
- * be the upload itself -- so the failure arrived after the message had already
- * left the box, as a send that could not be retried into working. Checking
- * first costs a moment and turns that into a chip that says so while it can
- * still be removed.
- */
-interface Staged {
-  /** Stable across removals, unlike the index the list used to be keyed by. */
-  id: string;
-  file: File;
-  preview: string | null;
-  ready: boolean;
-  /** Why this file cannot be sent, or null. Blocks the send while it is set. */
-  problem: string | null;
-}
-
-function timeOf(iso: string) {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-/** Today and Yesterday by name; anything older gets its date. */
-function dayLabel(iso: string) {
-  const d = new Date(iso);
-  const today = new Date();
-  const midnight = (x: Date) =>
-    new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const days = Math.round((midnight(today) - midnight(d)) / 86400000);
-  if (days === 0) return 'Today';
-  if (days === 1) return 'Yesterday';
-  return d.toLocaleDateString([], {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    ...(d.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
-  });
-}
-const sameDay = (a: string, b: string) =>
-  new Date(a).toDateString() === new Date(b).toDateString();
-/**
- * "Today at 14:32", "12 March at 09:10". The pin board is read out of order
- * by definition — the whole list is old messages — so every row there has to
- * carry its own date rather than lean on a separator above it.
- */
-const stamp = (iso: string) => `${dayLabel(iso)} at ${timeOf(iso)}`;
-
-/**
- * An indefinite mute is stored as a date in the year 9999, so that every check
- * is one comparison. Nobody wants to read that date, hence this.
- */
-const isForever = (iso: string) => new Date(iso).getFullYear() > 9000;
-
-/**
- * What a mute says. "Microphone", explicitly, every time it is written: the
- * word "muted" on its own reads as "silenced everywhere", which is what this
- * used to do and no longer does.
- */
-function muteLabel(iso: string) {
-  if (isForever(iso)) return 'Microphone muted indefinitely';
-  const d = new Date(iso);
-  const sameDayAsNow = d.toDateString() === new Date().toDateString();
-  return `Microphone muted until ${
-    sameDayAsNow
-      ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : d.toLocaleString([], {
-          day: 'numeric',
-          month: 'short',
-          hour: '2-digit',
-          minute: '2-digit',
-        })
-  }`;
-}
-
-/**
- * How long ago somebody was last here, in the smallest number of characters
- * that answers the question.
- *
- * Coarse on purpose, and coarser the further back it goes: under a name in a
- * narrow column, "2h" is the whole of what anyone wants to know, and the exact
- * minute of an absence three days old is noise. Anything past a week stops
- * being a duration and becomes a date, because "23d" is not something people
- * read as a length of time.
- *
- * `now` is passed in rather than read here so that every row in one render
- * measures from the same instant, and so the caller controls how often the
- * whole column re-renders.
- */
-function lastSeenLabel(iso: string, now: number): string {
-  const seconds = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString([], { day: 'numeric', month: 'short' });
-}
 
 /**
  * A clock that ticks once a minute.
@@ -223,13 +102,6 @@ const MUTE_OPTIONS: { label: string; minutes: number | null }[] = [
   { label: 'Indefinitely', minutes: null },
 ];
 
-/** What a confirm modal needs to know. Kick, ban and delete all use it. */
-interface Confirmation {
-  title: string;
-  body: string;
-  confirmLabel: string;
-  run: () => Promise<void>;
-}
 
 export function Chat({
   me,
@@ -324,6 +196,27 @@ export function Chat({
   const [jumpNonce, setJumpNonce] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   /**
+   * The message the composer is answering, if any.
+   *
+   * The whole message rather than its id, because the bar above the composer
+   * has to draw who wrote it and what it said, and that message may be far
+   * enough back that it is no longer in `messages` by the time the reply is
+   * sent -- the list is finite and somebody can scroll while composing.
+   */
+  const [replyTo, setReplyTo] = useState<MessageDto | null>(null);
+  /**
+   * Whether this reply tags the person being answered. On by default, because
+   * that is what replying is for; the switch is for the third message of a
+   * back-and-forth, where they are plainly already reading.
+   *
+   * Reset with the reply rather than remembered: it is a decision about one
+   * message, and a silent default that persisted from an hour ago would be a
+   * setting nobody knew they had changed.
+   */
+  const [replyPing, setReplyPing] = useState(true);
+  /** The message the forward dialog is open for, if it is open. */
+  const [forwarding, setForwarding] = useState<MessageDto | null>(null);
+  /**
    * Files pasted, dropped or picked, held locally until the message is sent.
    * `preview` is an object URL for a picture and null for everything else --
    * there is nothing to show for a zip, and a made-up thumbnail helps nobody.
@@ -363,7 +256,12 @@ export function Chat({
    * whatever was typed with it. Dropped when the message lands, or when the
    * sender throws it away.
    */
-  const outboxRef = useRef(new Map<string, { row: Msg; files: File[] }>());
+  const outboxRef = useRef(
+    // `extra` rides along for the same reason the files do: a retry re-sends
+    // the message, and a reply that came back as a normal message on the
+    // second attempt would have quietly dropped what it was answering.
+    new Map<string, { row: Msg; files: File[]; extra: SendExtrasDto }>(),
+  );
   /** channelId -> last message id this user has read. */
   const [reads, setReads] = useState<Record<string, string>>({});
   /** Newest message id seen per channel, so unread is a comparison of two ids. */
@@ -459,6 +357,15 @@ export function Chat({
   } | null>(null);
   /** A refused moderation action, shown briefly rather than swallowed. */
   const [banner, setBanner] = useState<string | null>(null);
+  /**
+   * A line saying something worked, where the banner says something did not.
+   *
+   * Separate rather than a flag on `banner`, because the two are read
+   * differently: an error is a thing to act on and a confirmation is a thing
+   * to glance at, and one of them being drawn in the other's red box is how a
+   * successful forward comes to look like a failed one.
+   */
+  const [notice, setNotice] = useState<string | null>(null);
 
   /**
    * Our own row in the member list is where the client learns both its role
@@ -632,6 +539,21 @@ export function Chat({
       return { name: mentionName(user), self: id === me.id };
     };
   }, [members, me.id]);
+
+  /**
+   * A channel id to the name people read, for the three places that hold an id
+   * and have to say where it is: a search result, a forward's card, and the
+   * line confirming one was sent.
+   *
+   * Null rather than a placeholder when it is not found, so each caller can
+   * decide -- a search result says "unknown", a forward card simply drops the
+   * "from #..." rather than claiming the message came from nowhere.
+   */
+  const channelNameOf = useCallback(
+    (id: string): string | null =>
+      guilds.flatMap((g) => g.channels).find((c) => c.id === id)?.name ?? null,
+    [guilds],
+  );
 
   /** One tagged id back to the person, for turning markers into names. */
   const lookupUser = useCallback(
@@ -911,12 +833,26 @@ export function Chat({
       },
       onMessageUpdated: (m) =>
         setMessages((prev) =>
-          prev.map((x) => (x.id === m.id ? { ...x, ...m } : x)),
+          // Every quote of it moves too. A reply's strip and a forward's card
+          // are drawn from a copy taken when the list was loaded, so without
+          // this an edited message goes on being quoted as what it used to
+          // say, for as long as the channel stays open.
+          prev.map((x) =>
+            x.id === m.id ? { ...x, ...m } : requoted(x, m.id, toRef(m)),
+          ),
         ),
       // Deleted messages are removed outright rather than tombstoned: history
       // filters them server-side too, so a reload would not bring them back.
       onMessageDeleted: ({ id }) => {
-        setMessages((prev) => prev.filter((x) => x.id !== id));
+        setMessages((prev) =>
+          prev
+            .filter((x) => x.id !== id)
+            // And every quote of it becomes the line that says so. This is the
+            // same rule as the pin board's: nothing a moderator removed should
+            // survive on screen, and a quote is a copy of it sitting inside
+            // somebody else's message.
+            .map((x) => requoted(x, id, null)),
+        );
         // A deleted message is off the board too. The server already filters
         // it out of the list; this is what takes it off the one on screen.
         setPins((prev) => prev?.filter((x) => x.id !== id) ?? prev);
@@ -931,7 +867,7 @@ export function Chat({
         // thousand messages further back than anything loaded.
         setPinsVersion((v) => v + 1);
       },
-      onMention: ({ message, channelName }) => {
+      onMention: ({ message, channelName, kind }) => {
         // The badge counts what is still unread. A tag in the channel that is
         // open is not: `onMessage` marks it read as it arrives, so counting it
         // here would light a number that the next render immediately clears.
@@ -941,7 +877,7 @@ export function Chat({
             [message.channelId]: (prev[message.channelId] ?? 0) + 1,
           }));
         }
-        announceMention(message, channelName);
+        announceMention(message, channelName, kind ?? 'mention');
       },
       onMemberUpdated: ({ userId, mutedUntil }) =>
         setMembers((prev) =>
@@ -1244,6 +1180,14 @@ export function Chat({
     return () => clearTimeout(t);
   }, [banner]);
 
+  // Shorter than an error's five seconds: this one says a thing that already
+  // happened, and there is nothing to do about it.
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 3000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
   /* --------------------------------------------------------- channel load */
 
   /**
@@ -1313,6 +1257,11 @@ export function Chat({
     setTypingUsers({});
     setHasNew(false);
     clearPending();
+    // A reply belongs to the channel it was started in -- the server refuses
+    // one that points anywhere else -- so it goes with the channel rather than
+    // following the composer into the next one.
+    setReplyTo(null);
+    setReplyPing(true);
     // The board belongs to the channel it was opened from, so it closes with
     // it rather than hanging over the next one showing the wrong pins.
     setPinsOpen(false);
@@ -1467,7 +1416,11 @@ export function Chat({
    * The text is the message, trimmed. Notifying without saying what was said
    * makes people open the app to find out, which is the opposite of the job.
    */
-  function announceMention(message: MessageDto, channelName: string) {
+  function announceMention(
+    message: MessageDto,
+    channelName: string,
+    kind: 'mention' | 'reply' = 'mention',
+  ) {
     const settings = notificationsRef.current;
     if (settings.sound) playPing();
     if (!settings.mentions) return;
@@ -1479,6 +1432,11 @@ export function Chat({
     if (looking) return;
 
     const who = message.author.displayName || message.author.username;
+    // "replied to you" and "mentioned you" are not the same sentence, and the
+    // toast is the whole of what somebody sees before they decide whether to
+    // open the app. A server too old to say which sends nothing, and the
+    // default is the only thing it could have meant.
+    const what = kind === 'reply' ? 'replied to you in' : 'in';
     // The body is what the toast shows, so tags in it are rendered as names
     // rather than as the ids they travel as.
     const body = toPlain(message.content, (id) => {
@@ -1487,7 +1445,7 @@ export function Chat({
     }).trim();
 
     void bridge.notifyMention({
-      title: `${who} in #${channelName}`,
+      title: `${who} ${what} #${channelName}`,
       // An image with no caption is still worth a notification; saying so
       // beats an empty toast.
       body: body || 'Sent an attachment',
@@ -1718,6 +1676,67 @@ export function Chat({
   }
 
   /**
+   * Where a message may be forwarded to: the text channels of the guild it was
+   * sent in, and nothing else.
+   *
+   * Bounded to one guild, and the server enforces the same rule rather than
+   * trusting this list. Everyone in a guild can already read every channel in
+   * it, so a forward inside one puts nothing in front of anybody that they
+   * could not have opened themselves -- and the card's link to the original
+   * always leads somewhere they can go. Neither holds across guilds.
+   */
+  const forwardTargets = useMemo(() => {
+    if (!forwarding) return [];
+    const guild = guilds.find((g) =>
+      g.channels.some((c) => c.id === forwarding.channelId),
+    );
+    return guild?.channels.filter((c) => c.kind === 'TEXT') ?? [];
+  }, [forwarding, guilds]);
+
+  /**
+   * Pass a message on to another channel.
+   *
+   * The ordinary send route with one more field, which is what a forward is: a
+   * message in the target channel that happens to point at another one. It
+   * gets the same broadcast and the same row as anything else typed there.
+   *
+   * The chain is followed here as well as on the server, so that the note says
+   * where the message will actually appear to have come from. The server is
+   * still the one that decides -- this is only so the two agree about what is
+   * being sent.
+   */
+  async function forwardMessage(m: MessageDto, channelId: string, note: string) {
+    const original = m.forwardedFrom ?? m;
+    await api.send(channelId, note, crypto.randomUUID(), {
+      forwardedFromId: original.id,
+    });
+    // No navigation. Forwarding happens mid-conversation, and being moved to
+    // another channel for it would lose the place of whoever did it -- so the
+    // confirmation is the whole of what happens here.
+    const name = channelNameOf(channelId);
+    setNotice(name ? `Forwarded to #${name}.` : 'Forwarded.');
+  }
+
+  /**
+   * Start answering a message, or stop.
+   *
+   * The ping switch resets every time, because it applies to one reply and not
+   * to replying -- see `replyPing`.
+   */
+  function beginReply(m: Msg) {
+    // Nothing on the server to answer yet, and its id is about to change.
+    if (m.pending || m.failed) return;
+    setReplyTo(m);
+    setReplyPing(true);
+    composerRef.current?.focus();
+  }
+
+  function cancelReply() {
+    setReplyTo(null);
+    setReplyPing(true);
+  }
+
+  /**
    * Land on a message, wherever it is: a search result, a pin, or the message
    * behind a notification.
    *
@@ -1930,6 +1949,15 @@ export function Chat({
     const files = pending.map((p) => p.file);
     // A pasted screenshot with nothing typed is a perfectly good message.
     if ((!content && files.length === 0) || !activeChannel) return;
+    // Read before anything is cleared, so the optimistic row and the request
+    // are built from the same answer.
+    const answering = replyTo;
+    const extra: SendExtrasDto = answering
+      ? // Only when it is off: absent means on, which is what the server
+        // defaults to, and sending `true` everywhere would make an ordinary
+        // reply carry a field about a switch nobody touched.
+        { replyToId: answering.id, ...(replyPing ? {} : { replyPing: false }) }
+      : {};
     // A file still being checked, one that was refused, or an upload already
     // on the wire. The composer says which, so this only has to stop.
     if (!canSend) return;
@@ -1969,15 +1997,22 @@ export function Chat({
       // real attachment rows back.
       previews: pending.map((p) => p.preview).filter((u): u is string => Boolean(u)),
       pending: true,
+      // Built here rather than waited for, so the strip is above the reply the
+      // instant it appears. The echo replaces the whole row with the server's
+      // version a moment later, which is the same thing derived from the
+      // database -- this is only what fills the gap.
+      replyTo: answering ? toRef(answering) : null,
+      forwardedFrom: null,
     };
     setMessages((prev) => [...prev, optimistic]);
     setDraft('');
+    cancelReply();
     pickedRef.current = new Set();
     setMentionPicker(null);
     // The object URLs now belong to the outbox entry rather than to `pending`,
     // so this clears the staged list without revoking them -- the optimistic
     // row is still drawing them, and a retry would need them again.
-    outboxRef.current.set(nonce, { row: optimistic, files });
+    outboxRef.current.set(nonce, { row: optimistic, files, extra });
     setPending([]);
     stopTyping();
     requestAnimationFrame(scrollToBottom);
@@ -1998,23 +2033,29 @@ export function Chat({
   async function deliver(nonce: string, channelId: string) {
     const entry = outboxRef.current.get(nonce);
     if (!entry) return;
-    const { row, files } = entry;
+    const { row, files, extra } = entry;
     // Zero rather than absent, so the ring appears the instant the message
     // does. A file large enough to need one takes long enough that a ring
     // arriving on the first progress event would be a visible stutter.
     if (files.length) setUploads((prev) => ({ ...prev, [nonce]: 0 }));
     try {
       const saved = files.length
-        ? await api.sendWithFiles(channelId, row.content, nonce, files, (f) =>
-            setUploads((prev) =>
-              // Never backwards. A retry starts a second request whose early
-              // events would otherwise drag the ring back to nothing.
-              prev[nonce] === undefined || f > prev[nonce]
-                ? { ...prev, [nonce]: f }
-                : prev,
-            ),
+        ? await api.sendWithFiles(
+            channelId,
+            row.content,
+            nonce,
+            files,
+            extra,
+            (f) =>
+              setUploads((prev) =>
+                // Never backwards. A retry starts a second request whose early
+                // events would otherwise drag the ring back to nothing.
+                prev[nonce] === undefined || f > prev[nonce]
+                  ? { ...prev, [nonce]: f }
+                  : prev,
+              ),
           )
-        : await api.send(channelId, row.content, nonce);
+        : await api.send(channelId, row.content, nonce, extra);
       outboxRef.current.delete(nonce);
       for (const url of row.previews ?? []) URL.revokeObjectURL(url);
       // The socket echo usually lands first; reconcile either way by nonce.
@@ -2029,7 +2070,7 @@ export function Chat({
       // Marked on the outbox copy as well as the one on screen, because the
       // outbox copy is what the list is rebuilt from after a channel switch.
       const failed = { ...row, failed: e?.message || 'Could not send that message.' };
-      outboxRef.current.set(nonce, { row: failed, files });
+      outboxRef.current.set(nonce, { row: failed, files, extra });
       setMessages((prev) =>
         prev.map((x) => (x.clientNonce === nonce ? failed : x)),
       );
@@ -2187,6 +2228,13 @@ export function Chat({
   const canEdit = (m: Msg) => m.author.id === me.id && !m.pending;
   /** Your own, or anyone's if you administer the server. */
   const canDelete = (m: Msg) => (m.author.id === me.id || iAmAdmin) && !m.pending;
+  /**
+   * Whether this message can be answered or passed on. Anybody's, including
+   * your own -- but not one the server has never heard of, since both actions
+   * point at an id, and a message still in flight has one that is about to be
+   * replaced by a real one.
+   */
+  const canQuote = (m: Msg) => !m.pending && !m.failed;
 
   function beginEdit(m: Msg) {
     setEditingId(m.id);
@@ -2655,11 +2703,7 @@ export function Chat({
               results={searchResults}
               busy={searchBusy}
               error={searchError}
-              channelName={(id) =>
-                guilds
-                  .flatMap((g) => g.channels)
-                  .find((c) => c.id === id)?.name ?? 'unknown'
-              }
+              channelName={(id) => channelNameOf(id) ?? 'unknown'}
               onJump={jumpTo}
               onClose={() => setSearchOpen(false)}
               lookupMention={lookupMention}
@@ -2681,6 +2725,7 @@ export function Chat({
         </div>
 
         {banner && <div className="banner">{banner}</div>}
+        {notice && <div className="banner good">{notice}</div>}
 
         <ScreenStage voice={voice} />
 
@@ -2709,6 +2754,11 @@ export function Chat({
                 const grouped =
                   prev &&
                   !newDay &&
+                  // A reply always starts its own block. It carries a strip
+                  // saying what it answers, and a strip hanging off a message
+                  // with no author line above it reads as belonging to the
+                  // message before it rather than to this one.
+                  !m.replyTo &&
                   prev.author.id === m.author.id &&
                   new Date(m.createdAt).getTime() - new Date(prev.createdAt).getTime() < 5 * 60_000;
                 return (
@@ -2761,6 +2811,17 @@ export function Chat({
                         {m.pinnedAt && (
                           <div className="pinned-mark">📌 Pinned</div>
                         )}
+                        {/* Above the author line, because it is what the
+                            message is answering and has to be read first --
+                            and because a reply is never grouped under the
+                            message before it, so there is always room. */}
+                        {m.replyTo && (
+                          <ReplyStrip
+                            refMsg={m.replyTo}
+                            lookupMention={lookupMention}
+                            onJump={() => jumpTo(m.replyTo!.channelId, m.replyTo!.id)}
+                          />
+                        )}
                         {!grouped && (
                           <div className="msg-head">
                             <span className="msg-author">{m.author.displayName || m.author.username}</span>
@@ -2797,6 +2858,24 @@ export function Chat({
                               edited={Boolean(m.editedAt)}
                               lookupMention={lookupMention}
                             />
+                            {/* Under whatever the forwarder said about it,
+                                because the note is theirs and the card is
+                                somebody else's -- reading it the other way
+                                round attributes the note to the wrong person
+                                for as long as it takes to reach the name. */}
+                            {m.forwardedFrom && (
+                              <ForwardCard
+                                refMsg={m.forwardedFrom}
+                                channelName={channelNameOf(m.forwardedFrom.channelId)}
+                                lookupMention={lookupMention}
+                                onJump={() =>
+                                  jumpTo(
+                                    m.forwardedFrom!.channelId,
+                                    m.forwardedFrom!.id,
+                                  )
+                                }
+                              />
+                            )}
                             {/* Our own pasted images, shown before the server echo. */}
                             {m.previews?.map((url) => (
                               <PreviewImage key={url} url={url} />
@@ -2829,8 +2908,24 @@ export function Chat({
                         )}
                       </div>
                       {editingId !== m.id &&
-                        (canEdit(m) || canPin(m) || canDelete(m)) && (
+                        (canQuote(m) || canEdit(m) || canPin(m) || canDelete(m)) && (
                           <div className="msg-actions">
+                            {/* First in the row, because it is the one action
+                                anybody uses on somebody else's message and the
+                                only one that is not about managing it. */}
+                            {canQuote(m) && (
+                              <button title="Reply" onClick={() => beginReply(m)}>
+                                ↩
+                              </button>
+                            )}
+                            {canQuote(m) && (
+                              <button
+                                title="Forward to another channel"
+                                onClick={() => setForwarding(m)}
+                              >
+                                ↪
+                              </button>
+                            )}
                             {canPin(m) && (
                               <button
                                 className={m.pinnedAt ? 'on' : undefined}
@@ -2891,6 +2986,43 @@ export function Chat({
             addFiles([...e.dataTransfer.files]);
           }}
         >
+          {replyTo && (
+            <div className="reply-bar">
+              <span className="reply-hook" aria-hidden />
+              <span className="reply-bar-text">
+                Replying to{' '}
+                <strong>
+                  {replyTo.author.displayName || replyTo.author.username}
+                </strong>
+                <span className="reply-line">
+                  {quoteLine(
+                    toPlain(replyTo.content, (id) => lookupUser(id)),
+                    replyTo.attachments.length,
+                    false,
+                  )}
+                </span>
+              </span>
+              {/* Not shown when answering yourself: there is nobody to tag,
+                  the server drops the ping either way, and a switch that does
+                  nothing is worse than no switch. */}
+              {replyTo.author.id !== me.id && (
+                <button
+                  className={'reply-ping' + (replyPing ? ' on' : '')}
+                  title={
+                    replyPing
+                      ? 'They will be tagged. Click to reply quietly.'
+                      : 'Replying quietly. Click to tag them.'
+                  }
+                  onClick={() => setReplyPing((on) => !on)}
+                >
+                  {replyPing ? '@ on' : '@ off'}
+                </button>
+              )}
+              <button className="reply-x" title="Cancel reply" onClick={cancelReply}>
+                ×
+              </button>
+            </div>
+          )}
           {pending.length > 0 && (
             <div className="staged">
               {pending.map((p) => (
@@ -3036,6 +3168,13 @@ export function Chat({
                   setMentionPicker(null);
                   return;
                 }
+              }
+              // After the tag list, which owns Escape while it is open: one
+              // press closes the list, the next lets go of the reply.
+              if (e.key === 'Escape' && replyTo) {
+                e.preventDefault();
+                cancelReply();
+                return;
               }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -3229,6 +3368,18 @@ export function Chat({
           </button>
         </div>
       )}
+      {forwarding && (
+        <ForwardModal
+          quote={quoteLine(
+            toPlain(forwarding.content, (id) => lookupUser(id)),
+            forwarding.attachments.length,
+            false,
+          )}
+          channels={forwardTargets}
+          onClose={() => setForwarding(null)}
+          onSent={(channelId, note) => forwardMessage(forwarding, channelId, note)}
+        />
+      )}
       {channelEdit && (
         <ChannelModal
           edit={channelEdit}
@@ -3400,424 +3551,6 @@ function PreviewImage({ url }: { url: string }) {
   return (
     <div className="attach">
       <img src={url} alt="" {...imageProps({ src: url, name: 'image' })} />
-    </div>
-  );
-}
-
-/* ----------------------------------------------------------- pin board */
-
-/**
- * Search, as a popover under the header.
- *
- * Deliberately the same shape as the pin board: both are "a list of messages
- * somewhere else in this guild, click one to go there", and giving them two
- * different presentations would be inventing a distinction that is not there.
- *
- * Results say which channel and when, because that is what the reader is
- * matching against — a search result stripped of its context is a sentence
- * with no way to judge whether it is the one being looked for.
- */
-function SearchPanel({
-  text,
-  onText,
-  results,
-  busy,
-  error,
-  channelName,
-  onJump,
-  onClose,
-  lookupMention,
-}: {
-  text: string;
-  onText: (value: string) => void;
-  /** Null before anything has been searched for; empty for no matches. */
-  results: MessageDto[] | null;
-  busy: boolean;
-  error: string | null;
-  channelName: (channelId: string) => string;
-  onJump: (channelId: string, messageId: string) => void;
-  onClose: () => void;
-  lookupMention: (id: string) => { name: string; self: boolean } | null;
-}) {
-  const input = useRef<HTMLInputElement>(null);
-  // Opened to be typed in. Anything else means a click to open and a click to
-  // focus, for a box that has exactly one use.
-  useEffect(() => input.current?.focus(), []);
-
-  return (
-    <div className="pins-panel search-panel" onClick={(e) => e.stopPropagation()}>
-      <div className="pins-head">
-        <input
-          ref={input}
-          className="search-input"
-          value={text}
-          placeholder="Search this server"
-          onChange={(e) => onText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') onClose();
-          }}
-        />
-        <button className="pins-x" title="Close" onClick={onClose}>
-          ×
-        </button>
-      </div>
-      <div className="pins-body">
-        {error && <div className="banner">{error}</div>}
-        {busy && !results && <div className="hint">Searching…</div>}
-        {!error && !busy && text.trim().length < 2 && (
-          <div className="pins-empty">
-            <div className="pins-empty-mark">🔍</div>
-            <div>Type at least two characters.</div>
-            <div className="hint">
-              Whole words. Quote a phrase to keep it together, and put a minus
-              in front of a word to leave it out.
-            </div>
-          </div>
-        )}
-        {results?.length === 0 && !busy && (
-          <div className="pins-empty">
-            <div className="pins-empty-mark">🔍</div>
-            <div>Nothing matched “{text.trim()}”.</div>
-          </div>
-        )}
-        {results?.map((m) => (
-          <button
-            className="pin-row"
-            key={m.id}
-            title="Go to this message"
-            onClick={() => onJump(m.channelId, m.id)}
-          >
-            <Avatar
-              name={m.author.displayName || m.author.username}
-              image={m.author.image}
-            />
-            <div className="pin-body">
-              <div className="msg-head">
-                <span className="msg-author">
-                  {m.author.displayName || m.author.username}
-                </span>
-                <span className="search-where">
-                  #{channelName(m.channelId)}
-                </span>
-                <span className="msg-time">{stamp(m.createdAt)}</span>
-              </div>
-              <MessageContent
-                content={m.content}
-                attachments={m.attachments}
-                edited={Boolean(m.editedAt)}
-                lookupMention={lookupMention}
-              />
-            </div>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/**
- * The pinned messages in one channel, as a popover under the header.
- *
- * A popover rather than a modal because it is a reference, not a decision:
- * people open it to check what was agreed, glance, and carry on typing. A
- * modal would dim the channel behind it and demand to be dismissed, which is
- * the wrong shape for something read mid-sentence.
- *
- * Newest post first, and every row stamped with the date it was *posted* —
- * not the date it was pinned. What people look for on a board is when the
- * thing was said; pinning last March's message this morning must not put it
- * above a message from an hour ago.
- */
-function PinsPanel({
-  channelName,
-  pins,
-  error,
-  canPin,
-  onUnpin,
-  onJump,
-  onClose,
-  lookupMention,
-}: {
-  channelName: string;
-  /** Null until the first load lands; the panel opens before its contents do. */
-  pins: MessageDto[] | null;
-  error: string | null;
-  /** Whether this user may take things off the board. Admins only. */
-  canPin: boolean;
-  onUnpin: (m: MessageDto) => void;
-  /** Go to the message in the channel. What the whole board is for. */
-  onJump: (messageId: string) => void;
-  onClose: () => void;
-  lookupMention: (id: string) => { name: string; self: boolean } | null;
-}) {
-  return (
-    // The click guard is what keeps the panel open while it is being used:
-    // the window listener that closes it treats every other click as "away".
-    <div className="pins-panel" onClick={(e) => e.stopPropagation()}>
-      <div className="pins-head">
-        <span>Pinned messages</span>
-        <button className="pins-x" title="Close" onClick={onClose}>
-          ×
-        </button>
-      </div>
-      <div className="pins-body">
-        {error && <div className="banner">{error}</div>}
-        {!pins && !error && <div className="hint">Loading…</div>}
-        {pins?.length === 0 && (
-          <div className="pins-empty">
-            <div className="pins-empty-mark">📌</div>
-            <div>Nothing is pinned in #{channelName} yet.</div>
-            {canPin && (
-              <div className="hint">
-                Hover a message and use the pin button to put it here.
-              </div>
-            )}
-          </div>
-        )}
-        {pins?.map((m) => (
-          // A button, not a div with a click handler: it is a link to
-          // somewhere, and the pin board is a list somebody may well be
-          // tabbing through.
-          <button
-            className="pin-row"
-            key={m.id}
-            title="Go to this message"
-            onClick={() => onJump(m.id)}
-          >
-            <Avatar
-              name={m.author.displayName || m.author.username}
-              image={m.author.image}
-            />
-            <div className="pin-body">
-              <div className="msg-head">
-                <span className="msg-author">
-                  {m.author.displayName || m.author.username}
-                </span>
-                <span className="msg-time">{stamp(m.createdAt)}</span>
-              </div>
-              <MessageContent
-                content={m.content}
-                attachments={m.attachments}
-                edited={Boolean(m.editedAt)}
-                lookupMention={lookupMention}
-              />
-            </div>
-            {canPin && (
-              <span
-                className="pin-unpin"
-                role="button"
-                tabIndex={0}
-                title="Unpin"
-                // Or unpinning would also navigate to the message it just
-                // took off the board, which is the one place nobody wants to
-                // be sent.
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onUnpin(m);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key !== 'Enter' && e.key !== ' ') return;
-                  e.stopPropagation();
-                  e.preventDefault();
-                  onUnpin(m);
-                }}
-              >
-                ×
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* --------------------------------------------------------------- modals */
-
-/** One modal for every "are you sure" in the app: delete, kick, ban. */
-function ConfirmModal({
-  confirmation,
-  onClose,
-}: {
-  confirmation: Confirmation;
-  onClose: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  return (
-    <div className="modal-wrap" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">{confirmation.title}</div>
-        <div className="modal-body">
-          <p style={{ margin: 0 }}>{confirmation.body}</p>
-        </div>
-        <div className="modal-foot">
-          <button onClick={onClose}>Cancel</button>
-          <button
-            className="danger"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              await confirmation.run();
-              onClose();
-            }}
-          >
-            {confirmation.confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Create a channel, or rename one. Admin only, and refused again on the server.
- *
- * One dialog for both because they are one form: a name. The kind is not a
- * control — a new channel takes it from the section the `+` was clicked in,
- * and an existing one cannot change it, since a text channel full of messages
- * is not a voice room and there is nothing sensible to do with the history.
- */
-function ChannelModal({
-  edit,
-  onClose,
-  onDone,
-}: {
-  edit:
-    | { mode: 'create'; guildId: string; kind: ChannelDto['kind'] }
-    | { mode: 'rename'; channel: ChannelDto };
-  onClose: () => void;
-  onDone: (channel: ChannelDto) => void;
-}) {
-  const creating = edit.mode === 'create';
-  const kind = creating ? edit.kind : edit.channel.kind;
-  const [name, setName] = useState(creating ? '' : edit.channel.name);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  /**
-   * What the server's schema accepts, checked here only to say so before a
-   * round trip. Spaces are the one people actually hit, and turning them into
-   * dashes is what every other chat app does, so the field does it as they
-   * type rather than refusing afterwards.
-   */
-  const clean = (v: string) => v.replace(/\s+/g, '-').replace(/[#@]/g, '').slice(0, 64);
-  const valid = name.length > 0;
-
-  async function submit() {
-    if (!valid || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const channel = creating
-        ? await api.createChannel(edit.guildId, { name, kind })
-        : await api.renameChannel(edit.channel.id, name);
-      onDone(channel);
-    } catch (e: any) {
-      setError(e?.message || 'Could not save the channel.');
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="modal-wrap" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          {creating
-            ? `Create a ${kind === 'VOICE' ? 'voice' : 'text'} channel`
-            : `Rename #${edit.channel.name}`}
-        </div>
-        <div className="modal-body">
-          {error && <div className="banner">{error}</div>}
-          <label htmlFor="channel-name">Channel name</label>
-          <div className="channel-name-field">
-            <span className="hash">{kind === 'VOICE' ? '🔊' : '#'}</span>
-            <input
-              id="channel-name"
-              autoFocus
-              value={name}
-              placeholder={kind === 'VOICE' ? 'general-voice' : 'new-channel'}
-              onChange={(e) => setName(clean(e.target.value))}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void submit();
-                if (e.key === 'Escape') onClose();
-              }}
-            />
-          </div>
-          <p className="hint">
-            {kind === 'VOICE'
-              ? 'Everyone on the server can see it and join the call.'
-              : 'Everyone on the server can see it and read it.'}
-          </p>
-        </div>
-        <div className="modal-foot">
-          <button onClick={onClose}>Cancel</button>
-          <button disabled={!valid || busy} onClick={() => void submit()}>
-            {creating ? 'Create' : 'Save'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * The ban list, and the only way to lift one. Lifting a ban does not put
- * anyone back in the server — they still need an invite — which is why this
- * says "Lift" rather than "Restore".
- */
-function BansModal({ guildId, onClose }: { guildId: string; onClose: () => void }) {
-  const [bans, setBans] = useState<BanDto[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      setBans(await api.bans(guildId));
-    } catch (e: any) {
-      setError(e?.message ?? 'Could not load the ban list.');
-    }
-  }, [guildId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  return (
-    <div className="modal-wrap" onClick={onClose}>
-      <div className="modal wide" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">Banned accounts</div>
-        <div className="modal-body">
-          {error && <div className="banner">{error}</div>}
-          {!bans && !error && <div className="hint">Loading…</div>}
-          {bans?.length === 0 && <div className="hint">Nobody is banned.</div>}
-          {bans?.map((b) => (
-            <div className="ban-row" key={b.userId}>
-              <div>
-                <div>{b.displayName || b.username}</div>
-                <div className="hint inline">
-                  banned by {b.bannedBy ?? 'an admin'} ·{' '}
-                  {new Date(b.createdAt).toLocaleDateString()}
-                  {b.reason ? ` · ${b.reason}` : ''}
-                </div>
-              </div>
-              <button
-                onClick={async () => {
-                  try {
-                    await api.unban(guildId, b.userId);
-                    await load();
-                  } catch (e: any) {
-                    setError(e?.message ?? 'Could not lift that ban.');
-                  }
-                }}
-              >
-                Lift ban
-              </button>
-            </div>
-          ))}
-        </div>
-        <div className="modal-foot">
-          <button onClick={onClose}>Close</button>
-        </div>
-      </div>
     </div>
   );
 }

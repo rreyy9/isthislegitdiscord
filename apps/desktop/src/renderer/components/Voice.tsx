@@ -802,13 +802,22 @@ export function VoicePanel({
           reason anywhere for why nobody can hear them. */}
       {serverMuted && <div className="vp-gagged">🔇 {serverMuted}</div>}
 
+      {/* Deafened is not a state the key can talk its way out of, so the line
+          says so rather than reading "Transmitting" over a microphone that is
+          shut. Same reason the gagged line above exists. */}
       {pushToTalk && !serverMuted && voice.status === 'connected' && (
-        <div className={'vp-ptt' + (voice.talking ? ' live' : '')}>
-          {voice.talking
-            ? 'Transmitting'
-            : pttLabel
-              ? `Hold ${pttLabel} to talk`
-              : 'Nothing bound — set a key or button in settings'}
+        <div
+          className={
+            'vp-ptt' + (voice.talking && !voice.deafened ? ' live' : '')
+          }
+        >
+          {voice.deafened
+            ? 'Deafened — undeafen or unmute to talk'
+            : voice.talking
+              ? 'Transmitting'
+              : pttLabel
+                ? `Hold ${pttLabel} to talk`
+                : 'Nothing bound — set a key or button in settings'}
         </div>
       )}
 
@@ -820,7 +829,14 @@ export function VoicePanel({
           // it change, and still not be heard.
           disabled={connecting || Boolean(serverMuted)}
           onClick={() => void voice.setMuted(!voice.muted)}
-          title={serverMuted ?? (voice.muted ? 'Unmute' : 'Mute')}
+          title={
+            serverMuted ??
+            (voice.deafened
+              ? 'Unmute and undeafen'
+              : voice.muted
+                ? 'Unmute'
+                : 'Mute')
+          }
         >
           {voice.muted || serverMuted ? '🔇' : '🎙'}
         </button>

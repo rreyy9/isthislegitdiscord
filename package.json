@@ -1,7 +1,7 @@
 {
   "name": "isthislegit",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "workspaces": [
     "packages/*",
     "apps/*"
@@ -13,12 +13,17 @@
     "db:studio": "npm run db:studio --workspace @isthislegit/server",
     "db:generate": "npm run db:generate --workspace @isthislegit/server",
     "console": "npm start --workspace @isthislegit/console",
-    "server-app": "npm run dev --workspace @isthislegit/server-app"
+    "server-app": "npm run dev --workspace @isthislegit/server-app",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "engines": {
     "node": ">=22"
   },
   "overrides": {
     "vite": "^7.3.6"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.7"
   }
 }

@@ -20,7 +20,6 @@ import { memoryStorage } from 'multer';
 import {
   EditMessageInput,
   EPHEMERAL_FILE_HOURS,
-  isInlineType,
   MAX_PINS_PER_CHANNEL,
   MessageHistoryQuery,
   SendMessageInput,
@@ -35,71 +34,12 @@ import { MentionsService } from '../mentions/mentions.service';
 import { ZodPipe } from '../common/zod.pipe';
 import { UploadLimitFilter } from '../common/upload-limit.filter';
 import { newId } from '../common/ids';
+import { toDto, withAuthor } from './message-dto';
 import {
   maxUploadBytes,
   store,
   type StoredFile,
 } from '../attachments/storage';
-
-const withAuthor = {
-  author: {
-    select: { id: true, username: true, name: true, image: true },
-  },
-  attachments: {
-    select: {
-      id: true,
-      fileName: true,
-      contentType: true,
-      size: true,
-      width: true,
-      height: true,
-      expiresAt: true,
-      expiredAt: true,
-    },
-  },
-  // Who the message tagged. Read from the rows rather than re-parsed out of
-  // the text, because the rows are the validated answer -- a `<@id>` naming
-  // somebody who is not in the guild was never stored and must not come back
-  // out of history looking like it was.
-  mentions: { select: { userId: true } },
-} as const;
-
-function toDto(row: any): Message {
-  return {
-    id: row.id,
-    channelId: row.channelId,
-    author: {
-      id: row.author.id,
-      username: row.author.username ?? row.author.id,
-      displayName: row.author.name ?? null,
-      image: row.author.image ?? null,
-    },
-    content: row.content,
-    createdAt: row.createdAt.toISOString(),
-    editedAt: row.editedAt ? row.editedAt.toISOString() : null,
-    deletedAt: row.deletedAt ? row.deletedAt.toISOString() : null,
-    clientNonce: row.clientNonce ?? null,
-    pinnedAt: row.pinnedAt ? row.pinnedAt.toISOString() : null,
-    mentions: (row.mentions ?? []).map((m: any) => m.userId),
-    attachments: (row.attachments ?? []).map((a: any) => ({
-      id: a.id,
-      fileName: a.fileName,
-      contentType: a.contentType,
-      size: a.size,
-      width: a.width ?? null,
-      height: a.height ?? null,
-      // A path, not a full URL: the client already knows its server address,
-      // and baking one in would break the moment that address changed.
-      url: `/api/attachments/${a.id}`,
-      expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
-      expiredAt: a.expiredAt ? a.expiredAt.toISOString() : null,
-      // Told, not inferred. The client must not decide for itself that
-      // something is safe to put in an <img> -- this is the same answer the
-      // download route gives, from the same function.
-      inline: isInlineType(a.contentType),
-    })),
-  };
-}
 
 @Controller('api/channels/:channelId/messages')
 @UseGuards(AuthGuard)
@@ -299,18 +239,28 @@ export class MessagesController {
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
       // The name is for the notification a tag raises: it has to say which
-      // channel, and the person being tagged may never have opened it.
-      select: { kind: true, name: true },
+      // channel, and the person being tagged may never have opened it. The
+      // guild is what bounds a forward -- see `resolveForward`.
+      select: { kind: true, name: true, guildId: true },
     });
     if (!channel) throw new NotFoundException('No such channel.');
     if (channel.kind !== 'TEXT') {
       throw new ForbiddenException('That is not a text channel.');
     }
 
+    const replyTo = await this.resolveReply(channelId, body.replyToId);
+    const forwardedFromId = await this.resolveForward(
+      channel.guildId,
+      body.forwardedFromId,
+    );
+
     const uploads = files ?? [];
     // A message has to say something. Empty content is fine when a screenshot
-    // is the message, which is why the schema allows it.
-    if (!body.content.trim() && uploads.length === 0) {
+    // is the message, which is why the schema allows it -- and fine when a
+    // forwarded message is, for the same reason: the carried message is the
+    // content, and being made to write a covering note to pass one on would be
+    // a rule invented by this check rather than by anybody who wanted it.
+    if (!body.content.trim() && uploads.length === 0 && !forwardedFromId) {
       throw new BadRequestException('Nothing to send.');
     }
 
@@ -336,6 +286,8 @@ export class MessagesController {
         authorId: user.id,
         content: body.content,
         clientNonce: body.clientNonce ?? null,
+        replyToId: replyTo?.id ?? null,
+        forwardedFromId,
         attachments: {
           create: stored.map((f) => ({
             id: f.id,
@@ -356,6 +308,16 @@ export class MessagesController {
       include: withAuthor,
     });
 
+    // Whoever wrote the message this one answers, unless the sender turned the
+    // ping off or is answering themselves. A row in the same table a tag
+    // writes to: a reply is a tag by another route, and everything downstream
+    // of it -- the badge, the tint, the toast, the clearing on read -- is
+    // already built once and should not be built again slightly differently.
+    const replyPingTo =
+      replyTo && body.replyPing !== false && replyTo.authorId !== user.id
+        ? replyTo.authorId
+        : null;
+
     // Resolved after the row exists, because a mention is a row that points at
     // a message: there is nothing to hang it off until the message is saved.
     const { pinged } = await this.mentions.sync(
@@ -363,14 +325,104 @@ export class MessagesController {
       channelId,
       row.content,
       user.id,
+      { alsoPing: replyPingTo ? [replyPingTo] : [] },
     );
 
     const dto = { ...toDto(row), mentions: pinged };
     this.gateway.broadcastMessage(dto);
     // After the broadcast, so that anyone with the channel open has already
     // been given the message their notification is about.
-    this.gateway.notifyMentions(dto, pinged, channel.name);
+    //
+    // Split in two so the toast can say which of the two things happened. It
+    // is the same event and the same row either way; "replied to you" and
+    // "mentioned you" are simply not the same sentence, and somebody tagged in
+    // the text of a reply to somebody else is being told the second one.
+    const replied = pinged.filter((id) => id === replyPingTo);
+    const tagged = pinged.filter((id) => id !== replyPingTo);
+    this.gateway.notifyMentions(dto, tagged, channel.name, 'mention');
+    this.gateway.notifyMentions(dto, replied, channel.name, 'reply');
     return dto;
+  }
+
+  /**
+   * The message a reply answers, checked rather than trusted.
+   *
+   * Same channel, always. A reply is part of one conversation, and one
+   * pointing at another channel would be a forward wearing the wrong word --
+   * which is a thing this app has, with its own field and its own card.
+   *
+   * A deleted target is refused at send time even though a reply whose target
+   * is deleted *later* is fine and draws as "message deleted". The difference
+   * is that one of them is a conversation that carried on past a removal and
+   * the other is somebody answering something that is already gone.
+   */
+  private async resolveReply(
+    channelId: string,
+    replyToId: string | undefined,
+  ): Promise<{ id: string; authorId: string } | null> {
+    if (!replyToId) return null;
+    const target = await this.prisma.message.findUnique({
+      where: { id: replyToId },
+      select: { id: true, channelId: true, authorId: true, deletedAt: true },
+    });
+    if (!target || target.channelId !== channelId || target.deletedAt) {
+      throw new BadRequestException('That message is no longer there to reply to.');
+    }
+    return { id: target.id, authorId: target.authorId };
+  }
+
+  /**
+   * The message a forward carries, resolved to the original.
+   *
+   * Two rules, and both are about not inventing a way to see things.
+   *
+   * **Same guild.** Every member of a guild may read every channel in it (see
+   * `PermissionService.canInChannel`), so a forward within one shows nobody
+   * anything they could not already have opened. Across guilds it would, and
+   * the card's "go to the original" would land somewhere the reader cannot go.
+   * So the boundary is the guild, checked here rather than assumed from the
+   * fact that this deployment has one.
+   *
+   * **The chain is followed once.** Forwarding a forward stores the original,
+   * so `MessageRef` is never a quote of a quote. Doing it here, at the moment
+   * of sending, is what makes that a property of the data rather than a depth
+   * limit the renderer has to remember.
+   */
+  private async resolveForward(
+    guildId: string,
+    forwardedFromId: string | undefined,
+  ): Promise<string | null> {
+    if (!forwardedFromId) return null;
+
+    const asked = await this.prisma.message.findUnique({
+      where: { id: forwardedFromId },
+      select: {
+        id: true,
+        deletedAt: true,
+        channel: { select: { guildId: true } },
+        // One level is all there can be: a stored forward always points at an
+        // original, so following it once always arrives.
+        forwardedFrom: {
+          select: {
+            id: true,
+            deletedAt: true,
+            channel: { select: { guildId: true } },
+          },
+        },
+      },
+    });
+    if (!asked) throw new NotFoundException('No such message.');
+
+    const original = asked.forwardedFrom ?? asked;
+    if (original.deletedAt) {
+      throw new BadRequestException('That message is gone and cannot be forwarded.');
+    }
+    if (original.channel.guildId !== guildId) {
+      throw new ForbiddenException(
+        'A message can only be forwarded within the server it was sent in.',
+      );
+    }
+    return original.id;
   }
 
   /**
@@ -403,10 +455,21 @@ export class MessagesController {
     }
 
     const content = body.content.trim();
-    // Same rule as sending: text may be empty only when images carry it.
-    if (!content && existing.attachments.length === 0) {
+    // Same rule as sending: text may be empty only when something else carries
+    // it -- files, or a forwarded message.
+    if (!content && existing.attachments.length === 0 && !existing.forwardedFromId) {
       throw new BadRequestException('A message cannot be empty. Delete it instead.');
     }
+
+    // Who this message replied to, if it replied to anyone. Read here so the
+    // re-resolve below leaves their ping alone: an edit changes the words, and
+    // the words are not what decided that ping.
+    const repliedTo = existing.replyToId
+      ? await this.prisma.message.findUnique({
+          where: { id: existing.replyToId },
+          select: { authorId: true },
+        })
+      : null;
 
     const row = await this.prisma.message.update({
       where: { id },
@@ -419,11 +482,18 @@ export class MessagesController {
     // @, and fixing it is how half of all tags get written. Only the ones the
     // edit added are notified, so correcting a typo does not ping the room
     // again.
+    //
+    // `keepPinged` and not `alsoPing`: an edit never creates the reply ping,
+    // it only declines to sweep away one that is already there. Whether the
+    // sender wanted it was answered when they pressed send, and re-asking now
+    // would let somebody ping a person by editing a reply they had explicitly
+    // sent quietly.
     const { pinged, newlyPinged } = await this.mentions.sync(
       row.id,
       channelId,
       content,
       user.id,
+      { keepPinged: repliedTo ? [repliedTo.authorId] : [] },
     );
 
     const dto = { ...toDto(row), mentions: pinged };
@@ -433,7 +503,7 @@ export class MessagesController {
         where: { id: channelId },
         select: { name: true },
       });
-      this.gateway.notifyMentions(dto, newlyPinged, channel?.name ?? '');
+      this.gateway.notifyMentions(dto, newlyPinged, channel?.name ?? '', 'mention');
     }
     return dto;
   }

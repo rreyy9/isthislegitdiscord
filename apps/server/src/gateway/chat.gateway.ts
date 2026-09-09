@@ -17,6 +17,7 @@ import type { ConnectedClient, Message, PublicUser } from '@isthislegit/shared';
 import { AUTH, type Auth } from '../auth/auth.factory';
 import { PermissionService } from '../auth/permission.guard';
 import { PrismaService } from '../prisma/prisma.service';
+import { allowedOrigins, isOriginAllowed } from '../common/cors';
 
 interface SocketData {
   userId: string;
@@ -29,8 +30,22 @@ interface SocketData {
   clientVersion: string | null;
 }
 
+// The same allowlist the HTTP API uses. Socket.IO has its own CORS handling
+// and does not inherit `enableCors`, so pinning one and not the other would
+// leave the socket -- which carries every message on the server -- open to any
+// origin. Read once at import: this decorator argument runs before Nest builds
+// the module graph, which is exactly the trap documented at the top of main.ts,
+// and is safe here only because `dotenv/config` is imported above everything.
+const socketOrigins = allowedOrigins();
+
 @WebSocketGateway({
-  cors: { origin: true, credentials: true },
+  cors: {
+    origin: (origin: string | undefined, callback: (err: Error | null, ok?: boolean) => void) =>
+      isOriginAllowed(origin, socketOrigins)
+        ? callback(null, true)
+        : callback(null, false),
+    credentials: true,
+  },
 })
 export class ChatGateway
   implements
@@ -331,10 +346,21 @@ export class ChatGateway
    * notification without fetching a channel it has never opened. The author is
    * dropped by the caller, not here: what counts as tagging yourself is a
    * question about the message, not about sockets.
+   *
+   * `kind` says why, and only that. A reply and a tag are the same row in the
+   * same table and reach the same person the same way; the difference is one
+   * sentence on a toast, so it is one field rather than a second event.
    */
-  notifyMentions(message: Message, userIds: string[], channelName: string) {
+  notifyMentions(
+    message: Message,
+    userIds: string[],
+    channelName: string,
+    kind: 'mention' | 'reply' = 'mention',
+  ) {
     for (const userId of userIds) {
-      this.server.to(`user:${userId}`).emit('mention:new', { message, channelName });
+      this.server
+        .to(`user:${userId}`)
+        .emit('mention:new', { message, channelName, kind });
     }
   }
 

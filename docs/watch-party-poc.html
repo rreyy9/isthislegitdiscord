@@ -1,0 +1,907 @@
+<title>isthislegit Watch Party</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* ---------------------------------------------------------------- tokens
+   Two palettes on purpose. The `--ui-*` set is copied verbatim from
+   apps/desktop/src/renderer/styles.css so the mocked windows are the real
+   product's colours, not an approximation of them. The `--pg-*` set is this
+   page's own voice — a deeper ground so the windows read as objects sitting
+   on a table, and a mono label face that can never be mistaken for UI text.
+
+   Single theme, deliberately: the client it mocks is dark-only, and a light
+   version of this page would be a light picture of a dark app. Every colour
+   is painted explicitly so it holds on either host ground. */
+:root {
+  --ui-bg: #14161a; --ui-bg2: #1a1d23; --ui-panel: #1c1f26; --ui-panel2: #23262f;
+  --ui-line: #2b2f38; --ui-text: #e6e8ec; --ui-dim: #99a0ad; --ui-faint: #6b7280;
+  --ui-accent: #5b8def; --ui-accent-dim: #3a5ba8; --ui-ok: #3fb950; --ui-bad: #f85149;
+  --ui-warn: #d29922;
+
+  --pg-ground: #0a0b0e;
+  --pg-rail: #14171e;
+  --pg-line: #242832;
+  --pg-text: #c3cad6;
+  --pg-head: #edf0f5;
+  --pg-mute: #737b8a;
+  --pg-accent: #5b8def;
+  --pg-host: #d29922;
+
+  --ui-font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --pg-font: "Familjen Grotesk", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--pg-ground);
+  color: var(--pg-text);
+  font-family: var(--pg-font);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+:focus-visible { outline: 2px solid var(--pg-accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
+/* ----------------------------------------------------------------- page */
+.wrap { max-width: 1180px; margin: 0 auto; padding: 44px 24px 100px; }
+
+.masthead { border-bottom: 1px solid var(--pg-line); padding-bottom: 26px; }
+.eyebrow {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--pg-mute); margin: 0 0 10px;
+}
+h1 {
+  font-family: var(--pg-font); font-weight: 700; font-size: 40px; line-height: 1.08;
+  letter-spacing: -.02em; color: var(--pg-head); margin: 0 0 12px; text-wrap: balance;
+}
+.lede { max-width: 62ch; font-size: 16.5px; color: var(--pg-text); margin: 0; }
+.lede strong { color: var(--pg-head); font-weight: 600; }
+
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.chip {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+  color: var(--pg-mute); border: 1px solid var(--pg-line); border-radius: 999px;
+  padding: 4px 11px;
+}
+.chip.warn { color: var(--pg-host); border-color: color-mix(in srgb, var(--pg-host) 40%, transparent); }
+
+/* section headers for each mocked surface */
+.screen-block { margin-top: 62px; }
+.screen-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 24px; flex-wrap: wrap; margin-bottom: 18px;
+}
+.screen-head h2 {
+  font-size: 23px; font-weight: 600; letter-spacing: -.01em;
+  color: var(--pg-head); margin: 0;
+}
+.screen-head p { margin: 6px 0 0; max-width: 58ch; font-size: 14.5px; color: var(--pg-text); }
+.screen-head .num {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .14em;
+  color: var(--pg-mute); text-transform: uppercase; margin: 0 0 6px;
+}
+
+/* segmented state switch — sits with the thing it changes */
+.switch { display: flex; align-items: center; gap: 10px; }
+.switch-label {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--pg-mute);
+}
+.seg { display: flex; background: var(--pg-rail); border: 1px solid var(--pg-line); border-radius: 8px; padding: 3px; gap: 3px; }
+.seg button {
+  font-family: var(--pg-font); font-size: 13px; color: var(--pg-mute);
+  background: none; border: none; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+}
+.seg button:hover { color: var(--pg-head); }
+.seg button[aria-pressed="true"] { background: var(--ui-accent-dim); color: #fff; }
+
+/* the window frame the mock sits in */
+.window {
+  border: 1px solid var(--ui-line); border-radius: 10px; overflow: hidden;
+  background: var(--ui-bg); box-shadow: 0 24px 60px -20px #000, 0 0 0 1px #000;
+  font-family: var(--ui-font); font-size: 14px; color: var(--ui-text);
+  line-height: 1.5;
+}
+.titlebar {
+  display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 0 0 12px;
+  background: var(--ui-bg2); border-bottom: 1px solid var(--ui-line);
+  font-size: 12.5px; color: var(--ui-dim);
+}
+.titlebar .app-mark {
+  width: 14px; height: 14px; border-radius: 4px;
+  background: linear-gradient(140deg, var(--ui-accent), #8a5bef);
+}
+.titlebar .spacer { flex: 1; }
+.wbtns { display: flex; }
+.wbtns span {
+  width: 40px; height: 33px; display: grid; place-items: center;
+  color: var(--ui-faint); font-size: 11px;
+}
+.wbtns span:hover { background: var(--ui-line); }
+.wbtns span:last-child:hover { background: #a1242b; color: #fff; }
+
+/* --------------------------------------------------- mock: main client */
+.client { display: grid; grid-template-columns: 226px 1fr 190px; height: 624px; }
+.pane { overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+.side { background: var(--ui-bg2); border-right: 1px solid var(--ui-line); }
+.members { background: var(--ui-bg2); border-left: 1px solid var(--ui-line); }
+.sb-head {
+  padding: 13px 15px; font-weight: 600; font-size: 15px;
+  border-bottom: 1px solid var(--ui-line); color: var(--ui-text);
+}
+.sb-scroll { flex: 1; overflow-y: auto; padding: 8px; }
+.sb-section {
+  color: var(--ui-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  padding: 12px 8px 5px; font-weight: 600; display: flex; align-items: center;
+  justify-content: space-between;
+}
+.sb-add { background: none; border: none; color: var(--ui-faint); font-size: 15px; line-height: 1; padding: 0 2px; cursor: pointer; }
+.sb-section:hover .sb-add { color: var(--ui-text); }
+.chan {
+  display: flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 6px;
+  color: var(--ui-dim); font-size: 14px; cursor: default;
+}
+.chan:hover { background: var(--ui-panel); color: var(--ui-text); }
+.chan.active { background: var(--ui-panel2); color: var(--ui-text); }
+.chan .hash { color: var(--ui-faint); }
+.chan .count {
+  margin-left: auto; font-size: 11px; color: var(--ui-faint);
+  background: var(--ui-panel2); border-radius: 8px; padding: 0 6px;
+}
+.chan.party-live { color: var(--ui-text); }
+.live-dot {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--ui-bad); font-weight: 600;
+}
+.live-dot::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ui-bad);
+  animation: pulse 1.9s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.voice-mem {
+  display: flex; align-items: center; gap: 7px; padding: 3px 8px 3px 22px;
+  font-size: 13px; color: var(--ui-dim);
+}
+.av {
+  width: 20px; height: 20px; border-radius: 50%; flex: none; display: grid;
+  place-items: center; font-size: 10px; font-weight: 600; color: #0b0c0f;
+}
+.av.k { background: #7aa2f7; }
+.av.v { background: #bb9af7; }
+.av.m { background: #7dcfff; }
+.av.n { background: #9ece6a; }
+.av.t { background: #e0af68; }
+.av.lg { width: 26px; height: 26px; font-size: 11px; }
+
+/* the watch-party strip, directly above the voice strip */
+.party-panel {
+  border-top: 1px solid var(--ui-line); padding: 10px 12px; background: var(--ui-panel);
+}
+.pp-head { display: flex; align-items: center; gap: 7px; }
+.pp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ui-bad); animation: pulse 1.9s ease-in-out infinite; }
+.pp-status { color: var(--ui-bad); font-weight: 500; font-size: 12px; }
+.pp-leave { margin-left: auto; background: none; border: none; color: var(--ui-faint); font-size: 12px; cursor: pointer; }
+.pp-leave:hover { color: var(--ui-bad); }
+.pp-title { color: var(--ui-text); margin-top: 3px; font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+.pp-sub { color: var(--ui-dim); font-size: 11.5px; margin-top: 1px; }
+.pp-now { color: var(--ui-faint); font-size: 11.5px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pp-buttons { display: flex; gap: 6px; margin-top: 9px; }
+.pp-buttons button {
+  flex: 1; background: var(--ui-panel2); border: 1px solid var(--ui-line);
+  color: var(--ui-text); border-radius: 6px; padding: 5px 0; font-size: 12.5px; cursor: pointer;
+}
+.pp-buttons button.primary { background: var(--ui-accent); border-color: var(--ui-accent); color: #fff; }
+.pp-buttons button:hover { filter: brightness(1.12); }
+
+.voice-panel { border-top: 1px solid var(--ui-line); padding: 10px 12px; background: var(--ui-panel); }
+.vp-head { display: flex; align-items: center; gap: 7px; }
+.vp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ui-ok); }
+.vp-status { color: var(--ui-ok); font-weight: 500; font-size: 12px; }
+.vp-leave { margin-left: auto; background: none; border: none; color: var(--ui-faint); font-size: 12px; cursor: pointer; }
+.vp-channel { color: var(--ui-dim); margin-top: 2px; font-size: 12px; }
+.vp-buttons { display: flex; gap: 6px; margin-top: 8px; }
+.vp-buttons button {
+  flex: 1; background: var(--ui-panel2); border: 1px solid var(--ui-line);
+  color: var(--ui-text); border-radius: 6px; padding: 4px 0; font-size: 13px; cursor: pointer;
+}
+.footer {
+  border-top: 1px solid var(--ui-line); padding: 9px 12px; display: flex;
+  align-items: center; gap: 8px; background: var(--ui-bg2);
+}
+.footer .name { font-size: 13px; }
+.footer .caret { margin-left: auto; color: var(--ui-faint); font-size: 10px; }
+
+/* centre column of the client, just enough to be believable */
+.chan-head {
+  padding: 12px 16px; border-bottom: 1px solid var(--ui-line);
+  display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px;
+}
+.chan-head .hash { color: var(--ui-faint); font-weight: 400; }
+.msgs { flex: 1; overflow: hidden; padding: 14px 16px; display: flex; flex-direction: column; gap: 13px; }
+.msg { display: flex; gap: 10px; }
+.msg .body { min-width: 0; }
+.msg .who { font-size: 13.5px; font-weight: 600; color: var(--ui-text); }
+.msg .when { font-size: 11px; color: var(--ui-faint); margin-left: 7px; font-weight: 400; }
+.msg .text { font-size: 13.5px; color: var(--ui-dim); }
+.sys-msg {
+  font-size: 12.5px; color: var(--ui-faint); display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 1px dashed var(--ui-line); border-radius: 8px;
+}
+.sys-msg b { color: var(--ui-dim); font-weight: 600; }
+.sys-msg button {
+  margin-left: auto; background: var(--ui-accent); border: none; color: #fff;
+  border-radius: 5px; padding: 3px 11px; font-size: 12px; cursor: pointer; flex: none;
+}
+.composer { padding: 0 16px 16px; }
+.composer div {
+  background: var(--ui-panel); border: 1px solid var(--ui-line); border-radius: 8px;
+  padding: 9px 12px; color: var(--ui-faint); font-size: 13.5px;
+}
+.mem-head {
+  padding: 12px 14px 6px; font-size: 11px; letter-spacing: .5px; text-transform: uppercase;
+  color: var(--ui-faint); font-weight: 600;
+}
+.mem { display: flex; align-items: center; gap: 8px; padding: 5px 14px; font-size: 13px; color: var(--ui-dim); }
+.mem .tag {
+  margin-left: auto; font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--ui-bad); border: 1px solid color-mix(in srgb, var(--ui-bad) 45%, transparent);
+  border-radius: 4px; padding: 0 4px;
+}
+
+/* ---------------------------------------------- mock: watch party window */
+.party { display: grid; grid-template-columns: 1fr 306px; height: 596px; }
+.stage-col { display: flex; flex-direction: column; min-width: 0; background: #0c0d10; }
+.stage {
+  flex: 1; position: relative; display: grid; place-items: center; overflow: hidden;
+  background: radial-gradient(120% 90% at 50% 0%, #1d2740 0%, #0d0f14 62%, #08090c 100%);
+}
+.stage .thumbnail {
+  position: absolute; inset: 0;
+  background:
+    repeating-linear-gradient(115deg, #ffffff05 0 3px, transparent 3px 9px),
+    linear-gradient(200deg, #2b3a5c 0%, #1a2136 45%, #241a2e 100%);
+}
+.stage .play-glyph {
+  position: relative; width: 74px; height: 74px; border-radius: 50%;
+  background: #0f1116cc; border: 1px solid #ffffff26; display: grid; place-items: center;
+  color: #fff; font-size: 26px; padding-left: 5px;
+}
+.stage-badges {
+  position: absolute; top: 12px; left: 14px; right: 14px; display: flex;
+  align-items: center; gap: 8px;
+}
+.badge {
+  font-size: 11px; letter-spacing: .04em; padding: 3px 9px; border-radius: 999px;
+  background: #0f1116cc; border: 1px solid #ffffff1f; color: var(--ui-dim);
+}
+.badge.sync { color: var(--ui-ok); border-color: color-mix(in srgb, var(--ui-ok) 40%, transparent); }
+.badge.host { color: var(--ui-warn); border-color: color-mix(in srgb, var(--ui-warn) 45%, transparent); }
+.stage-title { position: absolute; left: 14px; right: 14px; bottom: 14px; }
+.stage-title .t { font-size: 15px; font-weight: 600; color: #fff; }
+.stage-title .s { font-size: 12px; color: #ffffff9c; margin-top: 2px; }
+
+/* transport */
+.transport {
+  border-top: 1px solid var(--ui-line); background: var(--ui-bg2); padding: 10px 14px 12px;
+}
+.scrub { display: flex; align-items: center; gap: 10px; }
+.scrub .time { font-family: var(--mono); font-size: 11px; color: var(--ui-faint); font-variant-numeric: tabular-nums; }
+.track { flex: 1; height: 5px; border-radius: 3px; background: var(--ui-line); position: relative; }
+.track .fill { position: absolute; inset: 0 auto 0 0; width: 34%; background: var(--ui-accent); border-radius: 3px; }
+.track .knob {
+  position: absolute; left: 34%; top: 50%; width: 12px; height: 12px; border-radius: 50%;
+  background: #fff; transform: translate(-50%, -50%); box-shadow: 0 0 0 3px #5b8def40;
+}
+.controls { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.ctl {
+  background: var(--ui-panel); border: 1px solid var(--ui-line); color: var(--ui-text);
+  border-radius: 7px; height: 32px; min-width: 36px; padding: 0 9px; font-size: 13px;
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+}
+.ctl:hover { background: var(--ui-panel2); }
+.ctl.big { min-width: 44px; font-size: 15px; }
+.vol { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.vol .bar { width: 92px; height: 5px; border-radius: 3px; background: var(--ui-line); position: relative; }
+.vol .bar .fill { position: absolute; inset: 0 auto 0 0; width: 62%; background: var(--ui-dim); border-radius: 3px; }
+.vol .bar .knob { position: absolute; left: 62%; top: 50%; width: 11px; height: 11px; border-radius: 50%; background: var(--ui-text); transform: translate(-50%, -50%); }
+.vol .cap { font-family: var(--mono); font-size: 10.5px; color: var(--ui-faint); }
+.host-note {
+  margin-top: 9px; font-size: 11.5px; color: var(--ui-faint);
+  display: flex; align-items: center; gap: 6px;
+}
+.host-note .k { color: var(--ui-warn); }
+
+/* right rail: playlist over chat */
+.rail { border-left: 1px solid var(--ui-line); display: flex; flex-direction: column; background: var(--ui-bg); min-width: 0; }
+.rail-head {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border-bottom: 1px solid var(--ui-line); font-size: 11px; letter-spacing: .5px;
+  text-transform: uppercase; color: var(--ui-faint); font-weight: 600;
+}
+.rail-head .n { color: var(--ui-dim); }
+.rail-head .clear { margin-left: auto; background: none; border: none; color: var(--ui-faint); font-size: 11px; text-transform: none; letter-spacing: 0; cursor: pointer; }
+.rail-head .clear:hover { color: var(--ui-bad); }
+.queue { max-height: 246px; overflow-y: auto; padding: 6px; border-bottom: 1px solid var(--ui-line); }
+.q-item { display: flex; gap: 9px; padding: 6px; border-radius: 7px; }
+.q-item:hover { background: var(--ui-panel); }
+.q-item .thumb {
+  width: 62px; height: 35px; border-radius: 4px; flex: none; position: relative;
+  background: linear-gradient(150deg, #33405e, #1d2130);
+}
+.q-item .thumb .len {
+  position: absolute; right: 2px; bottom: 2px; background: #000000c4; color: #fff;
+  font-size: 9px; font-family: var(--mono); border-radius: 2px; padding: 0 3px;
+}
+.q-item .meta { min-width: 0; flex: 1; }
+.q-item .t { font-size: 12.5px; color: var(--ui-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-item .by { font-size: 11px; color: var(--ui-faint); display: flex; align-items: center; gap: 5px; margin-top: 2px; }
+.q-item .by .av { width: 14px; height: 14px; font-size: 8px; }
+.q-item.playing { background: color-mix(in srgb, var(--ui-accent) 13%, transparent); }
+.q-item.playing .t { color: #fff; font-weight: 500; }
+.q-item.playing .thumb { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+.q-nowtag { font-size: 9.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ui-accent); font-weight: 600; }
+.q-x {
+  align-self: center; background: none; border: none; color: var(--ui-faint);
+  font-size: 13px; padding: 2px 4px; border-radius: 4px; flex: none; cursor: pointer;
+}
+.q-x:hover { color: var(--ui-bad); background: var(--ui-panel2); }
+.q-x.by-host { color: var(--ui-warn); }
+.q-x.hidden { visibility: hidden; }
+.q-drag { color: var(--ui-faint); font-size: 12px; align-self: center; cursor: grab; flex: none; }
+.q-drag.off { visibility: hidden; }
+
+/* chat inside the party window */
+.pchat { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.pchat-scroll { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+.pm { font-size: 13px; }
+.pm .who { font-weight: 600; color: var(--ui-text); font-size: 12.5px; }
+.pm .when { color: var(--ui-faint); font-size: 10.5px; margin-left: 6px; font-family: var(--mono); }
+.pm .text { color: var(--ui-dim); font-size: 13px; }
+.pm.sys { color: var(--ui-faint); font-size: 12px; display: flex; gap: 6px; align-items: baseline; }
+.pm.sys .g { color: var(--ui-warn); flex: none; }
+.pm.sys b { color: var(--ui-dim); font-weight: 600; }
+.pm.queued { color: var(--ui-faint); font-size: 12px; }
+.pm.queued b { color: var(--ui-accent); font-weight: 500; }
+.pcomposer { padding: 10px 12px 12px; border-top: 1px solid var(--ui-line); }
+.pcomposer .box {
+  background: var(--ui-panel); border: 1px solid var(--ui-line); border-radius: 8px;
+  padding: 8px 11px; color: var(--ui-faint); font-size: 13px; display: flex; align-items: center; gap: 8px;
+}
+.pcomposer .box .send { margin-left: auto; color: var(--ui-accent); font-size: 12px; }
+.pcomposer .hint { font-size: 11px; color: var(--ui-faint); margin-top: 6px; }
+
+/* watchers strip with a volume popover, opened for illustration */
+.watchers {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--ui-line); background: var(--ui-bg2); position: relative;
+}
+.watcher { position: relative; }
+.watcher .av { width: 24px; height: 24px; font-size: 10px; border: 1px solid var(--ui-line); }
+.watcher.is-host .av { border-color: var(--ui-warn); box-shadow: 0 0 0 1px var(--ui-warn); }
+.watcher .crown { position: absolute; top: -6px; right: -4px; font-size: 9px; }
+.watchers .count { margin-left: auto; font-size: 11.5px; color: var(--ui-faint); }
+.volpop {
+  position: absolute; top: 40px; left: 44px; z-index: 5; width: 190px;
+  background: var(--ui-panel); border: 1px solid var(--ui-line); border-radius: 9px;
+  padding: 10px 11px; box-shadow: 0 12px 28px -8px #000;
+}
+.volpop .h { font-size: 12px; color: var(--ui-text); display: flex; align-items: center; gap: 6px; }
+.volpop .h .pct { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--ui-dim); }
+.volpop .bar { margin-top: 9px; height: 5px; border-radius: 3px; background: var(--ui-line); position: relative; }
+.volpop .bar .fill { position: absolute; inset: 0 auto 0 0; width: 85%; background: var(--ui-accent); border-radius: 3px; }
+.volpop .bar .knob { position: absolute; left: 85%; top: 50%; width: 11px; height: 11px; border-radius: 50%; background: #fff; transform: translate(-50%, -50%); }
+.volpop .f { font-size: 11px; color: var(--ui-faint); margin-top: 8px; line-height: 1.4; }
+
+/* ------------------------------------------------------- state switching */
+body[data-party="none"] .when-live,
+body[data-party="none"] .when-active,
+body[data-party="none"] .when-joined { display: none; }
+body[data-party="live"] .when-none,
+body[data-party="live"] .when-joined { display: none; }
+body[data-party="joined"] .when-none,
+body[data-party="joined"] .when-live { display: none; }
+
+body[data-role="guest"] .host-only-show { display: none; }
+body[data-role="host"] .guest-only-show { display: none; }
+body[data-role="guest"] .ctl.host-only { opacity: .35; cursor: not-allowed; }
+body[data-role="guest"] .q-x.by-host { visibility: hidden; }
+body[data-role="guest"] .q-drag { visibility: hidden; }
+
+/* ------------------------------------------------------------- footnotes */
+.notes {
+  margin-top: 30px; display: grid; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
+  gap: 1px; background: var(--pg-line); border: 1px solid var(--pg-line);
+  border-radius: 10px; overflow: hidden;
+}
+.note { background: var(--pg-rail); padding: 16px 18px; }
+.note h3 {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--pg-mute); margin: 0 0 8px; font-weight: 500;
+}
+.note p { margin: 0; font-size: 14px; color: var(--pg-text); }
+.note b { color: var(--pg-head); font-weight: 600; }
+
+.open-q { margin-top: 62px; border-top: 1px solid var(--pg-line); padding-top: 26px; }
+.open-q h2 { font-size: 21px; font-weight: 600; color: var(--pg-head); margin: 0 0 4px; }
+.open-q > p { margin: 0 0 20px; color: var(--pg-mute); font-size: 14.5px; max-width: 60ch; }
+.qlist { display: flex; flex-direction: column; border-top: 1px solid var(--pg-line); }
+.q {
+  display: grid; grid-template-columns: 190px 1fr; gap: 22px;
+  padding: 15px 0; border-bottom: 1px solid var(--pg-line); align-items: start;
+}
+.q .qh { font-weight: 600; color: var(--pg-head); font-size: 15px; }
+.q .qh span {
+  display: block; font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--pg-mute); font-weight: 400; margin-top: 3px;
+}
+.q .qb { font-size: 14.5px; }
+.q .qb em { color: var(--pg-head); font-style: normal; font-weight: 600; }
+
+.scroll-x { overflow-x: auto; }
+.scroll-x > .window { min-width: 940px; }
+
+@media (max-width: 760px) {
+  .q { grid-template-columns: 1fr; gap: 6px; }
+  h1 { font-size: 30px; }
+  .wrap { padding: 30px 16px 70px; }
+}
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">isthislegit · desktop client · feature mockup</p>
+    <h1>Watch Party</h1>
+    <p class="lede">A shared YouTube queue with one person driving. The party lives in
+    <strong>its own window</strong> so it can go on a second monitor; the main client keeps a
+    strip above the voice panel to join, leave and see what is playing.
+    Nothing here is wired up — every control is a picture.</p>
+    <div class="chip-row">
+      <span class="chip">session-only chat · never written to the database</span>
+      <span class="chip">queue lives in server memory</span>
+      <span class="chip">anyone can start one</span>
+      <span class="chip warn">host drives playback</span>
+    </div>
+  </header>
+
+  <!-- ------------------------------------------------ main client window -->
+  <section class="screen-block">
+    <div class="screen-head">
+      <div>
+        <p class="num">Surface 1 — main window</p>
+        <h2>The strip above voice</h2>
+        <p>The party appears in the sidebar as its own section, and once you are in it a strip
+        sits directly above the voice panel — same shape as that panel, so it reads as the same
+        kind of thing: something you are currently in and can leave.</p>
+      </div>
+      <div class="switch">
+        <span class="switch-label">State</span>
+        <div class="seg" id="party-seg">
+          <button data-party="none" aria-pressed="false">No party</button>
+          <button data-party="live" aria-pressed="false">Live, not joined</button>
+          <button data-party="joined" aria-pressed="true">Joined</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="scroll-x">
+      <div class="window">
+        <div class="titlebar">
+          <span class="app-mark"></span><span>isthislegit</span>
+          <span class="spacer"></span>
+          <span class="wbtns"><span>─</span><span>▢</span><span>✕</span></span>
+        </div>
+
+        <div class="client">
+          <!-- sidebar -->
+          <div class="pane side">
+            <div class="sb-head">Legit HQ</div>
+            <div class="sb-scroll">
+              <div class="sb-section">Text <button class="sb-add">+</button></div>
+              <div class="chan active"><span class="hash">#</span>general</div>
+              <div class="chan"><span class="hash">#</span>links</div>
+              
+
+              <div class="sb-section">Watch party <button class="sb-add" title="Start a watch party">+</button></div>
+              <div class="chan when-none" style="color: var(--ui-faint);">
+                <span class="hash">🎬</span>Start a watch party
+              </div>
+              <div class="chan party-live when-active">
+                <span class="hash">🎬</span>Movie Night
+                <span class="live-dot">live</span>
+              </div>
+              <div class="voice-mem when-active">
+                <span class="av k">K</span>Kres
+                <span style="margin-left:auto;font-size:10px;color:var(--ui-warn)">host</span>
+              </div>
+              <div class="voice-mem when-active"><span class="av v">V</span>Vex</div>
+              <div class="voice-mem when-active"><span class="av m">M</span>mid</div>
+              <div class="voice-mem when-active"><span class="av n">N</span>Nova</div>
+
+              <div class="sb-section">Voice <button class="sb-add">+</button></div>
+              <div class="chan"><span class="hash">🔊</span>General<span class="count">4</span></div>
+              <div class="voice-mem"><span class="av k">K</span>Kres</div>
+              <div class="voice-mem"><span class="av v">V</span>Vex</div>
+              <div class="voice-mem"><span class="av m">M</span>mid <span style="margin-left:auto">🔇</span></div>
+              <div class="voice-mem"><span class="av n">N</span>Nova</div>
+              
+            </div>
+
+            <!-- watch party strip: below the channel list, above the voice panel -->
+            <div class="party-panel when-live">
+              <div class="pp-head">
+                <span class="pp-dot"></span>
+                <span class="pp-status">Watch party live</span>
+              </div>
+              <div class="pp-title">🎬 Movie Night</div>
+              <div class="pp-sub">Kres, Vex, mid and 1 other</div>
+              <div class="pp-now">▶ The Entire History of the Sega Saturn</div>
+              <div class="pp-buttons">
+                <button class="primary">Join</button>
+              </div>
+            </div>
+
+            <div class="party-panel when-joined">
+              <div class="pp-head">
+                <span class="pp-dot"></span>
+                <span class="pp-status">In watch party</span>
+                <button class="pp-leave">Leave</button>
+              </div>
+              <div class="pp-title">🎬 Movie Night <span style="color:var(--ui-faint);font-size:11px">· 4 watching</span></div>
+              <div class="pp-now">▶ The Entire History of the Sega Saturn</div>
+              <div class="pp-buttons">
+                <button>Bring window here</button>
+              </div>
+            </div>
+
+            <!-- existing voice panel, unchanged -->
+            <div class="voice-panel">
+              <div class="vp-head">
+                <span class="vp-dot"></span><span class="vp-status">Voice connected</span>
+                <button class="vp-leave">Leave</button>
+              </div>
+              <div class="vp-channel">🔊 General</div>
+              <div class="vp-buttons">
+                <button>🎙</button><button>🎧</button><button>🖥</button>
+              </div>
+            </div>
+
+            <div class="footer">
+              <span class="av k lg">K</span>
+              <span class="name">Kres</span>
+              <span class="caret">▾</span>
+            </div>
+          </div>
+
+          <!-- centre -->
+          <div class="pane">
+            <div class="chan-head"><span class="hash">#</span>general</div>
+            <div class="msgs">
+              <div class="msg">
+                <span class="av v lg">V</span>
+                <div class="body">
+                  <div class="who">Vex <span class="when">21:02</span></div>
+                  <div class="text">did we ever finish that saturn doc</div>
+                </div>
+              </div>
+              <div class="msg">
+                <span class="av k lg">K</span>
+                <div class="body">
+                  <div class="who">Kres <span class="when">21:03</span></div>
+                  <div class="text">no lol. starting a party, get in</div>
+                </div>
+              </div>
+              <div class="sys-msg when-active">
+                🎬 <span><b>Kres</b> started a watch party · <b>Movie Night</b> · 4 watching</span>
+                <button class="when-live">Join</button>
+                <button class="when-joined" style="background:var(--ui-panel2)">Open window</button>
+              </div>
+              <div class="msg">
+                <span class="av n lg">N</span>
+                <div class="body">
+                  <div class="who">Nova <span class="when">21:04</span></div>
+                  <div class="text">one sec, finding snacks</div>
+                </div>
+              </div>
+            </div>
+            <div class="composer"><div>Message #general</div></div>
+          </div>
+
+          <!-- members -->
+          <div class="pane members">
+            <div class="mem-head">Online — 5</div>
+            <div class="mem"><span class="av k">K</span>Kres <span class="tag when-active">watching</span></div>
+            <div class="mem"><span class="av v">V</span>Vex <span class="tag when-active">watching</span></div>
+            <div class="mem"><span class="av m">M</span>mid <span class="tag when-active">watching</span></div>
+            <div class="mem"><span class="av n">N</span>Nova <span class="tag when-active">watching</span></div>
+            <div class="mem"><span class="av t">T</span>tomo</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="note">
+        <h3>Who can start one</h3>
+        <p>Anyone. The <b>+</b> next to the section header is live for every member, not just
+        admins — unlike text and voice channels, which are the server's furniture.</p>
+      </div>
+      <div class="note">
+        <h3>Why a strip, not a channel</h3>
+        <p>A watch party is something you are <b>in</b>, like a call. Putting it where the voice
+        panel is means one glance answers "what am I currently in".</p>
+      </div>
+      <div class="note">
+        <h3>Voice keeps running</h3>
+        <p>The party never touches the call. People stay in <b>🔊 General</b> and talk over the
+        video, so the party needs no audio transport of its own.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------- watch party window -->
+  <section class="screen-block">
+    <div class="screen-head">
+      <div>
+        <p class="num">Surface 2 — its own window</p>
+        <h2>The party window</h2>
+        <p>A separate OS window, freely moved and resized onto whatever monitor you like, holding
+        the player, the queue and a chat that exists only while the party does. Flip the switch to
+        see what a guest may touch and what only the host may.</p>
+      </div>
+      <div class="switch">
+        <span class="switch-label">Viewing as</span>
+        <div class="seg" id="role-seg">
+          <button data-role="host" aria-pressed="true">Host</button>
+          <button data-role="guest" aria-pressed="false">Guest</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="scroll-x">
+      <div class="window">
+        <div class="titlebar">
+          <span class="app-mark"></span>
+          <span>🎬 Movie Night — Watch Party</span>
+          <span class="spacer"></span>
+          <span class="wbtns"><span>─</span><span>▢</span><span>✕</span></span>
+        </div>
+
+        <div class="party">
+          <!-- stage + transport -->
+          <div class="stage-col">
+            <div class="stage">
+              <div class="thumbnail"></div>
+              <div class="stage-badges">
+                <span class="badge sync">● in sync</span>
+                <span class="badge host host-only-show">you are the host</span>
+                <span class="badge guest-only-show">Kres is driving</span>
+              </div>
+              <div class="play-glyph">▶</div>
+              <div class="stage-title">
+                <div class="t">The Entire History of the Sega Saturn</div>
+                <div class="s">queued by Kres · 3 more up next</div>
+              </div>
+            </div>
+
+            <div class="transport">
+              <div class="scrub">
+                <span class="time">34:52</span>
+                <div class="track"><div class="fill"></div><div class="knob"></div></div>
+                <span class="time">1:42:07</span>
+              </div>
+
+              <div class="controls">
+                <button class="ctl big host-only" title="Play / pause">⏸</button>
+                <button class="ctl host-only" title="Back 10 seconds">⏪ 10</button>
+                <button class="ctl host-only" title="Forward 10 seconds">10 ⏩</button>
+                <button class="ctl host-only" title="Skip to next">⏭ Skip</button>
+                <button class="ctl guest-only-show" title="Ask the host to skip">🙋 Request skip</button>
+                <div class="vol">
+                  <span>🔊</span>
+                  <div class="bar"><div class="fill"></div><div class="knob"></div></div>
+                  <span class="cap">62%</span>
+                  <button class="ctl" title="Fullscreen">⛶</button>
+                </div>
+              </div>
+
+              <div class="host-note host-only-show">
+                <span class="k">◆</span> Play, pause, seek and skip go out to everyone. Your volume does not.
+              </div>
+              <div class="host-note guest-only-show">
+                <span class="k">◆</span> Kres controls playback. Volume is yours alone — nobody else hears you change it.
+              </div>
+            </div>
+          </div>
+
+          <!-- right rail -->
+          <div class="rail">
+            <div class="watchers">
+              <span class="watcher is-host"><span class="av k">K</span><span class="crown">👑</span></span>
+              <span class="watcher"><span class="av v">V</span></span>
+              <span class="watcher"><span class="av m">M</span></span>
+              <span class="watcher"><span class="av n">N</span></span>
+              <span class="count">4 watching</span>
+              <div class="volpop">
+                <div class="h"><span class="av v">V</span> Vex <span class="pct">85%</span></div>
+                <div class="bar"><div class="fill"></div><div class="knob"></div></div>
+                <div class="f">How loud they are for you — the same setting the voice sidebar sets.</div>
+              </div>
+            </div>
+
+            <div class="rail-head">
+              Up next <span class="n">· 3</span>
+              <button class="clear host-only-show">Clear queue</button>
+            </div>
+            <div class="queue">
+              <div class="q-item playing">
+                <span class="q-drag off">⠿</span>
+                <div class="thumb"><span class="len">1:42:07</span></div>
+                <div class="meta">
+                  <div class="q-nowtag">Now playing</div>
+                  <div class="t">The Entire History of the Sega Saturn</div>
+                  <div class="by"><span class="av k">K</span> Kres</div>
+                </div>
+                <button class="q-x hidden">✕</button>
+              </div>
+
+              <div class="q-item">
+                <span class="q-drag">⠿</span>
+                <div class="thumb"><span class="len">22:14</span></div>
+                <div class="meta">
+                  <div class="t">Blade Runner 2049 — Making Of</div>
+                  <div class="by"><span class="av v">V</span> Vex</div>
+                </div>
+                <!-- someone else's: the host can remove it, a guest cannot -->
+                <button class="q-x by-host" title="Remove — host">✕</button>
+              </div>
+
+              <div class="q-item">
+                <span class="q-drag">⠿</span>
+                <div class="thumb"><span class="len">3:39</span></div>
+                <div class="meta">
+                  <div class="t">Bad Apple!! but it is an Excel spreadsheet</div>
+                  <div class="by"><span class="av k">K</span> Kres <span style="color:var(--ui-faint)">· you</span></div>
+                </div>
+                <!-- yours in either role -->
+                <button class="q-x" title="Remove — you added this">✕</button>
+              </div>
+
+              <div class="q-item">
+                <span class="q-drag">⠿</span>
+                <div class="thumb"><span class="len">8:41</span></div>
+                <div class="meta">
+                  <div class="t">Every Frame a Painting — Jackie Chan</div>
+                  <div class="by"><span class="av n">N</span> Nova</div>
+                </div>
+                <button class="q-x by-host" title="Remove — host">✕</button>
+              </div>
+            </div>
+
+            <div class="rail-head">Party chat <span class="n">· not saved</span></div>
+            <div class="pchat">
+              <div class="pchat-scroll">
+                <div class="pm sys"><span class="g">🎬</span><span><b>Kres</b> started the party</span></div>
+                <div class="pm queued"><b>Vex</b> queued <b>Blade Runner 2049 — Making Of</b></div>
+                <div class="pm">
+                  <div class="who">Vex <span class="when">21:07</span></div>
+                  <div class="text">this doc is 90 minutes long. bold of you</div>
+                </div>
+                <div class="pm">
+                  <div class="who">mid <span class="when">21:07</span></div>
+                  <div class="text">we have all night</div>
+                </div>
+                <div class="pm queued"><b>Nova</b> queued <b>Every Frame a Painting — Jackie Chan</b></div>
+                <div class="pm sys"><span class="g">⏸</span><span><b>Kres</b> paused</span></div>
+                <div class="pm">
+                  <div class="who">Nova <span class="when">21:09</span></div>
+                  <div class="text">ok back</div>
+                </div>
+                <div class="pm sys"><span class="g">▶</span><span><b>Kres</b> resumed at 34:52</span></div>
+              </div>
+              <div class="pcomposer">
+                <div class="box">
+                  <span>Message, or paste a YouTube link to queue it</span>
+                  <span class="send">↵</span>
+                </div>
+                <div class="hint">Chat here is gone when the party ends — it never reaches #general.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="note">
+        <h3>One composer, two jobs</h3>
+        <p>Paste a link and it becomes a queue item; type anything else and it is a message.
+        No separate "add video" field to hunt for, and the queued line in chat is the receipt.</p>
+      </div>
+      <div class="note">
+        <h3>Removing from the queue</h3>
+        <p>You always get an <b>✕</b> on your own items. The host gets one on <b>everything</b>,
+        drawn in amber so it is clear that is a host power and not your own.</p>
+      </div>
+      <div class="note">
+        <h3>Volume is per person</h3>
+        <p>The bar in the transport is the video's, for you only. Clicking a watcher opens the
+        per-user volume the voice sidebar already has, so one slider covers both.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------- open questions -->
+  <section class="open-q">
+    <h2>What we still have to decide</h2>
+    <p>Each of these changes the build meaningfully, and none of them are settled by a mockup.</p>
+
+    <div class="qlist">
+      <div class="q">
+        <div class="qh">Sync accuracy<span>hardest part</span></div>
+        <div class="qb">YouTube's iframe player takes only coarse commands, so frame-perfect lock
+        is out. The realistic target is <em>everyone within about a second</em>: the server holds
+        the clock, clients nudge with playback rate on small drift and hard-seek on large. Buffering
+        is the ugly case — does one person's stall pause the room, or do they catch up alone?</div>
+      </div>
+      <div class="q">
+        <div class="qh">Host handover<span>who drives</span></div>
+        <div class="qb">If the host closes the window or drops off, someone inherits the controls.
+        Simplest rule that works: <em>the longest-present watcher becomes host</em>, with a line in
+        party chat saying so. The party ends when the last person leaves.</div>
+      </div>
+      <div class="q">
+        <div class="qh">"Anyone can have their audio adjusted"<span>needs your call</span></div>
+        <div class="qb">Two readings, and the mockup shows both. Either everyone sets
+        <em>their own</em> video volume locally (the transport bar), or watchers can be turned up
+        and down individually the way voice members already can (the popover). If it is the second,
+        is that simply the existing per-user voice volume under a new lid?</div>
+      </div>
+      <div class="q">
+        <div class="qh">Where the state lives<span>server shape</span></div>
+        <div class="qb">Nothing here needs to survive a restart, so: <em>in-memory on the server</em>,
+        one party object per guild, broadcast over the socket gateway that already exists. No Prisma
+        migration, no new tables, and a server restart simply ends the party.</div>
+      </div>
+      <div class="q">
+        <div class="qh">One party or many<span>scope</span></div>
+        <div class="qb">Starting with <em>one live party per server</em> keeps the sidebar honest and
+        dodges "which party am I in". Several at once is a later change, not a shape we have to leave
+        room for now.</div>
+      </div>
+      <div class="q">
+        <div class="qh">Blocked embeds<span>will happen</span></div>
+        <div class="qb">Plenty of videos refuse to play embedded, and it fails <em>per person</em> —
+        you find out when your own player errors. The queue needs a state for "this one will not play
+        here", surfaced to the host so they can skip it rather than everyone staring at a black
+        rectangle.</div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+  // The two switches are the whole of the interaction: they set an attribute on
+  // <body>, and CSS decides what a host sees versus a guest, and what the
+  // sidebar shows in each party state. Nothing else on this page does anything.
+  function wire(id, attr) {
+    const seg = document.getElementById(id);
+    seg.addEventListener('click', (e) => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      document.body.setAttribute('data-' + attr, btn.dataset[attr]);
+      for (const b of seg.querySelectorAll('button')) {
+        b.setAttribute('aria-pressed', String(b === btn));
+      }
+    });
+  }
+  wire('party-seg', 'party');
+  wire('role-seg', 'role');
+  document.body.setAttribute('data-party', 'joined');
+  document.body.setAttribute('data-role', 'host');
+</script>

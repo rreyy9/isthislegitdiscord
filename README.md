@@ -18,9 +18,10 @@ goes direct to the box; only signalling and the HTTP API go through the proxy.
 - [Layout](#layout) · [Requirements](#requirements)
 - [Running it](#running-it) · [The two installers](#the-two-installers)
 - [Updating the client](#updating-the-client) · [Older clients](#older-clients)
-- [Configuration](#configuration) · [Going public](#going-public) · [Database](#database) · [Retention](#retention)
+- [Configuration](#configuration) · [Going public](#going-public) · [Database](#database) · [Backups](#backups) · [Retention](#retention)
 - [Voice quality](#voice-quality) · [Mentions](#mentions) · [Pinned messages](#pinned-messages)
-- [Search](#search) · [Attachments](#attachments) · [API](#api)
+- [Replies and forwards](#replies-and-forwards)
+- [Search](#search) · [Attachments](#attachments) · [API](#api) · [Tests](#tests) · [Logs](#logs)
 - [Decisions worth not re-litigating](#decisions-worth-not-re-litigating)
 - [Bugs that cost real time](#bugs-that-cost-real-time)
 - [What is left](#what-is-left)
@@ -39,14 +40,18 @@ infra/livekit        LiveKit config and start script
 infra/caddy          Caddyfile and start script: TLS for the API and signalling
 infra/installer      Builds the server installer
 infra/start-all.ps1  Start, stop and status for all three services
+infra/backup.ps1     pg_dump + uploads, verified, on a schedule
+infra/restore.ps1    Puts one back -- into a scratch database by default
 infra/allow-lan.ps1  Firewall rules
 infra/publish-desktop-update.ps1  Uploads a built client to the server and publishes it
 data/uploads         Uploaded images on disk, named by id
 data/updates/desktop Published client builds: latest.yml, the installer, its blockmap
 data/updates/staging An uploaded build, before it is published
+data/logs            server-YYYY-MM-DD.log, 30 days
 ```
 
 Everything is TypeScript except the console, which is plain ESM with no build step.
+Tests are Vitest, run from the root with `npm test` -- see [Tests](#tests).
 
 ## Requirements
 
@@ -462,7 +467,7 @@ Everything lives in three files that have to agree with each other, and the cons
 
 | File | Holds |
 |---|---|
-| `apps/server/.env` | Database URL, secrets, `LIVEKIT_URL`, port, voice quality, upload limit |
+| `apps/server/.env` | Database URL, secrets, `LIVEKIT_URL`, port, voice quality, upload limit, CORS and login limits |
 | `infra/livekit/livekit.yaml` | The key pair, and which address LiveKit advertises |
 | `infra/caddy/Caddyfile` | The two public hostnames |
 
@@ -471,6 +476,22 @@ rather than deployment shape, so it lives in a `ServerSetting` table — editabl
 the database backup, and not a fourth file that has to agree with the other three. Two more
 paths and a version floor are `.env` because the installer writes them: `UPLOAD_DIR`,
 `UPDATES_DIR` and `MIN_CLIENT_VERSION`, all documented in `.env.example`.
+
+**Two things that used to be wide open are now lists, and both default to the clients this
+repo ships**, so neither needs setting for the deployment described here:
+
+| Variable | Default, and why |
+|---|---|
+| `CORS_ORIGINS` | `null` plus the dev renderer on `:5173`. `null` is not a placeholder — it is the literal origin Chromium sends for a packaged client, which renders from `file://`. A request with no `Origin` header at all is always allowed: that is the console, curl and every health probe, and a browser always sends one when it matters. Matching is exact, never by prefix. |
+| `LOGIN_RATE_LIMIT` / `LOGIN_RATE_WINDOW_MS` | Ten failures per address per five minutes, across `/api/login`, `/api/register` and the raw Better Auth credential endpoints **together** — one budget, so picking the other door gains nothing. Only failures count and a success clears the address, so a client that merely keeps reconnecting is never locked out. |
+
+The limiter is Express middleware rather than a Nest guard, and that is the fix rather than
+a detail. `ThrottlerGuard` is an `APP_GUARD`, and Better Auth is mounted straight onto the
+Express instance in `main.ts`, upstream of Nest's router — so `/api/auth/sign-in/email` was
+never in its pipeline and was completely unlimited, while `/api/login` sat under a
+300-per-minute limit meant for socket reconnects. A limit on one of two doors onto the same
+password check is worse than none, because the console reads as though the question has been
+settled. `LOG_DIR` and `LOG_KEEP_DAYS` are the other two new ones — see [Logs](#logs).
 
 The tab exposes a deployment **mode** — LAN or internet — rather than the individual
 fields, because `LIVEKIT_URL` and `use_external_ip` are two halves of one decision and
@@ -567,6 +588,22 @@ installer runs. The role's password is **generated per install** and written int
 development password that is published in this repository, which is only ever right for a
 local dev database.
 
+**A dev checkout uses `chat_dev`, not `chat`.** The two used to be one database, which is
+fine while testing and miserable the moment it is not: the failure is not a crash, it is
+running a migration, a `prisma db push` or a seed against the data ten people are actually
+using, from a checkout you are in the middle of changing. The SQL takes the name as a
+variable and defaults to `chat`, so the installer and the console are unaffected:
+
+```bash
+psql -U postgres -v db_name=chat_dev -f apps\server\prisma\setup-postgres.sql
+cd apps\server && npx prisma db push
+```
+
+Both databases are owned by the same role, so nothing else changes. The role deliberately
+has **no `CREATEDB`** — it never needs it, and the only things that do are these scripts and
+[restore.ps1](#restoring-and-the-drill), which fall back to the superuser and let *psql*
+prompt for that password rather than handling one.
+
 ```bash
 # Wipe everything, including the schema and migration history
 & "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U chat_app -d chat -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO chat_app;"
@@ -652,14 +689,71 @@ itself.
 
 ---
 
+## Backups
+
+> **This is the thing retention was waiting for.** Until it existed, every message, image
+> and password hash on this server had exactly one copy, on a home box, with a feature whose
+> job is to delete things on purpose sitting built and switched off next to it.
+
+```powershell
+infra\backup.ps1 -Destination D:\backups\isthislegit          # once, by hand
+infra\backup.ps1 -Destination D:\backups\isthislegit -Install # nightly, from then on
+```
+
+`-Install` registers a scheduled task at **03:30**, half an hour ahead of the retention
+sweeper's 4am cron. That order is the whole point and is not a detail to tidy later: the
+backup has to hold the night's data before anything is allowed to start deleting it.
+
+**What it writes.** A dated directory per run holding `database.dump` — `pg_dump -Fc`, so it
+is compressed and restorable table by table — beside a single `uploads/` tree shared by
+every run. `-Keep` (default 14) prunes old dumps, **after** the new one has succeeded, never
+before: deleting yesterday's good backup before today's is proven is how one bad night costs
+two.
+
+**Uploads are copied additively, not mirrored.** Retention deletes uploads on purpose, and a
+true mirror would faithfully delete them from the backup too — which turns the safety net
+into a second copy of the same policy. `-PurgeUploads` opts into mirroring for when the
+backup disk fills and that trade becomes worth making.
+
+**Every dump is read back before the run is called a success.** `pg_restore --list` on the
+file it just wrote, plus a check that this application's tables are actually in it. An
+unreadable dump otherwise fails at exactly the moment there is nothing else left. A failed
+dump is deleted rather than kept, along with the empty directory it would have sat in —
+a half-written file that looks like a backup is worse than no file at all.
+
+It cannot check row counts, and does not pretend to: `pg_dump` lists a `TABLE DATA` entry for
+every table whether or not it holds rows, so the listing cannot tell a full database from an
+empty one. Only a restore can.
+
+### Restoring, and the drill
+
+```powershell
+infra\restore.ps1 -From D:\backups\isthislegit\2026-09-08-033000 -Into chat_restore_test
+```
+
+**Do this once now, not for the first time when you need it.** `-Into` restores to a scratch
+database, prints the row counts it landed, leaves the live one untouched, and tells you how
+to drop it afterwards. That is the whole drill, and it is the only thing that turns the
+paragraph above from a claim into a fact.
+
+Restoring over the live database takes two deliberate acts — naming it *and* passing
+`-Force` — and is refused outright while the server is still listening on :3000, because a
+restore into a database being written to produces neither the old data nor the new.
+
+The application role has no `CREATEDB`, deliberately; it never needs it. When the target
+database does not exist the script falls back to the `postgres` superuser and lets *psql*
+prompt for that password rather than handling one itself.
+
+---
+
 ## Retention
 
 > **Built, and switched off.** `enabled` defaults to false and every limit defaults to
 > "keep", so a fresh install deletes nothing and an upgrade changes nothing. **Do not turn
-> it on before backups exist** — see [What is left](#what-is-left). This feature's entire
-> job is to permanently destroy other people's messages, on a server that currently holds
-> the only copy of them, and one mistyped number with nothing behind it is unrecoverable.
-> The console says so on the tab, in as many words.
+> it on until [backups](#backups) are running and one restore has actually been tried** —
+> the script exists now, which is not the same as it having run. This feature's entire job
+> is to permanently destroy other people's messages, and one mistyped number with nothing
+> behind it is unrecoverable. The console says so on the tab, in as many words.
 
 Age-based cleanup so the disk does not fill, set once on the server rather than per client,
 for the same reason the voice bitrate is: it is a decision about shared resources.
@@ -935,6 +1029,82 @@ npm run db:migrate
 
 ---
 
+## Replies and forwards
+
+Hover a message and the row gains two more buttons. **↩** puts a bar over the composer
+saying who you are answering; send, and the reply carries a one-line strip above it naming
+the message it answers. Click that strip and you land on the original, wherever it is —
+including a thousand messages back, which is a fetch rather than a scroll. **↪** opens a
+dialog listing the text channels on the server; pick one, optionally say something about
+it, and the message arrives there drawn as a card under your own name and words.
+
+**Replying tags them.** That is what replying is for; a reply nobody hears about is a
+message that happens to sit under another one. The bar has an **@ on / @ off** switch for
+the third message of a back-and-forth, where the other person is plainly already reading.
+
+**A reply ping is a `MessageMention` row, not a second mechanism.** Everything downstream
+of a tag — the red count on the channel, the tint on the message, the toast, the sound,
+the clearing when the channel is read — already exists and already works, and a reply is a
+tag by another route. What differs is one sentence: the toast says "replied to you in
+#general" rather than "in #general", carried by a `kind` on `mention:new` that an older
+client drops. Replying to yourself pings nobody, exactly as tagging yourself does not.
+
+**An edit never changes who was pinged.** Sending answered the question, and re-asking it
+would let somebody ping a person by editing a reply they had deliberately sent quietly. So
+`MentionsService.sync` takes `alsoPing` on the way in and `keepPinged` on an edit: one
+creates the row, the other only declines to sweep it away when the re-resolved text does
+not name that person. There is no column for the switch — the row is the record.
+
+**A quote is a join, never a copy.** `MessageRef` is built on every read from
+`replyToId` / `forwardedFromId`, both plain nullable self-references on `Message`. Storing
+the text at send time would quote what a message used to say the moment it was edited, and
+would keep a name its author has since changed — the same argument that makes tags travel
+as ids. The parent is a primary-key lookup, so there is nothing to denormalise for.
+
+**One type for both, and it cannot nest.** A reply's strip and a forward's card are the
+same idea — one message showing another — so they are one `MessageRef`, and the select
+that builds it does not include `replyTo` or `forwardedFrom`. A chain of replies eight
+deep is eight messages each carrying exactly one quote. That is a property of the shape
+rather than a depth check somebody has to remember.
+
+**Forwarding follows the chain once, at the moment of sending.** Forwarding a forward
+stores the original, so nothing ever points at another forward.
+
+**`SET NULL`, not `CASCADE`.** Deleting an account cascades every message that account
+sent. A reply somebody else wrote has to survive the message it was answering, losing its
+quote and not itself. The two indexes on those columns are for the constraint rather than
+for any query: Postgres does not index a foreign key on its own, and without them a
+cascade that removes ten thousand messages is ten thousand scans of the message table.
+
+**A deleted original keeps its pointer and loses everything else.** The server sends empty
+content with `deleted: true`, and the strip becomes "Original message was deleted" — drawn,
+not hidden, because a reply whose quote silently vanished reads as an answer to nothing.
+Clients patch their own loaded copies on `message:deleted` and `message:updated` for the
+same reason the pin board does: nothing a moderator removed should sit on screen inside
+somebody else's message until the next reload.
+
+**Forwarding is bounded to one guild, and that is a permission decision.** Every member of
+a guild can already read every channel in it, so a forward inside one puts nothing in
+front of anyone that they could not have opened themselves, and the card's link to the
+original always leads somewhere they can go. Neither is true across guilds, so the server
+refuses it — checked rather than assumed from the fact that this deployment has one guild.
+
+**Nothing new on the wire.** A forward is `POST /api/channels/:id/messages` with one more
+field, because that is what it is: a message in the target channel. Same broadcast, same
+nonce, same optimistic echo. `replyPing` is preprocessed to accept `"true"`/`"false"`
+because a reply with a screenshot on it is multipart, where every field is a string.
+
+**It does not move you.** Forwarding happens mid-conversation; being taken to another
+channel for it would lose the place of whoever did it. A green line says where it went.
+
+The migration adds two columns, two foreign keys and two indexes. After pulling this, run:
+
+```bash
+npm run db:migrate
+```
+
+---
+
 ## Search
 
 A magnifying glass next to the pin in the channel header. Type two characters and results
@@ -1082,6 +1252,63 @@ are flat, so there is no hierarchy to rank two admins by; demote one from the co
 
 Socket.IO events are declared in `packages/shared/src/index.ts`.
 `apps/server/requests.http` exercises the whole API.
+
+---
+
+## Tests
+
+```powershell
+npm test          # once
+npm run test:watch
+```
+
+Vitest, one config at the repo root rather than one per package. The things worth testing
+here are pure modules that happen to sit on both sides of the client/server line — the URL
+parser and the noise gate are in the desktop app, the image header parser and the permission
+matrix are in the server — and three runners to keep in step buys nothing at this size.
+
+`environment: node` throughout, including for the desktop modules. Nothing under test
+touches the DOM: `audio-levels.ts` exports an `audioContext()` that does, but the gate and
+the detector are arithmetic over `Float32Array`, and arithmetic is the part that has ever
+been wrong.
+
+| Module | What it pins down |
+|---|---|
+| `link-utils.ts` | That a URL does not swallow the full stop after it, and that only `http(s)` ever becomes an href — `javascript:` and `data:` must never match. YouTube and TikTok ids are checked against lookalike hosts, because both get interpolated into an embed URL. |
+| `audio-levels.ts` | Silence floors at −100 rather than −Infinity; the gate stays shut while it measures the room, holds through the gaps between words, and takes less to stay open than to open. |
+| `chat-format.ts` | Byte sizes worded the way the server words them, "Yesterday" decided by the calendar and not by elapsed hours, and `lastSeenLabel` refusing to go negative when a clock is a few seconds ahead. |
+| `image-size.ts` | All four headers, a Huffman table not being mistaken for a JPEG frame header, and — the reason this code is not a dependency — that a malformed stream terminates instead of looping. Every truncation of every header is asserted not to throw. |
+| `permission.guard.ts` | The admin-only set, and that **a mute denies nothing**. It used to deny `channel.write` and `voice.join`, which was three punishments delivered under one name. |
+| `audio-config.ts` | RED on everywhere but studio, DTX only on `voice`, and a typo in `VOICE_QUALITY` falling back rather than refusing to start. |
+| `cors.ts` | That the allowlist does not prefix-match, so `https://good.example.evil.example` is refused. |
+| `login-throttle.ts` | That the window slides rather than resetting in a block, and that a success clears the address. A second file mounts it on a real Express app the way `main.ts` does — one route on the router, one straight on the app above it — and asserts that two failures on the second plus one on the first exhausts a budget of three. That is the bug, reproduced. |
+| `ids.ts` | UUIDv7 sorting chronologically as a string, and the invite alphabet being drawn from evenly. |
+| `file-logger.ts` | That the pruner removes only files it could have written. |
+
+Nothing renders a React tree and nothing touches a database — `PermissionService` is
+exercised against a two-row fake. That is a deliberate ceiling, not an oversight: these run
+on a checkout that has never had PostgreSQL installed, which is what makes running them
+free enough to actually do.
+
+---
+
+## Logs
+
+Everything Nest logs now also lands in `data/logs/server-YYYY-MM-DD.log`, rolled at midnight
+and kept for 30 days (`LOG_DIR`, `LOG_KEEP_DAYS`). Console output is unchanged.
+
+This is a log file, not observability. There is no metric, no alert, and nothing that
+reaches a phone. What it buys is the ability to answer *"what happened last Tuesday"* at
+all: each service runs in its own window on purpose, which is fine for watching something
+happen and no use for anything that happened while nobody was watching. A hundred thousand
+failed logins overnight looked exactly like a quiet night, and still would after a restart
+cleared the scrollback. It is also why [the login limiter](#configuration) bothers to log a
+blocked address.
+
+The pruner matches on the date in the filename rather than on mtime, and only ever removes
+files it could have written — the file sweeper's lesson in miniature. When a directory has
+more than one kind of owner, the sweep has to ask all of them; this one asks none, because
+it removes nothing it cannot prove is its own.
 
 ---
 
@@ -1263,57 +1490,78 @@ Ordered by what hurts soonest.
 
 **Should do next**
 
-1. **No backups.** Not of the database, not of `data/`. Other people's messages, images and
-   password hashes, zero copies. `pg_dump` on a schedule written somewhere that is not this
-   machine, and a restore actually tried once. **[Retention](#retention) must not ship
-   before this does**, since it deletes on purpose the thing nothing here is keeping a copy
-   of.
-2. **No tests, and no test runner in any package.** Start with the pure modules, which are
-   already shaped for it: `link-utils.ts`, `audio-levels.ts`, `image-size.ts`,
-   `audio-config.ts`, and the permission matrix.
-3. **Verify the login rate limit covers login.** Better Auth is mounted as raw Express
-   outside Nest's routing, so `ThrottlerGuard` — an `APP_GUARD` — may not see
-   `/api/auth/sign-in/email` at all. Rate limiting the controller while the underlying
-   endpoint stays open is worse than not having it, because it looks solved.
+1. **Run the backup, and try a restore.** [Backups](#backups) are written, scheduled and
+   verified-on-write, and `infra\restore.ps1` exists. None of that is the same as having
+   done it. Until `-Install` has run against a real destination and one
+   `-Into chat_restore_test` has printed row counts, this line stays here and
+   [retention](#retention) stays off. The destination should not be this machine.
+2. **The dev checkout still has no `chat_dev` to point at.** `.env` and
+   `setup-postgres.sql` now expect one — `psql -U postgres -v db_name=chat_dev -f
+   prisma\setup-postgres.sql`, then `npx prisma db push` — but that needs the postgres
+   superuser password, so it has not been run. The server will not start against a database
+   that does not exist, which is the loud kind of broken and the reason this is second
+   rather than fifth.
+3. **Verify the login limiter against the running server.** A test mounts it on a real
+   Express app in the same order `main.ts` does and proves one budget covers both doors, so
+   what is left is narrow but not nothing: that the live server's mount order matches. Eleven
+   wrong passwords against `/api/auth/sign-in/email` should return 429 with a `Retry-After`,
+   and a twelfth against `/api/login` should too.
 
 **Should do soon**
 
-4. **Disk fill takes PostgreSQL down, not just uploads.** Now visible and now clearable —
-   see [Size, and what is using it](#size-and-what-is-using-it) — but still not *bounded*
-   until somebody sets a [retention](#retention) policy, and that should wait for backups.
-   There is still no per-user quota.
-5. **CORS reflects any origin** with credentials. Pin it to the origins that exist.
-6. **Invite codes use `Math.random()`** — one line to `crypto.randomInt`, and invites are the
-   entire perimeter around registration.
-7. **No observability.** Logs go to the console and nowhere else; a hundred thousand failed
-   logins would pass unnoticed.
-8. **LiveKit advertises VirtualBox and Hyper-V addresses** as ICE candidates. Harmless until
-   a friend's own network uses `192.168.56.x` — which is an office or hotel, exactly where
-   you cannot debug it. `rtc.ips.excludes` trims the list.
-9. **The dev checkout and the installed server share one database.** Fine while testing,
-   miserable mid-debug. Point dev at `chat_dev`.
+4. **Disk fill takes PostgreSQL down, not just uploads.** Visible and clearable — see
+   [Size, and what is using it](#size-and-what-is-using-it) — but not *bounded* until
+   somebody sets a [retention](#retention) policy, which now waits only on item 1. There is
+   still no per-user quota.
+5. **Confirm the CORS allowlist against a packaged client.** `origin: true` is gone from
+   both the HTTP API and the socket, and the default list carries `null` because a packaged
+   Electron renderer loads from `file://`. That is reasoned rather than observed. A build
+   that fails to connect after this change is this line.
+6. **`Chat.tsx` is 3,557 lines and went up, not down.** It was 3,270 after the first split
+   — the formatting helpers, the shared types, both message panels and all the modals live in
+   `chat-format.ts`, `chat-types.ts`, `ChatPanels.tsx` and `ChatModals.tsx`, and replies and
+   forwards put their own presentation in `MessageRefs.tsx` and their dialog in
+   `ChatModals.tsx` rather than here. The component body still grew by about 290 lines, which
+   is the point: **everything that goes in it stays in it**, because the message list, the
+   composer, editing, moderation, attachments, unread markers, embeds and the volume popup
+   are one function sharing one closure. Reactions go on top of that unless the message list
+   comes out first, and that extraction needs a props interface nobody has designed yet.
+   Replies were the last feature that could be added without one.
+7. **`rtc.ips.excludes` is set but unproven.** VirtualBox, Hyper-V and link-local ranges are
+   now excluded in `livekit.yaml`. Whether LiveKit stops advertising them has not been
+   watched on the wire. Also note `livekit.yaml` is still in **LAN mode** (`node_ip`
+   pinned, `use_external_ip: false`) while the Status line at the top of this file describes
+   the internet deployment; one of the two is out of date.
+8. **Logs are a file, not observability.** [Logs](#logs) means last Tuesday is answerable
+   at all. Nothing counts anything, nothing alerts, and a hundred thousand failed logins now
+   leave a large file rather than no trace — which is progress and is not detection.
 
 **Product**
 
-10. `Chat.tsx` is past 1300 lines and holds the message list, editing, moderation,
-    attachments, unread markers, embeds and now the per-person volume popup. Split it
-    before adding reactions.
-11. Emoji reactions and a theme toggle. Non-image attachments, mentions and notifications,
-    and search are done — see [Attachments](#attachments) and [Search](#search).
-    Images in a message now open full size on click and copy on right-click — the copy goes
-    through main, because an uploaded image is a blob: URL the renderer can rasterise but a
-    linked one is another origin, where a canvas is tainted and `fetch` is a CORS failure.
-12. Neither Electron app has an icon — both ship with Electron's default.
-13. Client error surfaces: what a user sees on a 500. "Server is not there" is done —
-    `fetch` rejects with "Failed to fetch" for every address that never reached a server,
-    and devtools shows those with provisional headers, which reads as a cross-origin block
-    and is not one. `api.ts` now names the origin that did not answer, and says that a
-    server with no proxy in front of it is `http://` on its own port.
+9. Emoji reactions and a theme toggle. Non-image attachments, mentions and notifications,
+   search, and replies and forwards are done — see [Attachments](#attachments) and [Search](#search). Images in a
+   message open full size on click and copy on right-click — the copy goes through main,
+   because an uploaded image is a `blob:` URL the renderer can rasterise but a linked one is
+   another origin, where a canvas is tainted and `fetch` is a CORS failure.
+10. Client error surfaces: what a user sees on a 500. "Server is not there" is done —
+    `fetch` rejects with "Failed to fetch" for every address that never reached a server, and
+    devtools shows those with provisional headers, which reads as a cross-origin block and is
+    not one. `api.ts` names the origin that did not answer, and says that a server with no
+    proxy in front of it is `http://` on its own port. The 429 from item 3 is the newest
+    thing with no dedicated surface: it arrives with a `message`, so it renders, but it is
+    worded by the server and never rate-limits the person reading it.
 
-**What was just built, and what it still waits on**
+**Done since this list was written**
 
-[Storage accounting](#size-and-what-is-using-it), the manual purges,
-[retention](#retention), [client updates](#updating-the-client) and the
-[client-version telemetry](#older-clients) are all in. Retention ships disabled and should
-stay that way until item 1 is done: it is the one feature whose job is to destroy the only
-copy of something.
+Replies with a ping and a jump-to-original, and forwarding a message to another channel —
+see [Replies and forwards](#replies-and-forwards).
+
+Backups and restore, a Vitest suite over ten pure modules ([Tests](#tests)), the login rate
+limiter, a CORS allowlist on both the API and the socket, `crypto.randomInt` for invite
+codes, `rtc.ips.excludes`, a separate dev database, file [logs](#logs), and the first pass
+at splitting `Chat.tsx`.
+
+**Both Electron apps have icons**, which this list used to claim neither did:
+`apps/desktop/build/icon.ico` and `icon.png` are picked up by electron-builder through
+`buildResources`, `appIcon()` sets the window icon, and `apps/server-app` points `win.icon`
+at its own. That entry was stale rather than outstanding.

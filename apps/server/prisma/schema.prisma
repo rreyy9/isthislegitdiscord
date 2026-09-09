@@ -183,6 +183,28 @@ model Message {
   // Echoed back to the sender so an optimistic copy can be de-duplicated.
   clientNonce String?
 
+  // A reply and a forward are the same shape: a nullable pointer at another
+  // message, resolved into a quote on the way out. Columns rather than a join
+  // table for the reason the pin columns are -- a message answers at most one
+  // message and carries at most one forward, and neither pointer has a life of
+  // its own to record.
+  //
+  // SetNull, not Cascade, on both. Deleting an account cascades that account's
+  // messages, and a reply written by somebody else must survive the message it
+  // was answering: what goes is the quote, not the answer. The soft delete
+  // everything else uses does not reach here at all -- a moderator's deletion
+  // leaves the row, and the join below is what filters it.
+  replyToId String?
+  replyTo   Message?  @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies   Message[] @relation("MessageReplies")
+
+  // Always the original, never another forward: the chain is followed once at
+  // the moment of sending, which is what keeps a quote one level deep by
+  // construction rather than by a depth check drawn somewhere.
+  forwardedFromId String?
+  forwardedFrom   Message?  @relation("MessageForwards", fields: [forwardedFromId], references: [id], onDelete: SetNull)
+  forwards        Message[] @relation("MessageForwards")
+
   // A pin is two nullable columns on the message rather than a join table,
   // because a message is pinned at most once and the pin has no life of its
   // own: unpinning is not an event anyone wants a record of, and deleting the
@@ -216,6 +238,13 @@ model Message {
   // "The pins in this channel" -- asked every time the list is opened, and
   // otherwise a scan of every message the channel has ever held.
   @@index([channelId, pinnedAt])
+  // Nothing reads these; ON DELETE SET NULL does. Postgres does not index a
+  // foreign key column on its own, and without one, deleting an account -- which
+  // cascades every message it ever sent -- is a full scan of the message table
+  // per row deleted. Two indexes on columns that are null for almost every row
+  // is the cheap side of that trade.
+  @@index([replyToId])
+  @@index([forwardedFromId])
 }
 
 /**

@@ -1,13 +1,9 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
-import {
-  isInlineType,
-  SearchQuery,
-  type Message,
-  type SearchPage,
-} from '@isthislegit/shared';
+import { SearchQuery, type Message, type SearchPage } from '@isthislegit/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthGuard, CurrentUser, type SessionUser } from '../auth/auth.guard';
 import { ZodPipe } from '../common/zod.pipe';
+import { toDto, withAuthor } from '../messages/message-dto';
 
 /**
  * Finding something that was said.
@@ -53,22 +49,7 @@ export class SearchController {
 
     const rows = await this.prisma.message.findMany({
       where: { id: { in: ids } },
-      include: {
-        author: { select: { id: true, username: true, name: true, image: true } },
-        attachments: {
-          select: {
-            id: true,
-            fileName: true,
-            contentType: true,
-            size: true,
-            width: true,
-            height: true,
-            expiresAt: true,
-            expiredAt: true,
-          },
-        },
-        mentions: { select: { userId: true } },
-      },
+      include: withAuthor,
     });
 
     // `IN` does not preserve order, and the order is the answer here. Put them
@@ -166,39 +147,15 @@ export class SearchController {
   /**
    * A result as the client's message renderer expects one.
    *
-   * `deletedAt` and `clientNonce` are fixed rather than read: nothing deleted
-   * reaches here, and a nonce is an echo to the sender of a message they just
-   * sent, which a search result never is.
+   * The mapping itself is `message-dto.ts`, shared with the history and pin
+   * routes so that a field added to a message reaches search without anybody
+   * remembering to come here. Two things are then overridden, and both are
+   * about what a search result is rather than about what a message is:
+   * `deletedAt` because nothing deleted ever reaches this point, and
+   * `clientNonce` because a nonce is an echo to the person who just sent
+   * something, which a search result is never answering.
    */
   private toDto(row: any): Message {
-    return {
-      id: row.id,
-      channelId: row.channelId,
-      author: {
-        id: row.author.id,
-        username: row.author.username ?? row.author.id,
-        displayName: row.author.name ?? null,
-        image: row.author.image ?? null,
-      },
-      content: row.content,
-      createdAt: row.createdAt.toISOString(),
-      editedAt: row.editedAt ? row.editedAt.toISOString() : null,
-      deletedAt: null,
-      clientNonce: null,
-      pinnedAt: row.pinnedAt ? row.pinnedAt.toISOString() : null,
-      mentions: (row.mentions ?? []).map((m: any) => m.userId),
-      attachments: (row.attachments ?? []).map((a: any) => ({
-        id: a.id,
-        fileName: a.fileName,
-        contentType: a.contentType,
-        size: a.size,
-        width: a.width ?? null,
-        height: a.height ?? null,
-        url: `/api/attachments/${a.id}`,
-        expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
-        expiredAt: a.expiredAt ? a.expiredAt.toISOString() : null,
-        inline: isInlineType(a.contentType),
-      })),
-    };
+    return { ...toDto(row), deletedAt: null, clientNonce: null };
   }
 }
