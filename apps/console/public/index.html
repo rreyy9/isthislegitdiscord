@@ -77,6 +77,14 @@
   .choice:has(input:checked) { border-color: var(--accent); color: var(--text); }
   .warn-line { color: var(--warn); font-size: 12.5px; padding: 5px 0; }
   .warn-line::before { content: "! "; font-weight: 700; }
+  #modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex;
+           align-items: center; justify-content: center; z-index: 50; }
+  #modal .box { background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+                padding: 18px; width: min(420px, calc(100vw - 40px));
+                box-shadow: 0 14px 40px rgba(0,0,0,.5); }
+  #modal .msg { margin-bottom: 12px; }
+  #modal input { width: 100%; margin-bottom: 14px; }
+  #modal .row { justify-content: flex-end; }
 </style>
 </head>
 <body>
@@ -528,6 +536,36 @@ function toast(msg, bad = false) {
   t.style.display = 'block';
   clearTimeout(t._h);
   t._h = setTimeout(() => (t.style.display = 'none'), 4200);
+}
+
+/* Electron's BrowserWindow has no window.prompt(), so the console carries its
+   own. Resolves to the typed string, or null when cancelled. */
+function askText(message, { value = '', password = false, ok = 'OK' } = {}) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.id = 'modal';
+    wrap.innerHTML = `<div class="box">
+      <div class="msg"></div>
+      <input type="${password ? 'password' : 'text'}">
+      <div class="row">
+        <button class="btn" data-x="cancel">Cancel</button>
+        <button class="btn primary" data-x="ok">${esc(ok)}</button>
+      </div></div>`;
+    wrap.querySelector('.msg').textContent = message;
+    const input = wrap.querySelector('input');
+    input.value = value;
+    const done = (v) => { wrap.remove(); resolve(v); };
+    wrap.querySelector('[data-x="ok"]').onclick = () => done(input.value);
+    wrap.querySelector('[data-x="cancel"]').onclick = () => done(null);
+    wrap.onclick = (e) => { if (e.target === wrap) done(null); };
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') done(input.value);
+      if (e.key === 'Escape') done(null);
+    };
+    document.body.appendChild(wrap);
+    input.focus();
+    input.select();
+  });
 }
 
 async function api(path, opts = {}) {
@@ -1112,7 +1150,8 @@ async function loadUsers() {
 
 function wireUserButtons() {
   document.querySelectorAll('[data-pw]').forEach(b => b.onclick = async () => {
-    const pw = prompt('New password (8+ characters):');
+    const pw = await askText('New password for ' + (b.closest('tr')?.cells[0]?.textContent || 'this account')
+      + ' (8+ characters):', { password: true, ok: 'Change password' });
     if (!pw) return;
     try { await api(`/api/admin/users/${b.dataset.pw}/password`, { method:'POST', body: JSON.stringify({ password: pw }) });
       toast('password changed — their sessions were signed out'); }
@@ -1200,7 +1239,7 @@ async function loadChannels() {
       </div>`).join('');
 
     document.querySelectorAll('[data-ren]').forEach(b => b.onclick = async () => {
-      const name = prompt('New channel name:', b.dataset.name);
+      const name = await askText('New channel name:', { value: b.dataset.name, ok: 'Rename' });
       if (!name) return;
       try { await api('/api/admin/channels/' + b.dataset.ren, { method:'PATCH', body: JSON.stringify({ name }) });
         toast('renamed'); loadChannels(); } catch (e) { toast(e.message, true); }

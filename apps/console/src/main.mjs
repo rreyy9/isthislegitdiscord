@@ -96,11 +96,17 @@ let caddyStartedAt = null;
 let caddyLastExit = null;
 const LOG_LIMIT = 500;
 const logs = [];
+// Monotonic line counter. The console asks for everything past a cursor, and
+// that cursor cannot be an index into `logs`: this is a ring buffer, so once it
+// is full its length stops moving and the console's cursor sits at the end of a
+// list that never grows -- which is why the log view went quiet after 500 lines.
+// Numbering the lines keeps the cursor meaningful once old ones start dropping.
+let logSeq = 0;
 
 function log(stream, line) {
   for (const part of String(line).split(/\r?\n/)) {
     if (!part.trim()) continue;
-    logs.push({ at: new Date().toISOString(), stream, line: part });
+    logs.push({ seq: ++logSeq, at: new Date().toISOString(), stream, line: part });
   }
   while (logs.length > LOG_LIMIT) logs.shift();
 }
@@ -833,12 +839,16 @@ app.post('/sv/kill/all', async (req, res) => {
 });
 
 app.get('/sv/logs', (req, res) => {
-  const since = Number(req.query.since ?? 0);
-  res.json({ total: logs.length, lines: logs.slice(Math.max(0, since)) });
+  const since = Number(req.query.since);
+  const from = Number.isFinite(since) && since > 0 ? since : 0;
+  res.json({ total: logSeq, lines: logs.filter((l) => l.seq > from) });
 });
 
 app.post('/sv/logs/clear', (req, res) => {
+  // Rewinding the counter is what empties every open console: a total below the
+  // cursor it holds reads as "this is a different history, start over".
   logs.length = 0;
+  logSeq = 0;
   res.json({ ok: true });
 });
 
