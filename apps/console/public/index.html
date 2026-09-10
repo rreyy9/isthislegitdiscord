@@ -61,6 +61,16 @@
   .lg-err { color: var(--bad); } .lg-console { color: var(--accent); }
   .lg-task { color: var(--warn); } .lg-out { color: #b9c0cc; }
   .lg-lk { color: #8ab4c8; }
+  .lg-server { color: #b9c0cc; } .lg-warn { color: var(--warn); }
+  .lg-caddy { color: #a99ad0; }
+  /* Filtering in CSS, not by re-rendering: lines are appended as they arrive,
+     and a rule keeps applying to rows that do not exist yet. */
+  #logs.errors-only > div:not(.lg-err):not(.lg-warn) { display: none; }
+  #logs:empty::before { content: "Nothing logged yet."; color: var(--dim); }
+  /* Filtered down to nothing is not the same as nothing logged, and looks
+     identical without this. `:has` is already relied on above. */
+  #logs.errors-only:not(:has(.lg-err)):not(:has(.lg-warn))::before {
+    content: "No errors or warnings logged."; color: var(--dim); }
   .stat { display: inline-block; margin-right: 26px; }
   .stat b { display: block; font-size: 21px; font-weight: 600; }
   .stat span { color: var(--dim); font-size: 11.5px; text-transform: uppercase; letter-spacing: .5px; }
@@ -515,9 +525,14 @@
   <section id="tab-logs" class="hidden">
     <div class="card">
       <h2>Server output
-        <button class="btn" id="b-clearlogs" style="float:right;margin-top:-6px">Clear</button>
+        <span style="float:right;margin-top:-6px;display:flex;gap:9px;align-items:center">
+          <label class="choice" style="font-size:12.5px;text-transform:none;letter-spacing:0">
+            <input type="checkbox" id="lg-errors"> Errors only</label>
+          <button class="btn" id="b-clearlogs">Clear</button>
+        </span>
       </h2>
       <div id="logs"></div>
+      <div class="hint" id="log-source"></div>
     </div>
   </section>
 </main>
@@ -536,7 +551,31 @@ function toast(msg, bad = false) {
   t.style.display = 'block';
   clearTimeout(t._h);
   t._h = setTimeout(() => (t.style.display = 'none'), 4200);
+
+  // An error toast is gone in four seconds and was never written down
+  // anywhere, so a failed action left no trace for whoever went looking
+  // afterwards. Reported here rather than at thirty call sites.
+  if (bad) reportToLog(msg);
 }
+
+/* Something went wrong in this page. Both handlers exist because the console
+   runs inside Electron, where an uncaught error goes to a devtools console
+   nobody has open -- which is how a broken button can look like a button that
+   simply does nothing. */
+function reportToLog(line) {
+  fetch('/sv/log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stream: 'err', line: String(line) }),
+  }).catch(() => {});
+}
+
+addEventListener('error', (e) => {
+  reportToLog(`${e.message} (${(e.filename || '').split('/').pop()}:${e.lineno})`);
+});
+addEventListener('unhandledrejection', (e) => {
+  reportToLog(`unhandled: ${e.reason?.message ?? e.reason}`);
+});
 
 /* Electron's BrowserWindow has no window.prompt(), so the console carries its
    own. Resolves to the typed string, or null when cancelled. */
@@ -1266,16 +1305,34 @@ $('#b-createguild').onclick = async () => {
 };
 
 /* ------------------------------------------------------------------ logs */
+
+/**
+ * The time on the operator's clock, not on Greenwich's.
+ *
+ * Log lines are stamped in UTC -- the server writes ISO into its log file and
+ * this console does the same -- and the tab used to print characters 11 to 19
+ * of that string raw. Ten hours out here, and on yesterday's date for a third
+ * of the day, which makes correlating a report of "it broke at nine" with the
+ * log an exercise in arithmetic. The files are named by local day already.
+ */
+function clock(at) {
+  const d = new Date(at);
+  return Number.isNaN(d.getTime()) ? String(at).slice(11, 19) : d.toTimeString().slice(0, 8);
+}
+
 let logSeen = 0;
 async function pollLogs() {
   try {
     const r = await (await fetch('/sv/logs?since=' + logSeen)).json();
+    // Says where the server's own lines are coming from, so a tab with nothing
+    // in it can explain itself rather than looking broken.
+    if (r.source) $('#log-source').textContent = 'Source: ' + r.source;
     if (r.total < logSeen) { logSeen = 0; $('#logs').innerHTML = ''; }
     if (r.lines.length) {
       const box = $('#logs');
       const stuck = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
       box.insertAdjacentHTML('beforeend', r.lines.map(l =>
-        `<div class="lg-${l.stream}">${l.at.slice(11,19)} ${esc(l.line)}</div>`).join(''));
+        `<div class="lg-${l.stream}">${clock(l.at)} ${esc(l.line)}</div>`).join(''));
       logSeen = r.total;
       if (stuck) box.scrollTop = box.scrollHeight;
     }
@@ -1284,6 +1341,11 @@ async function pollLogs() {
 $('#b-clearlogs').onclick = async () => {
   await fetch('/sv/logs/clear', { method: 'POST' });
   logSeen = 0; $('#logs').innerHTML = '';
+};
+
+$('#lg-errors').onchange = (e) => {
+  $('#logs').classList.toggle('errors-only', e.target.checked);
+  $('#logs').scrollTop = $('#logs').scrollHeight;
 };
 
 function esc(s) {

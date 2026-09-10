@@ -14,10 +14,14 @@ import {
 } from 'electron';
 import { basename, join } from 'node:path';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import {
-  registerPushToTalk,
+  labelFor,
+  registerKeybinds,
   registerScreenShare,
-  type PttBinding,
+  type Binding,
+  type Keybind,
+  type KeybindAction,
 } from './voice-main';
 import { registerUpdater } from './updater';
 import {
@@ -30,9 +34,9 @@ import {
  * Main process. Deliberately small: no mTLS in this build, so the renderer can
  * talk to the server directly. Main's jobs are the window, persisting the
  * chosen server address, holding the auth token in encrypted OS storage (there
- * is no localStorage worth trusting for a credential), and the two pieces of
- * voice a renderer cannot do alone — screen capture and the global push-to-talk
- * hook, both in voice-main.ts.
+ * is no localStorage worth trusting for a credential), and the two things a
+ * renderer cannot do alone — screen capture and the global keybinding hook,
+ * both in voice-main.ts.
  */
 
 const isDev = !app.isPackaged;
@@ -43,13 +47,13 @@ const tokenPath = join(userData, 'token.bin');
 interface VoiceSettings {
   inputDeviceId: string | null;
   outputDeviceId: string | null;
-  pushToTalk: boolean;
   /**
-   * The key or mouse button to hold. uiohook's own codes, not DOM ones — the
-   * hook is global, so DOM codes do not apply.
+   * Whether the microphone is gated on a held key at all — the mic policy,
+   * not the key. Which keys do the holding lives in `Settings.keybinds`,
+   * where an action may have several bindings; this is the switch that says
+   * whether to listen to them.
    */
-  pttBinding: PttBinding | null;
-  pttLabel: string | null;
+  pushToTalk: boolean;
   /* --- capture constraints, handed straight to getUserMedia --- */
   echoCancellation: boolean;
   noiseSuppression: boolean;
@@ -140,6 +144,20 @@ interface Settings {
   chatPositions: Record<string, string>;
   voice: VoiceSettings;
   notifications: NotificationSettings;
+  /**
+   * Every global binding, in one flat list.
+   *
+   * A list rather than a map keyed by action, because the same action may be
+   * bound more than once on purpose — push-to-talk on a thumb button and on a
+   * keyboard key is the case that drove it — and a map could hold only one of
+   * them. Rows carry their own id for that reason.
+   *
+   * Top-level rather than inside `voice`, because a binding is not a property
+   * of the microphone. Today every action happens to be a voice action; that
+   * is a fact about which actions have been written, not about where the
+   * table belongs.
+   */
+  keybinds: Keybind[];
 }
 
 /** The window's floor, and the size a first run opens at. */
@@ -154,12 +172,13 @@ const defaultSettings: Settings = {
   lastTextChannelId: null,
   chatPositions: {},
   notifications: { mentions: true, sound: true },
+  // Nothing bound by default. A global input binding that nobody asked for is
+  // a key that stops working in every other program on the machine.
+  keybinds: [],
   voice: {
     inputDeviceId: null,
     outputDeviceId: null,
     pushToTalk: false,
-    pttBinding: null,
-    pttLabel: null,
     // Every new option defaults to exactly what the client did before it
     // existed, so an upgrade cannot change how anyone's call sounds until
     // they go and ask for it.
@@ -191,20 +210,85 @@ function knownVoiceKeys(stored: unknown): Partial<VoiceSettings> {
 }
 
 /**
- * `pttKeycode` was a bare keyboard code, from before mouse buttons could be
- * bound. Anyone upgrading keeps the key they chose instead of finding
- * push-to-talk on with nothing bound to it.
+ * A row read off disk is only kept if it is shaped like one.
+ *
+ * These are matched against every key the machine presses, inside a native
+ * hook callback, so a row missing its `binding` is not a cosmetic problem: it
+ * throws on the first keypress after launch and takes the hook thread with it.
+ * A hand-edited or half-written settings.json costs somebody their bindings
+ * here, which is recoverable; the alternative is an app whose keyboard stops
+ * working.
  */
-function migrateVoice(stored: unknown): unknown {
-  if (!stored || typeof stored !== 'object') return stored;
-  const voice = stored as Record<string, unknown>;
-  if (voice.pttBinding !== undefined || typeof voice.pttKeycode !== 'number') {
-    return voice;
+function knownKeybinds(stored: unknown): Keybind[] {
+  if (!Array.isArray(stored)) return [];
+  const actions: KeybindAction[] = [
+    'ptt',
+    'pushToMute',
+    'toggleMute',
+    'toggleDeafen',
+    'disconnect',
+  ];
+  return stored.flatMap((row): Keybind[] => {
+    if (!row || typeof row !== 'object') return [];
+    const r = row as Record<string, unknown>;
+    const b = r.binding as Record<string, unknown> | undefined;
+    if (typeof r.id !== 'string' || !actions.includes(r.action as KeybindAction)) {
+      return [];
+    }
+    if (!b || (b.type !== 'key' && b.type !== 'mouse') || typeof b.code !== 'number') {
+      return [];
+    }
+    const binding: Binding = {
+      type: b.type,
+      code: b.code,
+      mods: typeof b.mods === 'number' ? b.mods : 0,
+    };
+    return [
+      {
+        id: r.id,
+        action: r.action as KeybindAction,
+        binding,
+        label: typeof r.label === 'string' ? r.label : labelFor(binding),
+        enabled: r.enabled !== false,
+      },
+    ];
+  });
+}
+
+/**
+ * Push-to-talk used to be one binding living in `voice`, and before that a
+ * bare `pttKeycode` from when only keyboard keys could be bound. Both become
+ * an ordinary row in the keybindings table, so anyone upgrading keeps the key
+ * they chose instead of finding push-to-talk on with nothing bound to it.
+ *
+ * The old keys are not written back: they are absent from `defaultSettings`,
+ * so `knownVoiceKeys` drops them on the next save. This runs off the raw
+ * stored object, which is the only place they still exist by then.
+ */
+function migrateKeybinds(stored: Record<string, unknown>): Keybind[] {
+  if (stored.keybinds !== undefined) return knownKeybinds(stored.keybinds);
+
+  const voice = (stored.voice ?? {}) as Record<string, unknown>;
+  const old = voice.pttBinding as Record<string, unknown> | null | undefined;
+
+  let binding: Binding | null = null;
+  if (old && (old.type === 'key' || old.type === 'mouse') && typeof old.code === 'number') {
+    binding = { type: old.type, code: old.code, mods: 0 };
+  } else if (typeof voice.pttKeycode === 'number') {
+    binding = { type: 'key', code: voice.pttKeycode, mods: 0 };
   }
-  return {
-    ...voice,
-    pttBinding: { type: 'key', code: voice.pttKeycode } satisfies PttBinding,
-  };
+  if (!binding) return [];
+
+  return [
+    {
+      id: randomUUID(),
+      action: 'ptt',
+      binding,
+      label:
+        typeof voice.pttLabel === 'string' ? voice.pttLabel : labelFor(binding),
+      enabled: true,
+    },
+  ];
 }
 
 function loadSettings(): Settings {
@@ -222,8 +306,9 @@ function loadSettings(): Settings {
           : {},
       voice: {
         ...defaultSettings.voice,
-        ...knownVoiceKeys(migrateVoice(stored.voice)),
+        ...knownVoiceKeys(stored.voice),
       },
+      keybinds: migrateKeybinds(stored),
       notifications: {
         ...defaultSettings.notifications,
         ...(stored.notifications ?? {}),
@@ -663,7 +748,7 @@ app.whenReady().then(() => {
   // before anything tries to raise a toast.
   setNotificationIdentity();
   registerNotifications(() => mainWindow);
-  const ptt = registerPushToTalk(() => mainWindow);
+  const keys = registerKeybinds(() => mainWindow);
   // The global hook keeps the process alive if it is never stopped.
   //
   // Guarded, because this runs inside the quit sequence: uiohook's stop() is a
@@ -673,7 +758,7 @@ app.whenReady().then(() => {
   // "restarting" and "nothing happened".
   app.on('before-quit', () => {
     try {
-      ptt.stopHook();
+      keys.stopHook();
     } catch {
       // The process is going away regardless, and the hook with it.
     }

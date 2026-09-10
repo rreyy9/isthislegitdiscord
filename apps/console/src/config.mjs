@@ -211,6 +211,10 @@ export function readConfig(paths) {
       'LIVEKIT_URL',
       'BETTER_AUTH_URL',
       'UPLOAD_DIR',
+      // Read so the console can tail the server's log files. Not written here:
+      // where the logs go is settled by the installer, and a console that
+      // moved it would be pointing at a directory the server is not using.
+      'LOG_DIR',
     ]) {
       out.env[key] = envValue(envText, key);
     }

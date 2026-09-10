@@ -3,22 +3,40 @@ import { contextBridge, ipcRenderer } from 'electron';
 /**
  * The only bridge between renderer and main. Everything network-related the
  * renderer does itself with fetch/socket.io; main owns the persisted server
- * address, the encrypted token, and the two voice pieces that need OS access —
- * the screen-source picker and the global push-to-talk hook.
+ * address, the encrypted token, and the two pieces that need OS access — the
+ * screen-source picker and the global keybinding hook.
  */
 
-/** A key or a mouse button, in uiohook's own codes. See voice-main.ts. */
-export interface PttBinding {
-  type: 'key' | 'mouse';
-  code: number;
+/* ------------------------------------------------------------- keybindings */
+
+export {
+  MOD_ALT,
+  MOD_CTRL,
+  MOD_META,
+  MOD_SHIFT,
+} from '../keybinds';
+export type {
+  Binding,
+  Keybind,
+  KeybindAction,
+} from '../keybinds';
+import type { Keybind, Binding, KeybindAction } from '../keybinds';
+
+/** A binding going down or coming back up. See main/voice-main.ts. */
+export interface KeybindEvent {
+  id: string;
+  action: KeybindAction;
+  down: boolean;
 }
 
 export interface VoiceSettings {
   inputDeviceId: string | null;
   outputDeviceId: string | null;
+  /**
+   * Whether the mic is gated on a held key at all. Which keys do the holding
+   * is `Settings.keybinds`, where the action may have several bindings.
+   */
   pushToTalk: boolean;
-  pttBinding: PttBinding | null;
-  pttLabel: string | null;
   /* --- capture constraints, handed straight to getUserMedia --- */
   echoCancellation: boolean;
   noiseSuppression: boolean;
@@ -78,6 +96,12 @@ export interface Settings {
   chatPositions: Record<string, string>;
   voice: VoiceSettings;
   notifications: NotificationSettings;
+  /**
+   * Every global binding, in one flat list. Replaced wholesale by
+   * `setSettings` rather than merged — it is an array, and a row removed has
+   * to actually go.
+   */
+  keybinds: Keybind[];
 }
 
 /** One tag, on its way to the OS. See main/notifications.ts. */
@@ -276,28 +300,36 @@ const bridge = {
     bytes: ArrayBuffer;
   }): Promise<string | null> => ipcRenderer.invoke('file:save', file),
 
-  /* ------------------------------------------------------- push-to-talk */
+  /* --------------------------------------------------------- keybindings */
 
-  pttAvailable: (): Promise<boolean> => ipcRenderer.invoke('ptt:available'),
-  setPtt: (opts: {
-    enabled: boolean;
-    binding: PttBinding | null;
-  }): Promise<{ ok: boolean; label: string | null }> =>
-    ipcRenderer.invoke('ptt:set', opts),
+  /** False when the native hook could not load; everything else still works. */
+  keybindsAvailable: (): Promise<boolean> =>
+    ipcRenderer.invoke('keybind:available'),
+
+  /**
+   * The whole table, every time. Main holds no state worth reconciling
+   * against, and a wholesale replacement cannot drift from what the renderer
+   * believes is bound.
+   */
+  setKeybinds: (rows: Keybind[]): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('keybind:set', rows),
+
   /**
    * Resolves on the next key or mouse button pressed anywhere, or null after
    * ten seconds. Left click is skipped rather than bound, since it is how the
-   * settings panel is operated.
+   * settings panel is operated, and so is a modifier on its own.
    */
-  capturePttBinding: (): Promise<{
-    binding: PttBinding;
+  captureBinding: (): Promise<{
+    binding: Binding;
     label: string;
-  } | null> => ipcRenderer.invoke('ptt:capture'),
-  onPttChange: (cb: (held: boolean) => void): (() => void) => {
-    const handler = (_e: unknown, held: boolean) => cb(held);
-    ipcRenderer.on('ptt:changed', handler);
+  } | null> => ipcRenderer.invoke('keybind:capture'),
+
+  /** Both edges of every bound key. Hold actions read both; toggles ignore the release. */
+  onKeybind: (cb: (event: KeybindEvent) => void): (() => void) => {
+    const handler = (_e: unknown, event: KeybindEvent) => cb(event);
+    ipcRenderer.on('keybind:fired', handler);
     return () => {
-      ipcRenderer.off('ptt:changed', handler);
+      ipcRenderer.off('keybind:fired', handler);
     };
   },
 };

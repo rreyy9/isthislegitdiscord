@@ -94,7 +94,14 @@ let lkLastExit = null;
 let caddy = null;
 let caddyStartedAt = null;
 let caddyLastExit = null;
-const LOG_LIMIT = 500;
+/**
+ * Lines kept in memory.
+ *
+ * 500 was sized for the handful of "starting server (pid ...)" lines this file
+ * writes itself. With the server's own log tailed in below, 500 lines is a busy
+ * few seconds, so it is not a scrollback at all.
+ */
+const LOG_LIMIT = Math.max(100, Number(process.env.CONSOLE_LOG_LINES) || 5000);
 const logs = [];
 // Monotonic line counter. The console asks for everything past a cursor, and
 // that cursor cannot be an index into `logs`: this is a ring buffer, so once it
@@ -103,12 +110,223 @@ const logs = [];
 // Numbering the lines keeps the cursor meaningful once old ones start dropping.
 let logSeq = 0;
 
+/**
+ * One line into the buffer.
+ *
+ * `at` is a parameter because not every line is written as it happens: lines
+ * tailed out of the server's own log file carry the timestamp the server wrote,
+ * which is the time the operator needs to see -- the moment it was read off
+ * disk is of no interest to anyone.
+ */
+function pushLog(stream, line, at = new Date().toISOString()) {
+  logs.push({ seq: ++logSeq, at, stream, line });
+  while (logs.length > LOG_LIMIT) logs.shift();
+}
+
 function log(stream, line) {
   for (const part of String(line).split(/\r?\n/)) {
     if (!part.trim()) continue;
-    logs.push({ seq: ++logSeq, at: new Date().toISOString(), stream, line: part });
+    pushLog(stream, part);
   }
-  while (logs.length > LOG_LIMIT) logs.shift();
+}
+
+/* ------------------------------------------- the chat server's own log file
+
+ * Until this existed the Logs tab was only ever filled by processes this
+ * console had spawned itself, because that is the only case in which there is a
+ * stdout to pipe (`startServer` below). On an installed box nothing is a child
+ * of this console -- the server is a SYSTEM scheduled task started at boot --
+ * and start-all.ps1 gives each service its own window in a development
+ * checkout, so on both of those the tab showed this file's own handful of
+ * "starting scheduled task" lines and nothing whatsoever about the server.
+ *
+ * The server has been writing a complete log to disk the whole time
+ * (apps/server/src/common/file-logger.ts): every line Nest logs, with its level
+ * and context, one file per day. Nobody was reading it. So this tails it, which
+ * needs no cooperation from whoever started the server and works the same on an
+ * install, on a checkout, and after a reboot nobody was present for.
+ */
+
+/** Local-time `2026-09-11`, matching how FileLogger names its files. */
+function logDay(now = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/**
+ * Where the server writes its logs.
+ *
+ * Read from the server's own .env, because that is the value the server itself
+ * is using; guessing separately would put the console in a directory nobody
+ * writes to, which is indistinguishable from a server that logs nothing.
+ *
+ * The fallback duplicates FileLogger's default deliberately, and has to keep
+ * matching it: `cwd/../../data/logs`, where cwd is the server's directory. Note
+ * that from an installed `server\` folder that default lands *outside* the
+ * install, which is why the installer pins LOG_DIR explicitly and why an
+ * install upgraded from before it did gets the key backfilled.
+ */
+function serverLogDir() {
+  try {
+    const set = envValue(fs.readFileSync(CONFIG_PATHS.env, 'utf8'), 'LOG_DIR');
+    if (set) return path.resolve(set);
+  } catch {
+    // No .env yet. The default below is still the server's own default, so it
+    // is the best available guess right up until one is written.
+  }
+  return path.resolve(SERVER_DIR, '..', '..', 'data', 'logs');
+}
+
+/** History to show for a log file this console has not been watching. */
+const TAIL_SEED_BYTES = 128 * 1024;
+/** Most one poll will read. A gap is skipped rather than loaded in one go. */
+const TAIL_MAX_READ = 1024 * 1024;
+
+const tail = {
+  file: null,
+  offset: 0,
+  /** A line the file ends mid-way through, held until the rest is written. */
+  partial: '',
+  /**
+   * Whether the read position was put somewhere arbitrary rather than at a
+   * line boundary -- seeding from the tail of an existing file, or skipping a
+   * gap. Whatever follows it is the back half of a line, and printing that on
+   * its own reads as a garbled log rather than as a deliberate truncation.
+   */
+  midLine: false,
+  /** What to tell the operator when the Logs tab looks empty. */
+  reason: 'starting up',
+};
+
+/**
+ * `2026-09-11T09:14:02.511Z ERROR   [ChatGateway] message`, the shape
+ * `formatLine` writes. Anything that does not match is passed through whole
+ * rather than dropped: a stack trace's continuation lines are exactly that,
+ * and they are the part worth reading.
+ */
+const SERVER_LINE = /^(\d{4}-\d{2}-\d{2}T\S+)\s+([A-Z]+)\s+(.*)$/;
+
+/**
+ * The timestamp and stream of the line a continuation belongs to.
+ *
+ * A stack trace is one log line followed by a dozen indented ones that carry no
+ * timestamp of their own. Given the time they were read instead, they land
+ * hours away from the error they explain -- the log file is in UTC and this is
+ * an append, so the two are only ever the same by coincidence. They inherit.
+ */
+let lastServerLine = { at: undefined, stream: 'server' };
+
+function emitServerLine(raw) {
+  const line = raw.replace(/\r$/, '');
+  if (!line.trim()) return;
+
+  const m = SERVER_LINE.exec(line);
+  if (!m) return pushLog(lastServerLine.stream, line, lastServerLine.at);
+
+  const [, at, level, rest] = m;
+  // Errors and warnings get their own stream so the Logs tab can filter to
+  // them. Everything else is one stream: the level is still in the text.
+  const stream = level === 'ERROR' ? 'err' : level === 'WARN' ? 'warn' : 'server';
+  lastServerLine = { at, stream };
+  pushLog(stream, rest, at);
+}
+
+function pollServerLog() {
+  const dir = serverLogDir();
+  const file = path.join(dir, `server-${logDay()}.log`);
+
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    // Only start over when this is a different file. A stat that fails on the
+    // file we are already reading is more likely a momentary sharing violation
+    // -- a virus scanner has it open, an editor is saving over it -- than a
+    // file that has gone away, and rewinding on one of those would replay
+    // everything read so far as duplicates. If it really was replaced, the
+    // size check below catches it on the next poll.
+    if (file !== tail.file) {
+      tail.file = file;
+      tail.offset = 0;
+      tail.partial = '';
+    }
+    tail.reason = fs.existsSync(dir)
+      ? `no log file for today yet in ${dir}`
+      : `the server has not written a log yet (looking in ${dir})`;
+    return;
+  }
+
+  if (file !== tail.file) {
+    // A new file: either the first one this console has seen, or midnight.
+    // Starting near the end gives the tab some history immediately without
+    // replaying a whole day; a file that has just rolled is small enough that
+    // this is the whole of it.
+    tail.file = file;
+    tail.offset = Math.max(0, stat.size - TAIL_SEED_BYTES);
+    tail.partial = '';
+    tail.midLine = tail.offset > 0;
+  } else if (stat.size < tail.offset) {
+    // Truncated or replaced underneath us -- start again from the top.
+    tail.offset = 0;
+    tail.partial = '';
+    tail.midLine = false;
+  }
+
+  /**
+   * A server this console started is already being read line by line off its
+   * stdout, and FileLogger writes to the console before it writes to the file,
+   * so mirroring the file as well would print everything twice. The offset is
+   * still advanced, so nothing is replayed when that child goes away.
+   */
+  const duplicate = Boolean(child);
+  tail.reason = duplicate
+    ? 'mirroring the running server, so its output arrives on stdout instead'
+    : `tailing ${file}`;
+
+  if (stat.size === tail.offset) return;
+
+  if (stat.size - tail.offset > TAIL_MAX_READ) {
+    // Far behind: skip the gap rather than allocate it. Says so out loud,
+    // because silently missing lines is the thing this whole file is for.
+    const skipped = stat.size - tail.offset - TAIL_MAX_READ;
+    tail.offset = stat.size - TAIL_MAX_READ;
+    tail.partial = '';
+    tail.midLine = true;
+    if (!duplicate) log('console', `skipped ${skipped} bytes of server log to catch up`);
+  }
+
+  let text;
+  try {
+    const length = stat.size - tail.offset;
+    const buf = Buffer.allocUnsafe(length);
+    const fd = fs.openSync(file, 'r');
+    try {
+      fs.readSync(fd, buf, 0, length, tail.offset);
+    } finally {
+      fs.closeSync(fd);
+    }
+    tail.offset = stat.size;
+    text = buf.toString('utf8');
+  } catch (e) {
+    tail.reason = `cannot read ${file}: ${e.message}`;
+    return;
+  }
+
+  const lines = (tail.partial + text).split('\n');
+  // The last element is whatever follows the final newline: either an empty
+  // string, or a line the server is still in the middle of writing.
+  tail.partial = lines.pop() ?? '';
+
+  // And the first is the back half of a line when the read position was placed
+  // mid-file. Dropped once a whole line has actually been seen -- a read that
+  // contained no newline at all has not got there yet.
+  if (tail.midLine && lines.length) {
+    lines.shift();
+    tail.midLine = false;
+  }
+
+  if (duplicate) return;
+  for (const line of lines) emitServerLine(line);
 }
 
 function readEnvPort() {
@@ -136,6 +354,101 @@ function tcpProbe(port, host = '127.0.0.1', timeout = 900) {
   });
 }
 
+/* ------------------------------------------------------ unattended watching
+
+ * What the status dots knew and never wrote down.
+ *
+ * `/sv/status` has always been able to see that the chat server stopped
+ * listening, and it is asked every couple of seconds -- but only while a
+ * console window is open, and it only ever coloured a dot. A server that fell
+ * over at three in the morning left the dots red by breakfast and the Logs tab
+ * silent, with nothing anywhere to say when it happened or how many times.
+ *
+ * So the same probes run on their own timer, whether or not anybody is looking,
+ * and each change of state is written to the log. Only changes: the point is a
+ * record of what happened, not a heartbeat that buries it.
+ */
+
+const watching = {
+  server: { up: null, what: `chat server on :${SERVER_PORT}` },
+  livekit: { up: null, what: `LiveKit on :${LIVEKIT_PORT}` },
+  caddy: { up: null, what: `Caddy on :${CADDY_PORT}` },
+  database: { up: null, what: 'database' },
+};
+
+function noteState(key, up) {
+  const w = watching[key];
+  if (up === null || w.up === up) return;
+
+  const first = w.up === null;
+  w.up = up;
+
+  // The first observation is not a change, but it is worth one line: it dates
+  // the console's own start and says what it found already running.
+  if (first) return log('console', `${w.what} is ${up ? 'up' : 'not running'}`);
+  log(up ? 'console' : 'err', up ? `${w.what} came up` : `${w.what} went down`);
+}
+
+/**
+ * Whether this deployment uses Caddy. Cached, because the watch tick would
+ * otherwise re-read three config files every few seconds to answer a question
+ * whose answer changes when somebody edits the Configuration tab.
+ */
+let caddyModeAt = 0;
+let caddyMode = false;
+function caddyExpected() {
+  if (Date.now() - caddyModeAt > 30_000) {
+    caddyMode = readConfig(CONFIG_PATHS).mode === 'internet';
+    caddyModeAt = Date.now();
+  }
+  return caddyMode;
+}
+
+async function watchState() {
+  try {
+    const dbPort = readEnvPort();
+    const [server, livekit, caddyUp, database] = await Promise.all([
+      tcpProbe(SERVER_PORT),
+      tcpProbe(LIVEKIT_PORT),
+      caddyExpected() ? tcpProbe(CADDY_PORT) : Promise.resolve(null),
+      dbPort ? tcpProbe(dbPort) : Promise.resolve(null),
+    ]);
+
+    noteState('server', server);
+    noteState('livekit', livekit);
+    noteState('caddy', caddyUp);
+    noteState('database', database);
+  } catch (e) {
+    // A tick that throws would otherwise be an unhandled rejection every five
+    // seconds for the life of the process, which fills the log it is meant to
+    // be keeping useful. Once round the loop is lost; the next one retries.
+    log('err', `state watch failed: ${e?.message ?? e}`);
+  }
+}
+
+/* --------------------------------------------------------- failing loudly
+
+ * Nothing below used to reach the log. A console that threw in a handler
+ * answered 500 and said nothing; a rejected promise nobody caught printed to a
+ * stdout that, on an installed box, is not connected to anything at all. Both
+ * are exactly the events an operator opens the Logs tab to find.
+ */
+
+process.on('uncaughtException', (err) => {
+  log('err', `console crashed: ${err?.stack ?? err}`);
+});
+
+/*
+ * Note what this second one also does: Node's default for an unhandled
+ * rejection is to terminate, and installing a handler stops that. For a
+ * supervisor that is the better trade -- a console that stays up still shows
+ * the log and still has the buttons on it, and one that exited took the only
+ * record of why with it.
+ */
+process.on('unhandledRejection', (reason) => {
+  log('err', `console: unhandled rejection: ${reason?.stack ?? reason}`);
+});
+
 /* -------------------------------------------------------- process control */
 
 function startServer() {
@@ -157,6 +470,13 @@ function startServer() {
 
   child.stdout.on('data', (d) => log('out', d.toString()));
   child.stderr.on('data', (d) => log('err', d.toString()));
+  // LiveKit and Caddy have always had this; the server did not, so a spawn that
+  // failed outright left the console believing it had started something.
+  child.on('error', (e) => {
+    log('err', `server failed to start: ${e.message}`);
+    child = null;
+    startedAt = null;
+  });
   child.on('exit', (code, signal) => {
     log('console', `server exited (code=${code} signal=${signal ?? 'none'})`);
     lastExit = { code, signal, at: new Date().toISOString() };
@@ -841,7 +1161,27 @@ app.post('/sv/kill/all', async (req, res) => {
 app.get('/sv/logs', (req, res) => {
   const since = Number(req.query.since);
   const from = Number.isFinite(since) && since > 0 ? since : 0;
-  res.json({ total: logSeq, lines: logs.filter((l) => l.seq > from) });
+  res.json({
+    total: logSeq,
+    lines: logs.filter((l) => l.seq > from),
+    // Where the server's lines are coming from, so an empty Logs tab can say
+    // why it is empty instead of leaving that to be guessed at.
+    source: tail.reason,
+  });
+});
+
+/**
+ * A line from the console's own UI.
+ *
+ * Failed actions in the browser were toasts and nothing else -- four seconds,
+ * then gone, and never in the log an operator goes to afterwards to find out
+ * what happened. Loopback-only like the rest of /sv, and length-capped so a
+ * loop in the page cannot fill the buffer.
+ */
+app.post('/sv/log', (req, res) => {
+  const line = String(req.body?.line ?? '').slice(0, 500);
+  if (line.trim()) log(req.body?.stream === 'err' ? 'err' : 'console', `ui: ${line}`);
+  res.json({ ok: true });
 });
 
 app.post('/sv/logs/clear', (req, res) => {
@@ -1047,16 +1387,53 @@ app.use('/api', async (req, res) => {
       signal: AbortSignal.timeout(15000),
     });
     const text = await upstream.text();
+
+    // A failing admin call used to leave nothing behind but a toast that was
+    // gone in four seconds. The status and the first of the body is enough to
+    // tell a rejected request from a server that is actually broken.
+    if (upstream.status >= 500) {
+      log('err', `${req.method} /api${req.url} -> ${upstream.status} ${text.slice(0, 300)}`);
+    }
+
     res.status(upstream.status);
     res.setHeader('Content-Type', 'application/json');
     res.send(text || '{}');
   } catch (e) {
+    log('err', `${req.method} /api${req.url} did not reach the chat server: ${e?.message ?? e}`);
     res.status(502).json({
       message: 'The chat server is not responding. Is it started?',
       detail: String(e?.message ?? e),
     });
   }
 });
+
+/**
+ * Anything thrown out of a handler above.
+ *
+ * Express's default handler answers 500 and writes to stderr, which on an
+ * installed box goes nowhere. Four arguments, and mounted after every route:
+ * that is what makes it an error handler rather than another route.
+ */
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, _next) => {
+  // Errors carrying a status are the ones raised on the client's behalf --
+  // body-parser marks a malformed body 400 -- and answering them 500 would
+  // report the console as broken when it had merely been sent nonsense. Those
+  // are logged as a line; a genuine fault gets the whole stack.
+  const status = err?.status ?? err?.statusCode ?? 500;
+  const detail = status >= 500 ? (err?.stack ?? err) : (err?.message ?? err);
+  log('err', `${req.method} ${req.originalUrl} -> ${status}: ${detail}`);
+  if (res.headersSent) return;
+  res.status(status).json({ ok: false, error: String(err?.message ?? err) });
+});
+
+// Tailing starts now, not when somebody opens the Logs tab: the point is that
+// the record exists for the hours nobody was watching.
+pollServerLog();
+setInterval(pollServerLog, 1000);
+
+watchState();
+setInterval(watchState, 5000);
 
 app.listen(CONSOLE_PORT, '127.0.0.1', () => {
   console.log(`\n  Server console:  http://127.0.0.1:${CONSOLE_PORT}\n`);

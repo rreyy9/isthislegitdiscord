@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ConnectionState,
   createLocalAudioTrack,
@@ -15,7 +15,7 @@ import {
 } from 'livekit-client';
 import { api, type VoiceAudioDto } from './api';
 import { bridge } from './bridge';
-import type { PttBinding } from '../preload';
+import type { Keybind } from '../preload';
 import {
   GATE_SEED_TICKS,
   InputGate,
@@ -28,8 +28,8 @@ import {
  *
  * The heavy lifting — SFU routing, echo cancellation, jitter buffering, TURN
  * fallback, reconnection, device switching — belongs to LiveKit. What is left
- * for us is the join/leave lifecycle, the mute/deafen/push-to-talk rules, and
- * turning LiveKit's events into React state.
+ * for us is the join/leave lifecycle, the mute/deafen/push-to-talk rules, what
+ * the global keybindings mean, and turning LiveKit's events into React state.
  *
  * Deliberately built on the core `livekit-client` rather than
  * `@livekit/components-react`: the prebuilt components carry their own theme,
@@ -94,6 +94,15 @@ export interface VoiceState {
   peers: VoicePeer[];
   screenShares: ScreenShare[];
   muted: boolean;
+  /**
+   * True while a push-to-mute binding is held.
+   *
+   * Kept apart from `muted` rather than folded into it: `muted` is a standing
+   * choice somebody made and expects to find where they left it, and this is
+   * a key being held for a moment. Writing one into the other would leave the
+   * mute button latched on after the key came back up.
+   */
+  pushMuted: boolean;
   deafened: boolean;
   screenSharing: boolean;
   /** True while a push-to-talk key is physically held down. */
@@ -107,10 +116,12 @@ export interface VoiceState {
 export interface VoiceSettings {
   inputDeviceId: string | null;
   outputDeviceId: string | null;
+  /**
+   * Whether the mic is gated on a held key at all. The keys themselves are in
+   * the keybindings table, which arrives separately — an action may have more
+   * than one binding, so it could not live here.
+   */
   pushToTalk: boolean;
-  /** The key or mouse button to hold, in uiohook codes. */
-  pttBinding: PttBinding | null;
-  pttLabel: string | null;
   echoCancellation: boolean;
   noiseSuppression: boolean;
   autoGainControl: boolean;
@@ -246,7 +257,21 @@ const MIC_SETTLE_TICKS = Math.max(
  *   that would be rejected, and what makes the microphone come back on its own
  *   the moment the mute expires or is lifted.
  */
-export function useVoice(settings: VoiceSettings, serverMuted = false) {
+export function useVoice(
+  settings: VoiceSettings,
+  keybinds: Keybind[],
+  serverMuted = false,
+  /**
+   * What the disconnect binding does, if leaving is more than `leave()`.
+   *
+   * It is: Chat writes down the channel you were in as you join and clears it
+   * as you leave, because walking out on purpose and being put back in on the
+   * next launch is not what "rejoin last channel" offers. Leaving by key is
+   * walking out on purpose, so it has to go the same way the button does --
+   * otherwise the two do visibly different things a restart later.
+   */
+  onDisconnect?: () => void,
+) {
   const [state, setState] = useState<VoiceState>({
     channelId: null,
     status: 'idle',
@@ -254,6 +279,7 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
     peers: [],
     screenShares: [],
     muted: false,
+    pushMuted: false,
     deafened: false,
     screenSharing: false,
     talking: false,
@@ -268,9 +294,25 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
   const mutedRef = useRef(false);
   const deafenedRef = useRef(false);
   const talkingRef = useRef(false);
+  /** True while any push-to-mute binding is down. See VoiceState.pushMuted. */
+  const pushMutedRef = useRef(false);
+  /**
+   * Which rows are physically down, per action, because an action may have
+   * several bindings and two of them may be held at once. A count, not a
+   * flag: releasing one of two held push-to-talk keys must not open the
+   * microphone while the other is still down.
+   */
+  const heldRef = useRef<Record<'ptt' | 'pushToMute', Set<string>>>({
+    ptt: new Set(),
+    pushToMute: new Set(),
+  });
   /** Same reason as the others: applyMic runs outside React's knowledge. */
   const serverMutedRef = useRef(serverMuted);
   serverMutedRef.current = serverMuted;
+  // Held in a ref so the caller may pass a fresh closure every render without
+  // tearing down and re-registering the keybinding listener each time.
+  const onDisconnectRef = useRef(onDisconnect);
+  onDisconnectRef.current = onDisconnect;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const audioRef = useRef<VoiceAudioDto | null>(null);
@@ -549,6 +591,7 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
     () =>
       !serverMutedRef.current &&
       !mutedRef.current &&
+      !pushMutedRef.current &&
       !deafenedRef.current &&
       (!settingsRef.current.pushToTalk || talkingRef.current),
     [],
@@ -560,6 +603,7 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
     return (
       !serverMutedRef.current &&
       !mutedRef.current &&
+      !pushMutedRef.current &&
       !deafenedRef.current &&
       (s.pushToTalk
         ? talkingRef.current
@@ -779,6 +823,7 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
         const live =
           !serverMutedRef.current &&
           !mutedRef.current &&
+          !pushMutedRef.current &&
           !deafenedRef.current &&
           micSettleRef.current === 0 &&
           (s.pushToTalk ? talkingRef.current : s.gateMode === 'off' || open);
@@ -1326,29 +1371,95 @@ export function useVoice(settings: VoiceSettings, serverMuted = false) {
   /** A snapshot for the settings meter, read on its own clock — see above. */
   const getInputLevel = useCallback(() => inputLevelRef.current, []);
 
-  /* -------------------------------------------------------- push-to-talk */
+  /* ---------------------------------------------------------- keybindings */
 
+  /**
+   * Main matches keys and names the action; what an action means is decided
+   * here, because this is where the functions that do it live.
+   *
+   * The hold actions read both edges of the event. The rest act on the press
+   * and ignore the release — a toggle that fired on the way up as well would
+   * simply undo itself.
+   */
   useEffect(() => {
-    const off = bridge.onPttChange((held) => {
-      talkingRef.current = held;
-      setState((s) => ({ ...s, talking: held }));
-      void applyMic();
+    const off = bridge.onKeybind(({ id, action, down }) => {
+      switch (action) {
+        case 'ptt':
+        case 'pushToMute': {
+          const rows = heldRef.current[action];
+          if (down) rows.add(id);
+          else rows.delete(id);
+          const held = rows.size > 0;
+
+          if (action === 'ptt') {
+            if (held === talkingRef.current) return;
+            talkingRef.current = held;
+            setState((s) => ({ ...s, talking: held }));
+          } else {
+            if (held === pushMutedRef.current) return;
+            pushMutedRef.current = held;
+            setState((s) => ({ ...s, pushMuted: held }));
+          }
+          void applyMic();
+          return;
+        }
+        case 'toggleMute':
+          if (down) void setMuted(!mutedRef.current);
+          return;
+        case 'toggleDeafen':
+          if (down) void setDeafened(!deafenedRef.current);
+          return;
+        case 'disconnect':
+          // Harmless out of a call: leaving an idle room is a no-op, and
+          // guarding on status here would only race the state it read.
+          if (down) void (onDisconnectRef.current ?? leave)();
+          return;
+      }
     });
     return off;
-  }, [applyMic]);
+  }, [applyMic, leave, setDeafened, setMuted]);
 
-  // Hand the key to the global hook whenever the setting changes.
+  /**
+   * Push-to-talk bindings are handed over disabled while push-to-talk is off.
+   *
+   * Not a nicety: the hook is a global input tap, and it runs whenever the
+   * table has anything enabled in it. Somebody who bound a key, turned the
+   * feature off and left the binding sitting there should not still be paying
+   * for a hook that reports every keystroke on the machine to an action that
+   * `wantsTrackNow` is going to ignore anyway.
+   */
+  const activeKeybinds = useMemo(
+    () =>
+      keybinds.map((row) =>
+        row.action === 'ptt' && !settings.pushToTalk
+          ? { ...row, enabled: false }
+          : row,
+      ),
+    [keybinds, settings.pushToTalk],
+  );
+
+  // Hand the table to the global hook whenever it changes.
   useEffect(() => {
-    void bridge.setPtt({
-      enabled: settings.pushToTalk,
-      binding: settings.pttBinding,
-    });
-    if (!settings.pushToTalk) {
+    void bridge.setKeybinds(activeKeybinds);
+  }, [activeKeybinds]);
+
+  /**
+   * Turning push-to-talk off releases the key.
+   *
+   * The hook stops reporting the moment the rows go disabled above, so a key
+   * held across that change never gets its release and `talking` would stay
+   * set — and with push-to-talk switched back on later, the microphone would
+   * open on a key nobody was touching.
+   */
+  useEffect(() => {
+    if (settings.pushToTalk) return;
+    heldRef.current.ptt.clear();
+    if (talkingRef.current) {
       talkingRef.current = false;
       setState((s) => ({ ...s, talking: false }));
     }
     void applyMic();
-  }, [settings.pushToTalk, settings.pttBinding, applyMic]);
+  }, [settings.pushToTalk, applyMic]);
 
   /* --------------------------------------------- react to settings changes */
 

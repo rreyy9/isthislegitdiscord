@@ -1,5 +1,17 @@
 import { BrowserWindow, desktopCapturer, ipcMain, session } from 'electron';
 import type { Streams } from 'electron';
+import {
+  matchesDown,
+  matchesUp,
+  MOD_ALT,
+  MOD_CTRL,
+  MOD_META,
+  MOD_SHIFT,
+  type Binding,
+  type Keybind,
+} from '../keybinds';
+
+export type { Binding, Keybind, KeybindAction } from '../keybinds';
 
 /**
  * The two parts of voice that a renderer cannot do by itself.
@@ -7,12 +19,17 @@ import type { Streams } from 'electron';
  * 1. Screen capture. In Electron `getDisplayMedia` fails unless the main
  *    process answers the request, because there is no built-in picker: the app
  *    is expected to supply one. Ours asks the renderer to show it.
- * 2. Push-to-talk. Electron's `globalShortcut` only reports presses, never
+ * 2. Keybindings. Electron's `globalShortcut` only reports presses, never
  *    releases, so it physically cannot do hold-to-talk. `uiohook-napi` gives
  *    key-down and key-up from a global hook, which is what "hold" needs — and
  *    the point of push-to-talk is that it works while a game has focus, so it
  *    has to be global rather than a window listener. The same hook reports
- *    mouse buttons, so a thumb button binds exactly like a key.
+ *    mouse buttons, so a thumb button binds exactly like a key, and carries
+ *    the modifier state on every event, so combinations need no bookkeeping
+ *    of their own.
+ *
+ *    Main matches keys and says which binding fired. What "mute" means is the
+ *    renderer's business, and deliberately not known here.
  */
 
 /* ------------------------------------------------------------ screen share */
@@ -121,39 +138,41 @@ export function registerScreenShare(getWindow: () => BrowserWindow | null) {
   });
 }
 
-/* ------------------------------------------------------------ push-to-talk */
+/* ------------------------------------------------------------- keybindings */
 
 type Uiohook = typeof import('uiohook-napi');
 
 /**
- * What has to be held. Keyboard keys are uiohook keycodes; mouse buttons are
- * uiohook's own numbering (1 left, 2 right, 3 middle, then whatever else the
- * mouse has). The two spaces overlap — keycode 2 is the "1" key — so the kind
- * has to travel with the number.
- */
-export interface PttBinding {
-  type: 'key' | 'mouse';
-  code: number;
-}
-
-/**
  * Left click is deliberately not bindable. It is how the settings window is
- * operated, so accepting it would mean the next click anywhere became the
- * push-to-talk button, including the click that dismisses this panel.
+ * operated, so accepting it would mean the next click anywhere became a
+ * keybinding, including the click that dismisses this panel.
  */
 const MOUSE_LEFT = 1;
 
+/**
+ * The modifier keys themselves, which cannot be the main key of a binding —
+ * "Ctrl" alone is not a shortcut, and accepting it would produce a binding
+ * that fired as a side effect of every other one.
+ */
+const MODIFIER_KEYCODES = new Set([
+  29, 3613, // Ctrl, CtrlRight
+  56, 3640, // Alt, AltRight
+  42, 54, // Shift, ShiftRight
+  3675, 3676, // Meta, MetaRight
+]);
+
 let uiohook: Uiohook | null = null;
 let hookRunning = false;
-let pttBinding: PttBinding | null = null;
-let pttHeld = false;
-let captureResolve: ((binding: PttBinding) => void) | null = null;
+let keybinds: Keybind[] = [];
+/** Row ids currently down, so a repeat does not re-fire and a release can. */
+const heldRows = new Set<string>();
+let captureResolve: ((binding: Binding | null) => void) | null = null;
 
 /**
  * A native module, so it can simply fail to load — a machine without the
- * prebuilt binary for its platform, or a Linux box with no X11. Push-to-talk
- * then reports itself unavailable and the app keeps working; it is not worth
- * crashing the client over a convenience feature.
+ * prebuilt binary for its platform, or a Linux box with no X11. Keybindings
+ * then report themselves unavailable and the app keeps working; it is not
+ * worth crashing the client over a convenience feature.
  */
 function loadUiohook(): Uiohook | null {
   if (uiohook) return uiohook;
@@ -172,66 +191,104 @@ const MOUSE_NAMES: Record<number, string> = {
   3: 'Mouse Middle',
 };
 
-/** uiohook's codes are its own; this turns one back into something readable. */
-function labelFor(binding: PttBinding): string {
+/**
+ * uiohook's codes are its own; this turns one back into something readable.
+ *
+ * Exported because the settings migration needs it: a push-to-talk key bound
+ * before this table existed has a code on disk but no label to go with it.
+ */
+export function labelFor(binding: Binding): string {
+  const parts: string[] = [];
+  if (binding.mods & MOD_CTRL) parts.push('Ctrl');
+  if (binding.mods & MOD_ALT) parts.push('Alt');
+  if (binding.mods & MOD_SHIFT) parts.push('Shift');
+  if (binding.mods & MOD_META) parts.push('Meta');
+
   if (binding.type === 'mouse') {
-    return MOUSE_NAMES[binding.code] ?? `Mouse ${binding.code}`;
+    parts.push(MOUSE_NAMES[binding.code] ?? `Mouse ${binding.code}`);
+  } else {
+    const hook = loadUiohook();
+    const name = hook
+      ? Object.entries(hook.UiohookKey).find(
+          ([, code]) => code === binding.code,
+        )?.[0]
+      : undefined;
+    parts.push(name ?? `key ${binding.code}`);
   }
-  const hook = loadUiohook();
-  if (!hook) return `key ${binding.code}`;
-  const name = Object.entries(hook.UiohookKey).find(
-    ([, code]) => code === binding.code,
-  )?.[0];
-  return name ?? `key ${binding.code}`;
+  return parts.join(' + ');
 }
 
-function sameBinding(a: PttBinding | null, b: PttBinding): boolean {
-  return a !== null && a.type === b.type && a.code === b.code;
-}
-
-export function registerPushToTalk(getWindow: () => BrowserWindow | null) {
+export function registerKeybinds(getWindow: () => BrowserWindow | null) {
   const send = (channel: string, ...args: unknown[]) =>
     getWindow()?.webContents.send(channel, ...args);
 
+  /**
+   * One event, sent for the press and again for the release. Which of the two
+   * matters is the renderer's business: a hold action reads both edges, a
+   * toggle acts on the press and ignores the release.
+   */
+  const fire = (row: Keybind, down: boolean) =>
+    send('keybind:fired', { id: row.id, action: row.action, down });
+
   /** One path for both kinds of input, since a hold is a hold. */
-  function onDown(binding: PttBinding) {
+  function onDown(type: 'key' | 'mouse', code: number, mods: number) {
     if (captureResolve) {
       // Left click drives the UI, so it is not offered as a binding; the
       // capture stays open rather than being cancelled by it.
-      if (binding.type === 'mouse' && binding.code === MOUSE_LEFT) return;
+      if (type === 'mouse' && code === MOUSE_LEFT) return;
+      // Likewise a bare modifier: the user is part-way through a combination,
+      // and taking Ctrl as the binding would end the capture before they had
+      // pressed the key they were reaching for.
+      if (type === 'key' && MODIFIER_KEYCODES.has(code)) return;
       const resolve = captureResolve;
       captureResolve = null;
-      resolve(binding);
+      resolve({ type, code, mods });
       return;
     }
-    // Holding a key repeats keydown; only the transition is interesting.
-    if (sameBinding(pttBinding, binding) && !pttHeld) {
-      pttHeld = true;
-      send('ptt:changed', true);
+
+    for (const row of keybinds) {
+      if (!row.enabled) continue;
+      if (!matchesDown(row.binding, { type, code, mods })) continue;
+      // Holding a key repeats keydown; only the transition is interesting.
+      if (heldRows.has(row.id)) continue;
+      heldRows.add(row.id);
+      fire(row, true);
     }
   }
 
-  function onUp(binding: PttBinding) {
-    if (sameBinding(pttBinding, binding) && pttHeld) {
-      pttHeld = false;
-      send('ptt:changed', false);
+  function onUp(type: 'key' | 'mouse', code: number) {
+    for (const row of keybinds) {
+      if (!heldRows.has(row.id)) continue;
+      if (!matchesUp(row.binding, type, code)) continue;
+      heldRows.delete(row.id);
+      fire(row, false);
     }
   }
+
+  /** uiohook reports the modifier state on every event, keyboard and mouse. */
+  const modsOf = (e: {
+    ctrlKey: boolean;
+    altKey: boolean;
+    shiftKey: boolean;
+    metaKey: boolean;
+  }) =>
+    (e.ctrlKey ? MOD_CTRL : 0) |
+    (e.altKey ? MOD_ALT : 0) |
+    (e.shiftKey ? MOD_SHIFT : 0) |
+    (e.metaKey ? MOD_META : 0);
 
   function ensureHook(): boolean {
     const hook = loadUiohook();
     if (!hook) return false;
     if (hookRunning) return true;
 
-    hook.uIOhook.on('keydown', (e) => onDown({ type: 'key', code: e.keycode }));
-    hook.uIOhook.on('keyup', (e) => onUp({ type: 'key', code: e.keycode }));
+    hook.uIOhook.on('keydown', (e) => onDown('key', e.keycode, modsOf(e)));
+    hook.uIOhook.on('keyup', (e) => onUp('key', e.keycode));
 
     // `button` is typed `unknown` by uiohook-napi and arrives as a number.
     const button = (e: { button: unknown }) => Number(e.button);
-    hook.uIOhook.on('mousedown', (e) =>
-      onDown({ type: 'mouse', code: button(e) }),
-    );
-    hook.uIOhook.on('mouseup', (e) => onUp({ type: 'mouse', code: button(e) }));
+    hook.uIOhook.on('mousedown', (e) => onDown('mouse', button(e), modsOf(e)));
+    hook.uIOhook.on('mouseup', (e) => onUp('mouse', button(e)));
 
     hook.uIOhook.start();
     hookRunning = true;
@@ -242,38 +299,61 @@ export function registerPushToTalk(getWindow: () => BrowserWindow | null) {
     if (!hookRunning || !uiohook) return;
     uiohook.uIOhook.stop();
     hookRunning = false;
-    pttHeld = false;
+    heldRows.clear();
   }
 
-  ipcMain.handle('ptt:available', () => loadUiohook() !== null);
+  ipcMain.handle('keybind:available', () => loadUiohook() !== null);
 
-  ipcMain.handle(
-    'ptt:set',
-    (_e, opts: { enabled: boolean; binding: PttBinding | null }) => {
-      pttBinding = opts.binding;
-      if (opts.enabled && opts.binding) {
-        const ok = ensureHook();
-        return { ok, label: ok ? labelFor(opts.binding) : null };
-      }
-      stopHook();
-      // Releasing the mic on the way out: otherwise disabling push-to-talk
-      // mid-hold leaves the microphone muted with no obvious way back.
-      send('ptt:changed', false);
-      return {
-        ok: true,
-        label: opts.binding ? labelFor(opts.binding) : null,
-      };
-    },
-  );
+  /**
+   * The whole table at once, rather than a row at a time. There is no state
+   * here worth reconciling against — the list is short and main holds no
+   * opinion about it — and a wholesale replacement cannot drift from what the
+   * renderer thinks is bound.
+   */
+  ipcMain.handle('keybind:set', (_e, rows: Keybind[]) => {
+    const next = Array.isArray(rows) ? rows : [];
+
+    /**
+     * Anything that was down and is now gone gets its release.
+     *
+     * Without this, unbinding push-to-talk mid-hold would leave the renderer
+     * believing the key was still down: the microphone stays open, or stays
+     * shut, and nothing will ever say otherwise because the keyup has nothing
+     * left to match. Deleted, disabled, and rebound elsewhere are one case.
+     */
+    for (const row of keybinds) {
+      if (!heldRows.has(row.id)) continue;
+      const still = next.find((r) => r.id === row.id);
+      const survives =
+        still !== undefined &&
+        still.enabled &&
+        matchesUp(still.binding, row.binding.type, row.binding.code);
+      if (survives) continue;
+      heldRows.delete(row.id);
+      fire(row, false);
+    }
+
+    keybinds = next;
+
+    // The hook is a global input tap and a thread of its own; it has no
+    // business running for a table with nothing enabled in it.
+    if (next.some((r) => r.enabled)) return { ok: ensureHook() };
+    stopHook();
+    return { ok: true };
+  });
 
   /**
    * Bind by pressing — a key or a mouse button, anywhere, since the hook is
    * global. Null means nothing was pressed before the wait ran out.
+   *
+   * The hook starts for the capture whether or not anything is enabled, and is
+   * left running afterwards: the table is about to gain a row, and if it does
+   * not, the next `keybind:set` stops it again.
    */
-  ipcMain.handle('ptt:capture', async () => {
+  ipcMain.handle('keybind:capture', async () => {
     if (!ensureHook()) return null;
-    const binding = await new Promise<PttBinding | null>((resolve) => {
-      captureResolve = resolve as (binding: PttBinding) => void;
+    const binding = await new Promise<Binding | null>((resolve) => {
+      captureResolve = resolve;
       setTimeout(() => {
         if (captureResolve) {
           captureResolve = null;

@@ -840,11 +840,34 @@ Input next to the switch it is about, and only when the server is actually set t
 
 - **Echo cancellation / noise suppression / automatic gain** (Input) — Chromium's own,
   applied at capture. Changing any of them restarts the microphone.
-- **Push-to-talk** (Input) — bind a keyboard key or a mouse button (a thumb button, the
-  middle button, anything but left click, which has to stay usable for clicking). The
-  binding and what it overrides only appear once the switch is on, since neither means
-  anything while it is off. If the global hook could not load, the switch is disabled and
-  says why instead.
+- **Push-to-talk** (Input) — the switch that gates the microphone on a held key. The keys
+  themselves are bound on the Keybindings page, since push-to-talk may have several and
+  they are bound the same way as everything else; Input still names what is bound, because
+  sending somebody to another page to find that out would be the change making the feature
+  worse. The binding summary only appears once the switch is on, since it means nothing
+  while it is off. If the global hook could not load, the switch is disabled and says why.
+- **Keybindings** (Keybindings) — keys and mouse buttons that fire while another window has
+  focus. Five actions: push-to-talk, push-to-mute, toggle mute, toggle deafen, and
+  disconnect from voice. **An action may be bound as many times as you like** — push-to-talk
+  on a thumb button *and* on a keyboard key is the case that shaped the whole design, which
+  is why the table is a list of rows with their own ids and not a map keyed by action.
+  Modifiers are supported and are worth using on the three that toggle: a binding that
+  fires globally on a bare letter also fires while you are typing in something else. Each row can
+  be switched off without being thrown away, and removed outright — which the old
+  push-to-talk control could not do at all, since a binding there could only be replaced.
+  Binding the same key to two *different* actions warns rather than refuses: both really do
+  fire, and pretending otherwise would be a lie.
+  - **Modifiers match as a subset.** A binding on `V` still fires while Shift is down.
+    Games hold Shift to sprint, and a push-to-talk key that silently quit working the
+    moment somebody started running is a far worse bug than `Ctrl+M` also firing a binding
+    on bare `M` — which is what the conflict warning is for.
+  - **Releases ignore modifiers entirely.** Hold `Ctrl+V`, let go of Ctrl a moment before
+    V, and the keyup for V arrives with `ctrlKey` already false. Matched strictly, that
+    release would match nothing and the microphone would stay open with no key held.
+  - **Push-to-mute is not the mute button.** It is kept apart from the standing mute in
+    `VoiceState`, because one is a choice somebody made and expects to find where they left
+    it and the other is a key being held for a moment. Folded together, the mute button
+    would latch on after the key came back up.
 - **Sensitivity** (Input) — off, automatic, or a manual threshold with a live meter.
   Automatic measures the room for 300 ms on join and sits a fixed margin above what it
   heard, so a noisy room raises its own bar. It mutes and unmutes the published track
@@ -1344,12 +1367,27 @@ it removes nothing it cannot prove is its own.
 - **The webhook route is mounted with a raw body parser** ahead of `express.json`, because
   the signature is over the raw bytes. Parsing first silently breaks verification.
 - **Join tokens live ten minutes.** They only have to survive the join.
-- **Push-to-talk is `uiohook-napi`, not Electron's `globalShortcut`.** `globalShortcut`
+- **Keybindings are `uiohook-napi`, not Electron's `globalShortcut`.** `globalShortcut`
   reports presses but never releases, so it cannot express "hold", and it does not see the
   mouse at all. The same hook reports both, so a key and a mouse button bind through one
-  path; the saved binding carries its kind, because the two code spaces overlap. If the
-  native module fails to load, push-to-talk reports itself unavailable and everything else
-  still works.
+  path; the saved binding carries its kind, because the two code spaces overlap. It also
+  carries the modifier state on every event, keyboard and mouse, so combinations need no
+  bookkeeping of their own. If the native module fails to load, keybindings report
+  themselves unavailable and everything else still works.
+- **Main matches keys; the renderer decides what they mean.** Main holds the table, fires
+  `keybind:fired` with the row id and the action on both edges, and knows nothing about
+  mute or deafen. Hold actions read both edges; toggles act on the press and ignore the
+  release, which would otherwise undo them.
+- **The rules live in `apps/desktop/src/keybinds.ts`**, outside `main/`, `preload/` and
+  `renderer/`, because all three need them. The hook fires bindings with them and the
+  settings page warns about overlaps with them; written twice they would drift, and the
+  drift would be a settings page confidently reporting no conflict between two keys that
+  both fire. Nothing in it touches Electron, which is what lets it be tested.
+- **The hook runs only while something is bound and enabled**, and push-to-talk rows are
+  handed over disabled while push-to-talk is switched off. A global input tap that reports
+  every keystroke on the machine should not be running for an action nothing will act on.
+  Anything held when a row is removed, disabled or rebound gets its release first, or the
+  renderer would go on believing the key was still down.
 - **Screen capture needs the main process.** Electron ships no picker on Windows, so
   `getDisplayMedia` fails unless the app answers the request.
 - **`--dev` mode is never used.** Its key pair is published in LiveKit's own repository.

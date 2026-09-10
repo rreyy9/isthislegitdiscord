@@ -1044,6 +1044,26 @@ if (Test-Path $envPath) {
     Say "  keeping the existing .env -- secrets and DATABASE_URL untouched"
     $lkKey    = Get-EnvValue $envPath 'LIVEKIT_API_KEY'
     $lkSecret = Get-EnvValue $envPath 'LIVEKIT_API_SECRET'
+
+    # A key added to the template after this .env was written never reaches an
+    # upgraded install: the file is restored verbatim during the copy step, on
+    # purpose, because it holds this deployment's generated secrets. That is
+    # right for secrets and wrong for a path the server has no usable default
+    # for. LOG_DIR unset means logs land a level above the install directory,
+    # where the console cannot find them, so its Logs tab stays empty on every
+    # box that upgraded rather than installed fresh.
+    #
+    # Appended, never rewritten. The one key that is missing is added at the
+    # end of the file and nothing else in it is touched.
+    if (-not (Get-EnvValue $envPath 'LOG_DIR')) {
+        $logDir = "$($InstallDir -replace '\\', '/')/data/logs"
+        if (-not (Would "add LOG_DIR=$logDir to the existing .env")) {
+            $addition = "`r`n`r`n# Added by install.ps1: where the server writes its logs, and where the`r`n" +
+                        "# operator console looks for them to fill its Logs tab.`r`nLOG_DIR=`"$logDir`""
+            Add-Content $envPath $addition -Encoding ASCII -NoNewline
+        }
+        Say "  added LOG_DIR to the existing .env -- $logDir"
+    }
 } else {
     $lkKey    = New-LiveKitKey
     $lkSecret = New-Secret
@@ -1082,6 +1102,13 @@ UPLOAD_DIR="$($InstallDir -replace '\\', '/')/data/uploads"
 # The desktop client's update feed, for the same reason. The console
 # publishes builds into it and the server serves them from there.
 UPDATES_DIR="$($InstallDir -replace '\\', '/')/data/updates"
+
+# The server log files, for the same reason again -- and this one is not only
+# about tidiness. The operator console tails these to fill its Logs tab, and
+# it finds them by reading this key. Left unset, the server writes them to
+# cwd\..\..\data\logs, which from server\ is one level above the
+# install directory, so the console looks inside the install and finds none.
+LOG_DIR="$($InstallDir -replace '\\', '/')/data/logs"
 
 VOICE_QUALITY="studio"
 "@

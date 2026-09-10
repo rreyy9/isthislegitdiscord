@@ -2,6 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import type { Track } from 'livekit-client';
 import type { NotificationSettings, ScreenSource } from '../../preload';
 import {
+  conflictsFor,
+  type Keybind,
+  type KeybindAction,
+} from '../../keybinds';
+import {
   api,
   getClientVersion,
   getServerUrl,
@@ -344,10 +349,215 @@ function AboutSettings({ updates }: { updates: Updates }) {
   );
 }
 
+/* ------------------------------------------------------------ keybindings */
+
+/**
+ * What each action is, in the order the page lists them.
+ *
+ * `hold` is not decoration: it is the difference between an action that reads
+ * both edges of the key and one that fires once on the press, and it changes
+ * what advice the page can honestly give about binding a bare key.
+ */
+const KEYBIND_ACTIONS: {
+  id: KeybindAction;
+  label: string;
+  blurb: string;
+  hold: boolean;
+}[] = [
+  {
+    id: 'ptt',
+    label: 'Push to talk',
+    blurb:
+      'Transmit only while the binding is held. Does nothing unless push-to-talk is switched on under Input.',
+    hold: true,
+  },
+  {
+    id: 'pushToMute',
+    label: 'Push to mute',
+    blurb:
+      'The other way round: the microphone stays open, and holding the binding silences it.',
+    hold: true,
+  },
+  {
+    id: 'toggleMute',
+    label: 'Toggle mute',
+    blurb: 'Mute or unmute the microphone, once per press.',
+    hold: false,
+  },
+  {
+    id: 'toggleDeafen',
+    label: 'Toggle deafen',
+    blurb: 'Silence everyone else, and yourself along with them.',
+    hold: false,
+  },
+  {
+    id: 'disconnect',
+    label: 'Disconnect from voice',
+    blurb: 'Leave the voice channel you are in. Does nothing if you are not in one.',
+    hold: false,
+  },
+];
+
+function KeybindSettings({
+  keybinds,
+  onChange,
+  available,
+  pushToTalk,
+  onOpenInput,
+}: {
+  keybinds: Keybind[];
+  onChange: (rows: Keybind[]) => void;
+  /** False when the native hook could not load. Nothing here can work then. */
+  available: boolean;
+  /** Whether push-to-talk mode is on, which decides if `ptt` rows do anything. */
+  pushToTalk: boolean;
+  onOpenInput: () => void;
+}) {
+  /** The action currently waiting for a key, if any. */
+  const [binding, setBinding] = useState<KeybindAction | null>(null);
+
+  async function addBinding(action: KeybindAction) {
+    setBinding(action);
+    const result = await bridge.captureBinding();
+    setBinding(null);
+    if (!result) return; // nothing pressed before the capture timed out
+    onChange([
+      ...keybinds,
+      {
+        id: crypto.randomUUID(),
+        action,
+        binding: result.binding,
+        label: result.label,
+        enabled: true,
+      },
+    ]);
+  }
+
+  if (!available) {
+    return (
+      <div className="hint">
+        The global input hook could not load on this machine, so keybindings
+        are unavailable. Everything else still works.
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {KEYBIND_ACTIONS.map((action) => {
+        const rows = keybinds.filter((k) => k.action === action.id);
+        const waiting = binding === action.id;
+        return (
+          <section className="set-group" key={action.id}>
+            <div className="kb-head">
+              <h4>{action.label}</h4>
+              <button
+                onClick={() => void addBinding(action.id)}
+                disabled={binding !== null}
+              >
+                {waiting ? 'Press a key…' : 'Add a binding'}
+              </button>
+            </div>
+            <div className="hint">{action.blurb}</div>
+
+            {waiting && (
+              <div className="hint">
+                Press any key or mouse button, with modifiers if you want them.
+                Left click and the modifier keys on their own are skipped, so
+                this panel stays usable. Ten seconds, then it gives up.
+              </div>
+            )}
+
+            {rows.length === 0 ? (
+              <div className="kb-empty">Nothing bound.</div>
+            ) : (
+              <div className="kb-rows">
+                {rows.map((row) => {
+                  const clashes = conflictsFor(row, keybinds);
+                  return (
+                    <div className="kb-row" key={row.id}>
+                      <label className="kb-chip">
+                        <input
+                          type="checkbox"
+                          checked={row.enabled}
+                          onChange={(e) =>
+                            onChange(
+                              keybinds.map((k) =>
+                                k.id === row.id
+                                  ? { ...k, enabled: e.target.checked }
+                                  : k,
+                              ),
+                            )
+                          }
+                        />
+                        <span className={row.enabled ? '' : 'off'}>
+                          {row.label}
+                        </span>
+                      </label>
+                      <button
+                        className="kb-clear"
+                        title="Remove this binding"
+                        onClick={() =>
+                          onChange(keybinds.filter((k) => k.id !== row.id))
+                        }
+                      >
+                        ✕
+                      </button>
+                      {clashes.length > 0 && (
+                        <span className="kb-warn">
+                          Also fires{' '}
+                          {clashes
+                            .map(
+                              (c) =>
+                                KEYBIND_ACTIONS.find((a) => a.id === c.action)
+                                  ?.label ?? c.action,
+                            )
+                            .join(', ')}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Said here rather than on the Input page, because this is where
+                somebody is standing when they bind the key and wonder why
+                holding it does nothing. */}
+            {action.id === 'ptt' && rows.length > 0 && !pushToTalk && (
+              <div className="hint">
+                Push-to-talk is switched off, so these do nothing.{' '}
+                <button className="link" onClick={onOpenInput}>
+                  Turn it on under Input.
+                </button>
+              </div>
+            )}
+          </section>
+        );
+      })}
+
+      <section className="set-group">
+        <div className="hint">
+          Bindings work while another window has focus — that is the point of
+          them — so a bare letter will fire while you are typing in something
+          else. Holding a key is safe enough bare; anything that toggles is
+          worth a modifier.
+        </div>
+        <div className="hint">
+          Extra modifiers are ignored, so a binding on V still fires when Shift
+          is down. Games hold Shift to sprint, and a push-to-talk key that quit
+          working the moment you started running would be the worse bug.
+        </div>
+      </section>
+    </>
+  );
+}
+
 type Section =
   | 'profile'
   | 'devices'
   | 'input'
+  | 'keybinds'
   | 'notifications'
   | 'behaviour'
   | 'about';
@@ -374,6 +584,11 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
     blurb: 'What gets sent, and when. Push-to-talk, sensitivity, and what the microphone does to your voice before anyone hears it.',
   },
   {
+    id: 'keybinds',
+    label: 'Keybindings',
+    blurb: 'Keys and mouse buttons that work while another window has focus. An action may have as many as you like.',
+  },
+  {
     id: 'notifications',
     label: 'Notifications',
     blurb: 'What happens when somebody tags you by name.',
@@ -394,9 +609,11 @@ export function SettingsModal({
   me,
   settings,
   notifications,
+  keybinds,
   voice,
   onChange,
   onNotificationsChange,
+  onKeybindsChange,
   onProfileSaved,
   updates,
   onClose,
@@ -404,9 +621,12 @@ export function SettingsModal({
   me: Me;
   settings: VoiceSettings;
   notifications: NotificationSettings;
+  keybinds: Keybind[];
   voice: Voice;
   onChange: (patch: Partial<VoiceSettings>) => void;
   onNotificationsChange: (patch: Partial<NotificationSettings>) => void;
+  /** The whole table, every time: a row removed has to actually go. */
+  onKeybindsChange: (rows: Keybind[]) => void;
   /** The saved user, for the app to redraw every list this person is in. */
   onProfileSaved: (user: PublicUserDto) => void;
   /** What this build is, and whether the server is offering a newer one. */
@@ -419,27 +639,20 @@ export function SettingsModal({
   const [section, setSection] = useState<Section>('profile');
   const [inputs, setInputs] = useState<MediaDeviceInfo[]>([]);
   const [outputs, setOutputs] = useState<MediaDeviceInfo[]>([]);
-  const [pttOk, setPttOk] = useState(true);
-  const [binding, setBinding] = useState(false);
+  /** False when the native hook could not load; see voice-main.ts. */
+  const [keybindsOk, setKeybindsOk] = useState(true);
 
   useEffect(() => {
     void (async () => {
       const d = await listAudioDevices();
       setInputs(d.inputs);
       setOutputs(d.outputs);
-      setPttOk(await bridge.pttAvailable());
+      setKeybindsOk(await bridge.keybindsAvailable());
     })();
   }, []);
 
-  async function bindKey() {
-    setBinding(true);
-    const result = await bridge.capturePttBinding();
-    setBinding(false);
-    if (result) {
-      onChange({ pttBinding: result.binding, pttLabel: result.label });
-    }
-  }
-
+  /** Push-to-talk keys, for the summary the Input page shows. */
+  const pttRows = keybinds.filter((k) => k.action === 'ptt' && k.enabled);
   const active = SECTIONS.find((s) => s.id === section)!;
 
   return (
@@ -475,6 +688,16 @@ export function SettingsModal({
             )}
 
             {section === 'about' && <AboutSettings updates={updates} />}
+
+            {section === 'keybinds' && (
+              <KeybindSettings
+                keybinds={keybinds}
+                onChange={onKeybindsChange}
+                available={keybindsOk}
+                pushToTalk={settings.pushToTalk}
+                onOpenInput={() => setSection('input')}
+              />
+            )}
 
             {section === 'devices' && (
               <>
@@ -528,18 +751,19 @@ export function SettingsModal({
                     <input
                       type="checkbox"
                       checked={settings.pushToTalk}
-                      disabled={!pttOk}
+                      disabled={!keybindsOk}
                       onChange={(e) => onChange({ pushToTalk: e.target.checked })}
                     />
                     Only transmit while a key or mouse button is held
                   </label>
 
-                  {/* The binding and what it overrides only matter once the
-                      switch is on, so they appear with it rather than sitting
-                      there greyed out. The unavailable notice is the one thing
-                      that has to show while it is off, since it is the reason
-                      the switch cannot be turned on. */}
-                  {!pttOk ? (
+                  {/* The keys themselves live on the Keybindings page, since
+                      push-to-talk may have several and they are bound the same
+                      way as everything else. What stays here is the switch and
+                      a straight answer to "so what is it bound to" — asking
+                      somebody to visit another page to find that out would be
+                      the change making the feature worse. */}
+                  {!keybindsOk ? (
                     <div className="hint">
                       The global input hook could not load on this machine, so
                       push-to-talk is unavailable. Everything else still works.
@@ -548,16 +772,14 @@ export function SettingsModal({
                     settings.pushToTalk && (
                       <>
                         <div className="ptt-row">
-                          <button onClick={bindKey} disabled={binding}>
-                            {binding
-                              ? 'Select a key'
-                              : settings.pttLabel
-                                ? `Bound to: ${settings.pttLabel}`
-                                : 'Set a key or button'}
+                          <button onClick={() => setSection('keybinds')}>
+                            {pttRows.length === 0
+                              ? 'Set a key or button'
+                              : `Bound to: ${pttRows.map((k) => k.label).join(', ')}`}
                           </button>
                           <span className="hint inline">
-                            {binding
-                              ? 'Left click is skipped, so it stays usable here.'
+                            {pttRows.length === 0
+                              ? 'Nothing bound yet — nothing will transmit.'
                               : 'Works while another window has focus.'}
                           </span>
                         </div>
@@ -751,7 +973,11 @@ export function VoicePanel({
   /** Leaving goes through Chat, which also forgets the channel to rejoin. */
   onLeave: () => void;
   pushToTalk: boolean;
-  /** Named here so the reminder says which key or button, not just "your key". */
+  /**
+   * Named here so the reminder says which key or button, not just "your key".
+   * Several, joined, when push-to-talk is bound more than once — the reminder
+   * is only honest if it lists every key that would work.
+   */
   pttLabel: string | null;
   /**
    * Why an admin has taken the microphone away, ready to read, or null.
@@ -808,22 +1034,33 @@ export function VoicePanel({
       {pushToTalk && !serverMuted && voice.status === 'connected' && (
         <div
           className={
-            'vp-ptt' + (voice.talking && !voice.deafened ? ' live' : '')
+            'vp-ptt' +
+            (voice.talking && !voice.deafened && !voice.pushMuted
+              ? ' live'
+              : '')
           }
         >
           {voice.deafened
             ? 'Deafened — undeafen or unmute to talk'
-            : voice.talking
-              ? 'Transmitting'
-              : pttLabel
-                ? `Hold ${pttLabel} to talk`
-                : 'Nothing bound — set a key or button in settings'}
+            : voice.pushMuted
+              ? 'Held muted'
+              : voice.talking
+                ? 'Transmitting'
+                : pttLabel
+                  ? `Hold ${pttLabel} to talk`
+                  : 'Nothing bound — set a key or button in settings'}
         </div>
       )}
 
       <div className="vp-buttons">
         <button
-          className={voice.muted || serverMuted ? 'on' : ''}
+          // Push-to-mute shows here too. It is not what the button toggles --
+          // that is the standing choice, and this is a key somebody is holding
+          // -- but a microphone that is shut has to look shut, or the client
+          // is telling you that you are being heard when you are not.
+          className={
+            voice.muted || voice.pushMuted || serverMuted ? 'on' : ''
+          }
           // An admin's mute is enforced on the server, where this button
           // cannot reach. Leaving it live would let somebody click it, watch
           // it change, and still not be heard.
@@ -831,14 +1068,16 @@ export function VoicePanel({
           onClick={() => void voice.setMuted(!voice.muted)}
           title={
             serverMuted ??
-            (voice.deafened
-              ? 'Unmute and undeafen'
-              : voice.muted
-                ? 'Unmute'
-                : 'Mute')
+            (voice.pushMuted
+              ? 'Held muted'
+              : voice.deafened
+                ? 'Unmute and undeafen'
+                : voice.muted
+                  ? 'Unmute'
+                  : 'Mute')
           }
         >
-          {voice.muted || serverMuted ? '🔇' : '🎙'}
+          {voice.muted || voice.pushMuted || serverMuted ? '🔇' : '🎙'}
         </button>
         <button
           className={voice.deafened ? 'on' : ''}

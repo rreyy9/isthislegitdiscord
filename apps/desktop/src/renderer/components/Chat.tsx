@@ -34,7 +34,7 @@ import {
 import { bridge } from '../bridge';
 import { noteUpdateAvailable, type Updates } from '../updates';
 import { useVoice, type VoiceSettings } from '../voice';
-import type { NotificationSettings } from '../../preload';
+import type { Keybind, NotificationSettings } from '../../preload';
 import {
   ScreenPicker,
   ScreenStage,
@@ -140,8 +140,6 @@ export function Chat({
     inputDeviceId: null,
     outputDeviceId: null,
     pushToTalk: false,
-    pttBinding: null,
-    pttLabel: null,
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,
@@ -150,6 +148,11 @@ export function Chat({
     userVolumes: {},
     rejoinLastChannel: false,
   });
+  /**
+   * Every global keybinding. Held here rather than inside useVoice because it
+   * is persisted settings like the rest, and the settings panel edits it.
+   */
+  const [keybinds, setKeybinds] = useState<Keybind[]>([]);
   /** Settings arrive from main, so nothing that reads them may act before. */
   const [settingsReady, setSettingsReady] = useState(false);
   /** The voice channel this client was in when it last stopped, if any. */
@@ -390,7 +393,25 @@ export function Chat({
    */
   const iAmMuted = Boolean(myMutedUntil && new Date(myMutedUntil) > new Date());
 
-  const voice = useVoice(voiceSettings, iAmMuted);
+  // `leaveVoice` is a hoisted declaration below, and is only ever called from
+  // an event, so it is assigned long before anything can press the key.
+  const voice = useVoice(voiceSettings, keybinds, iAmMuted, leaveVoice);
+
+  /**
+   * What the voice panel says to hold, or null if nothing would work.
+   *
+   * Every enabled push-to-talk binding, joined, rather than the first: an
+   * action may be bound more than once, and a reminder that names one of two
+   * keys is wrong about the other. Disabled rows are left out for the same
+   * reason -- naming a key that has been switched off is worse than naming
+   * none at all.
+   */
+  const pttLabel = useMemo(() => {
+    const labels = keybinds
+      .filter((k) => k.action === 'ptt' && k.enabled)
+      .map((k) => k.label);
+    return labels.length ? labels.join(' or ') : null;
+  }, [keybinds]);
 
   // Main needs to know, because an update that lands mid-call has to leave the
   // channel properly before the process is taken away — and because the
@@ -573,6 +594,7 @@ export function Chat({
   useEffect(() => {
     void bridge.getSettings().then((s) => {
       setVoiceSettings(s.voice);
+      setKeybinds(s.keybinds);
       setNotifications(s.notifications);
       setLastVoiceChannelId(s.lastVoiceChannelId);
       setRejoinAfterUpdate(s.rejoinAfterUpdate);
@@ -618,6 +640,18 @@ export function Chat({
     await bridge.setSettings({ voice: next });
     if (patch.inputDeviceId) await voice.setInputDevice(patch.inputDeviceId);
     if (patch.outputDeviceId) await voice.setOutputDevice(patch.outputDeviceId);
+  }
+
+  /**
+   * The whole table, every time.
+   *
+   * Sent whole rather than patched because it is an array: a row somebody
+   * removed has to actually be gone from what lands on disk, and a merge has
+   * no way to express a deletion.
+   */
+  async function updateKeybinds(rows: Keybind[]) {
+    setKeybinds(rows);
+    await bridge.setSettings({ keybinds: rows });
   }
 
   /** One person's playback level. 100% is stored as no entry at all. */
@@ -2615,7 +2649,9 @@ export function Chat({
           voice={voice}
           channelName={voiceChannelObj?.name ?? ''}
           pushToTalk={voiceSettings.pushToTalk}
-          pttLabel={voiceSettings.pttBinding ? voiceSettings.pttLabel : null}
+          // Every key that would work, not just the first: a reminder that
+          // names one of two bound keys is wrong about the other.
+          pttLabel={pttLabel}
           serverMuted={iAmMuted ? muteLabel(myMutedUntil!) : null}
           onLeave={leaveVoice}
         />
@@ -3411,6 +3447,8 @@ export function Chat({
         <SettingsModal
           me={me}
           settings={voiceSettings}
+          keybinds={keybinds}
+          onKeybindsChange={updateKeybinds}
           notifications={notifications}
           voice={voice}
           onChange={(patch) => void updateVoiceSettings(patch)}
