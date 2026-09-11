@@ -54,7 +54,6 @@ import {
 import { Avatar } from './Avatar';
 import { EmojiBrowser } from './EmojiBrowser';
 import { ReactionBar } from './ReactionBar';
-import { useImageActions } from './ImageViewer';
 import { NetworkButton } from './NetworkStats';
 import {
   MAX_MESSAGE_CHARS,
@@ -63,20 +62,28 @@ import {
   describeBytes,
   guessReactions,
   isForever,
-  lastSeenLabel,
   muteLabel,
   quoteLine,
   sameDay,
-  stamp,
   timeOf,
 } from './chat-format';
 import type { Confirmation, Msg, Staged, Status } from './chat-types';
-import { PinsPanel, SearchPanel } from './ChatPanels';
+import {
+  useAutoDismiss,
+  useDismissOnOutsideClick,
+  useMessageSearch,
+  useMinuteClock,
+} from './chat-hooks';
+import { MembersPanel, PinsPanel, SearchPanel, type MemberMenu } from './ChatPanels';
+import { EmojiPicker, MentionPicker } from './ComposerPickers';
+import { PreviewImage, UploadRing } from './UploadPreview';
 import {
   BansModal,
   ChannelModal,
   ConfirmModal,
   ForwardModal,
+  RemovedModal,
+  type Removal,
 } from './ChatModals';
 import { ForwardCard, ReplyStrip, requoted, toRef } from './MessageRefs';
 
@@ -84,36 +91,8 @@ import { ForwardCard, ReplyStrip, requoted, toRef } from './MessageRefs';
 
 
 
-/**
- * A clock that ticks once a minute.
- *
- * The member list draws durations, and a duration that was rendered once is
- * wrong a minute later. A minute is also the resolution of the shortest label
- * it produces, so nothing finer would show.
- */
-function useMinuteClock(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 60_000);
-    return () => clearInterval(t);
-  }, []);
-  return now;
-}
-
-/** The menu is drawn against the viewport, so its box has to be known up front. */
-const MENU_WIDTH = 158;
-const MENU_HEIGHT = 265;
-
 /** Same, for the account menu — which opens upwards, out of the footer. */
 const ACCOUNT_MENU_HEIGHT = 42;
-
-const MUTE_OPTIONS: { label: string; minutes: number | null }[] = [
-  { label: '5 minutes', minutes: 5 },
-  { label: '1 hour', minutes: 60 },
-  { label: '1 day', minutes: 60 * 24 },
-  { label: '1 week', minutes: 60 * 24 * 7 },
-  { label: 'Indefinitely', minutes: null },
-];
 
 
 export function Chat({
@@ -333,11 +312,7 @@ export function Chat({
    * list scrolls, so the menu is positioned against the viewport rather than
    * the row — inside the scroll box it would be clipped.
    */
-  const [menuFor, setMenuFor] = useState<{
-    userId: string;
-    x: number;
-    y: number;
-  } | null>(null);
+  const [menuFor, setMenuFor] = useState<MemberMenu | null>(null);
   /** Whose per-person volume popup is open, and where to draw it. */
   const [volumeFor, setVolumeFor] = useState<{
     userId: string;
@@ -391,10 +366,7 @@ export function Chat({
    */
   const [pinsVersion, setPinsVersion] = useState(0);
   /** Set when the server says we were kicked or banned; the app stops here. */
-  const [removed, setRemoved] = useState<{
-    kind: 'kick' | 'ban';
-    reason: string | null;
-  } | null>(null);
+  const [removed, setRemoved] = useState<Removal | null>(null);
   /** A refused moderation action, shown briefly rather than swallowed. */
   const [banner, setBanner] = useState<string | null>(null);
   /**
@@ -1152,118 +1124,23 @@ export function Chat({
     voice.join,
   ]);
 
-  // Any click outside the moderation menu closes it, the way a menu should.
-  useEffect(() => {
-    if (!menuFor) return;
-    const close = () => setMenuFor(null);
-    window.addEventListener('click', close);
-    return () => window.removeEventListener('click', close);
-  }, [menuFor]);
-
-  // Same for the volume popup.
-  useEffect(() => {
-    if (!volumeFor) return;
-    const close = () => setVolumeFor(null);
-    window.addEventListener('click', close);
-    return () => window.removeEventListener('click', close);
-  }, [volumeFor]);
-
-  // And for the account menu.
-  useEffect(() => {
-    if (!accountMenu) return;
-    const close = () => setAccountMenu(null);
-    window.addEventListener('click', close);
-    return () => window.removeEventListener('click', close);
-  }, [accountMenu]);
-
-  // And for the channel menu.
-  useEffect(() => {
-    if (!channelMenu) return;
-    const close = () => setChannelMenu(null);
-    window.addEventListener('click', close);
-    return () => window.removeEventListener('click', close);
-  }, [channelMenu]);
-
-  // And for the pin board, which is a popover under the header like the rest.
-  useEffect(() => {
-    if (!pinsOpen) return;
-    const close = () => setPinsOpen(false);
-    window.addEventListener('click', close);
-    return () => window.removeEventListener('click', close);
-  }, [pinsOpen]);
-
-  // Same for the search popover: a click anywhere else puts it away. The
-  // panel itself stops propagation, so typing in it does not close it.
-  useEffect(() => {
-    if (!searchOpen) return;
-    const close = () => setSearchOpen(false);
-    window.addEventListener('click', close);
-    return () => window.removeEventListener('click', close);
-  }, [searchOpen]);
+  // Every popover on this screen closes on a click anywhere else. Each of
+  // these was the same four lines written out; the hook is in chat-hooks.ts,
+  // along with why `dismiss` does not need to be a dependency.
+  useDismissOnOutsideClick(Boolean(menuFor), () => setMenuFor(null));
+  useDismissOnOutsideClick(Boolean(volumeFor), () => setVolumeFor(null));
+  useDismissOnOutsideClick(Boolean(accountMenu), () => setAccountMenu(null));
+  useDismissOnOutsideClick(Boolean(channelMenu), () => setChannelMenu(null));
+  useDismissOnOutsideClick(pinsOpen, () => setPinsOpen(false));
+  // The search panel stops propagation on its own box, so typing in it does
+  // not close it.
+  useDismissOnOutsideClick(searchOpen, () => setSearchOpen(false));
 
   /* -------------------------------------------------------------- search */
 
-  const [searchText, setSearchText] = useState('');
-  const [searchResults, setSearchResults] = useState<MessageDto[] | null>(null);
-  const [searchBusy, setSearchBusy] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  /** What the results on screen were a search for, so stale ones can be told. */
-  const searchSeqRef = useRef(0);
-
-  /**
-   * Search, debounced.
-   *
-   * Every keystroke is a query against a database on somebody's home box, so
-   * it waits for a pause rather than firing per character. The sequence number
-   * is what stops an earlier, slower query landing after a later one and
-   * putting the wrong results on screen -- which is the failure people
-   * actually see, in the form of results for a prefix of what they typed.
-   */
-  useEffect(() => {
-    if (!searchOpen) return;
-    const q = searchText.trim();
-    if (q.length < 2) {
-      setSearchResults(null);
-      setSearchError(null);
-      setSearchBusy(false);
-      return;
-    }
-
-    const seq = ++searchSeqRef.current;
-    setSearchBusy(true);
-    const timer = window.setTimeout(async () => {
-      try {
-        const guildId = guilds.find((g) =>
-          g.channels.some((c) => c.id === activeChannel),
-        )?.id;
-        const page = await api.search({ q, guildId });
-        if (seq !== searchSeqRef.current) return;
-        setSearchResults(page.results);
-        setSearchError(null);
-      } catch (e: any) {
-        if (seq !== searchSeqRef.current) return;
-        setSearchResults(null);
-        setSearchError(
-          e?.status === 404
-            ? 'This server is too old to search. Update the server to use this.'
-            : (e?.message ?? 'That search did not work.'),
-        );
-      } finally {
-        if (seq === searchSeqRef.current) setSearchBusy(false);
-      }
-    }, 250);
-
-    return () => window.clearTimeout(timer);
-  }, [searchOpen, searchText, activeChannel, guilds]);
-
-  // Closing it clears it: reopening the box to last week's search, already
-  // run, is never what somebody opening a search box wants.
-  useEffect(() => {
-    if (searchOpen) return;
-    setSearchText('');
-    setSearchResults(null);
-    setSearchError(null);
-  }, [searchOpen]);
+  // Four pieces of state, a debounce and a sequence number, none of which
+  // anything outside the box and its panel reads. See chat-hooks.ts.
+  const search = useMessageSearch({ open: searchOpen, activeChannel, guilds });
 
   /**
    * Fetch the board while it is open — on opening it, on switching channel
@@ -1290,20 +1167,11 @@ export function Chat({
     };
   }, [pinsOpen, activeChannel, pinsVersion]);
 
-  // Errors from a refused action are worth reading, not worth keeping.
-  useEffect(() => {
-    if (!banner) return;
-    const t = setTimeout(() => setBanner(null), 5000);
-    return () => clearTimeout(t);
-  }, [banner]);
-
-  // Shorter than an error's five seconds: this one says a thing that already
-  // happened, and there is nothing to do about it.
-  useEffect(() => {
-    if (!notice) return;
-    const t = setTimeout(() => setNotice(null), 3000);
-    return () => clearTimeout(t);
-  }, [notice]);
+  // Errors from a refused action are worth reading, not worth keeping. The
+  // notice gets less time than an error's five seconds: it says a thing that
+  // already happened, and there is nothing to do about it.
+  useAutoDismiss(banner, 5000, () => setBanner(null));
+  useAutoDismiss(notice, 3000, () => setNotice(null));
 
   /* --------------------------------------------------------- channel load */
 
@@ -2963,11 +2831,11 @@ export function Chat({
 
           {searchOpen && (
             <SearchPanel
-              text={searchText}
-              onText={setSearchText}
-              results={searchResults}
-              busy={searchBusy}
-              error={searchError}
+              text={search.text}
+              onText={search.setText}
+              results={search.results}
+              busy={search.busy}
+              error={search.error}
               channelName={(id) => channelNameOf(id) ?? 'unknown'}
               onJump={jumpTo}
               onClose={() => setSearchOpen(false)}
@@ -3538,131 +3406,26 @@ export function Chat({
       </div>
 
       {/* -------- members -------- */}
-      <div className="col members">
-        <div className="sb-head row" style={{ fontSize: 13 }}>
-          Members
-          {iAmAdmin && (
-            <button className="head-btn" onClick={() => setShowBans(true)}>
-              Bans
-            </button>
-          )}
-        </div>
-        <div className="sb-scroll">
-          {[...members]
-            .sort((a, b) =>
-              a.online === b.online
-                ? (a.user.displayName || a.user.username).localeCompare(
-                    b.user.displayName || b.user.username,
-                  )
-                : a.online
-                  ? -1
-                  : 1,
-            )
-            .map((m) => (
-              <div key={m.user.id} className={'mem' + (m.online ? '' : ' offline')}>
-                <Avatar
-                  name={m.user.displayName || m.user.username}
-                  image={m.user.image}
-                />
-                {/* Name and last-seen share a column so the row keeps one
-                    height whether or not there is a duration to show. */}
-                <div className="mem-text">
-                  <div className="mname">
-                    {m.user.displayName || m.user.username}
-                  </div>
-                  {!m.online && m.lastSeenAt && (
-                    <div
-                      className="mem-seen"
-                      title={`Last seen ${stamp(m.lastSeenAt)}`}
-                    >
-                      {lastSeenLabel(m.lastSeenAt, now)}
-                    </div>
-                  )}
-                </div>
-                {m.mutedUntil && (
-                  <span className="mem-muted" title={muteLabel(m.mutedUntil)}>
-                    🔇
-                  </span>
-                )}
-                {canModerate(m) && (
-                  <div className="mem-menu-wrap" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      className="mem-more"
-                      title="Moderate"
-                      onClick={(e) => {
-                        if (menuFor?.userId === m.user.id) return setMenuFor(null);
-                        const r = e.currentTarget.getBoundingClientRect();
-                        setMenuFor({ userId: m.user.id, x: r.right, y: r.bottom });
-                      }}
-                    >
-                      ⋯
-                    </button>
-                    {menuFor?.userId === m.user.id && (
-                      <div
-                        className="menu"
-                        style={{
-                          left: menuFor.x - MENU_WIDTH,
-                          // Flip up rather than off the bottom of the window.
-                          top: Math.min(menuFor.y + 4, window.innerHeight - MENU_HEIGHT),
-                        }}
-                      >
-                        <div className="menu-label">Mute microphone for</div>
-                        {MUTE_OPTIONS.map((o) => (
-                          <button
-                            key={o.label}
-                            onClick={() => {
-                              setMenuFor(null);
-                              void run(
-                                () => api.mute(m.guildId, m.user.id, o.minutes),
-                                'Could not mute them.',
-                              );
-                            }}
-                          >
-                            {o.label}
-                          </button>
-                        ))}
-                        {m.mutedUntil && (
-                          <button
-                            onClick={() => {
-                              setMenuFor(null);
-                              void run(
-                                () => api.unmute(m.guildId, m.user.id),
-                                'Could not unmute them.',
-                              );
-                            }}
-                          >
-                            Unmute
-                          </button>
-                        )}
-                        <div className="menu-sep" />
-                        <button
-                          className="danger"
-                          onClick={() => {
-                            setMenuFor(null);
-                            askKick(m);
-                          }}
-                        >
-                          Kick
-                        </button>
-                        <button
-                          className="danger"
-                          onClick={() => {
-                            setMenuFor(null);
-                            askBan(m);
-                          }}
-                        >
-                          Ban
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-                <div className={'pdot ' + (m.online ? 'on' : 'off')} />
-              </div>
-            ))}
-        </div>
-      </div>
-
+      <MembersPanel
+        members={members}
+        now={now}
+        iAmAdmin={iAmAdmin}
+        menuFor={menuFor}
+        onMenuChange={setMenuFor}
+        canModerate={canModerate}
+        onShowBans={() => setShowBans(true)}
+        onMute={(m, minutes) =>
+          void run(
+            () => api.mute(m.guildId, m.user.id, minutes),
+            'Could not mute them.',
+          )
+        }
+        onUnmute={(m) =>
+          void run(() => api.unmute(m.guildId, m.user.id), 'Could not unmute them.')
+        }
+        onKick={askKick}
+        onBan={askBan}
+      />
       <ScreenPicker />
       {volumeFor && (
         <UserVolumeMenu
@@ -3783,171 +3546,7 @@ export function Chat({
           onClose={() => setConfirmation(null)}
         />
       )}
-      {removed && (
-        <div className="modal-wrap">
-          <div className="modal">
-            <div className="modal-head">
-              {removed.kind === 'ban' ? 'You were banned' : 'You were removed'}
-            </div>
-            <div className="modal-body">
-              <p style={{ margin: 0 }}>
-                {removed.kind === 'ban'
-                  ? 'An admin banned you from this server. This account cannot rejoin.'
-                  : 'An admin removed you from this server. You can come back with a new invite.'}
-              </p>
-              {removed.reason && <p className="hint">Reason: {removed.reason}</p>}
-            </div>
-            <div className="modal-foot">
-              <button onClick={() => void signOut()}>Sign out</button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * The list that opens when you type `@`.
- *
- * Sits in the composer's own box rather than at the caret. A popup that
- * follows the caret needs the text measured to know where that is, which for a
- * textarea means rendering a mirror of it off-screen — a lot of machinery for
- * a box that is two lines tall, where the caret is never far from the left.
- *
- * `onMouseDown` rather than `onClick`, because clicking here blurs the
- * textarea and the blur closes the list: the click would land on nothing.
- */
-function MentionPicker({
-  matches,
-  index,
-  onHover,
-  onPick,
-}: {
-  matches: MentionUser[];
-  index: number;
-  onHover: (index: number) => void;
-  onPick: (user: MentionUser) => void;
-}) {
-  return (
-    <div className="mention-picker">
-      <div className="mention-picker-head">Members</div>
-      {matches.map((user, i) => (
-        <button
-          key={user.id}
-          className={'mention-row' + (i === index ? ' on' : '')}
-          onMouseEnter={() => onHover(i)}
-          onMouseDown={(e) => {
-            e.preventDefault();
-            onPick(user);
-          }}
-        >
-          <Avatar
-            className="tiny"
-            name={mentionName(user)}
-            image={user.image}
-          />
-          <span className="mention-row-name">{mentionName(user)}</span>
-          {/* Only when it says something the name does not, which is how you
-              tell two people apart who have picked the same display name. */}
-          {user.displayName && user.displayName !== user.username && (
-            <span className="mention-row-handle">{user.username}</span>
-          )}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/**
- * The list that opens when you type `:` and two more characters.
- *
- * The same box as the tag list above, in the same place, with the same
- * `onMouseDown` rather than `onClick` -- a click blurs the textarea, the blur
- * closes the list, and an `onClick` would land on nothing.
- *
- * Two characters before it opens, where a tag opens on a bare `@`. A colon is
- * ordinary punctuation in a way `@` is not, and the reasoning is in
- * `emoji-utils.ts` beside the constant.
- */
-function EmojiPicker({
-  matches,
-  index,
-  onHover,
-  onPick,
-}: {
-  matches: EmojiMatch[];
-  index: number;
-  onHover: (index: number) => void;
-  onPick: (match: EmojiMatch) => void;
-}) {
-  return (
-    <div className="mention-picker">
-      <div className="mention-picker-head">Emoji</div>
-      {matches.map((match, i) => (
-        <button
-          key={match.shortcode}
-          className={'mention-row' + (i === index ? ' on' : '')}
-          onMouseEnter={() => onHover(i)}
-          onMouseDown={(e) => {
-            e.preventDefault();
-            onPick(match);
-          }}
-        >
-          <span className="emoji-row-glyph">{match.emoji}</span>
-          <span className="mention-row-name">:{match.shortcode}:</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/**
- * How far an attachment upload has got.
- *
- * An SVG ring rather than a bar, because it sits inside a message rather than
- * across one, and it has to read at the size of a line of text. The stroke is
- * drawn by dash offset, which is the one way to do this without a library.
- *
- * At 100% it stops being a measurement and becomes a spinner: the bytes have
- * all left, but the server is still writing the files and the row, and a full
- * ring sitting motionless through that looks like something that has finished
- * and got stuck rather than something still working.
- */
-function UploadRing({ fraction }: { fraction: number }) {
-  const clamped = Math.max(0, Math.min(1, fraction));
-  const done = clamped >= 1;
-  // r=7 in a 18x18 box leaves room for the 2px stroke without clipping.
-  const circumference = 2 * Math.PI * 7;
-
-  return (
-    <div className={'upload-ring' + (done ? ' finishing' : '')}>
-      <svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true">
-        <circle className="ring-track" cx="9" cy="9" r="7" />
-        <circle
-          className="ring-arc"
-          cx="9"
-          cy="9"
-          r="7"
-          strokeDasharray={circumference}
-          // A full circle when it is spinning, so the arc the animation turns
-          // is a constant rather than whatever the last reading happened to be.
-          strokeDashoffset={done ? circumference * 0.25 : circumference * (1 - clamped)}
-        />
-      </svg>
-      <span>
-        {done ? 'Finishing…' : `Uploading… ${Math.round(clamped * 100)}%`}
-      </span>
-    </div>
-  );
-}
-
-/** One of our own pasted images, shown until the server echo replaces it. */
-function PreviewImage({ url }: { url: string }) {
-  const { imageProps } = useImageActions();
-  return (
-    <div className="attach">
-      <img src={url} alt="" {...imageProps({ src: url, name: 'image' })} />
+      {removed && <RemovedModal removal={removed} onSignOut={() => void signOut()} />}
     </div>
   );
 }

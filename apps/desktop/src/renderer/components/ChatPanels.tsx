@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
-import type { MessageDto } from '../api';
+import type { MemberDto, MessageDto } from '../api';
 import { MessageContent } from './MessageContent';
 import { Avatar } from './Avatar';
-import { stamp } from './chat-format';
+import { lastSeenLabel, muteLabel, stamp } from './chat-format';
 
 /**
  * The two popovers that list messages from somewhere else: search results and
@@ -244,3 +244,184 @@ export function PinsPanel({
   );
 }
 
+/** Where the moderation menu is, and who it is for. */
+export interface MemberMenu {
+  userId: string;
+  x: number;
+  y: number;
+}
+
+/** The menu is drawn against the viewport, so its box has to be known up front. */
+const MENU_WIDTH = 158;
+const MENU_HEIGHT = 265;
+
+const MUTE_OPTIONS: { label: string; minutes: number | null }[] = [
+  { label: '5 minutes', minutes: 5 },
+  { label: '1 hour', minutes: 60 },
+  { label: '1 day', minutes: 60 * 24 },
+  { label: '1 week', minutes: 60 * 24 * 7 },
+  { label: 'Indefinitely', minutes: null },
+];
+
+/**
+ * The roster down the right-hand side, and the moderation menu it opens.
+ *
+ * Presentational, like the two panels above it: every action is a callback,
+ * so the panel neither calls the API nor knows what a refused one should say.
+ * That is what lets it sit here rather than inside the chat closure -- the
+ * moderation menu is the only part of it with any behaviour, and all of that
+ * behaviour is somebody else's.
+ *
+ * `menuFor` is owned by the caller because the same click-away handler that
+ * closes the account and channel menus closes this one, and a menu that
+ * closed itself would need that handler written twice.
+ */
+export function MembersPanel({
+  members,
+  now,
+  iAmAdmin,
+  menuFor,
+  onMenuChange,
+  canModerate,
+  onShowBans,
+  onMute,
+  onUnmute,
+  onKick,
+  onBan,
+}: {
+  members: MemberDto[];
+  /** Ticks once a minute, so the "last seen" durations do not go stale. */
+  now: number;
+  iAmAdmin: boolean;
+  menuFor: MemberMenu | null;
+  onMenuChange: (menu: MemberMenu | null) => void;
+  /** Whether the moderation menu is offered at all for this member. */
+  canModerate: (m: MemberDto) => boolean;
+  onShowBans: () => void;
+  /** Null minutes is indefinitely; see MUTE_OPTIONS. */
+  onMute: (m: MemberDto, minutes: number | null) => void;
+  onUnmute: (m: MemberDto) => void;
+  onKick: (m: MemberDto) => void;
+  onBan: (m: MemberDto) => void;
+}) {
+  return (
+    <div className="col members">
+      <div className="sb-head row" style={{ fontSize: 13 }}>
+        Members
+        {iAmAdmin && (
+          <button className="head-btn" onClick={onShowBans}>
+            Bans
+          </button>
+        )}
+      </div>
+      <div className="sb-scroll">
+        {[...members]
+          .sort((a, b) =>
+            a.online === b.online
+              ? (a.user.displayName || a.user.username).localeCompare(
+                  b.user.displayName || b.user.username,
+                )
+              : a.online
+                ? -1
+                : 1,
+          )
+          .map((m) => (
+            <div key={m.user.id} className={'mem' + (m.online ? '' : ' offline')}>
+              <Avatar
+                name={m.user.displayName || m.user.username}
+                image={m.user.image}
+              />
+              {/* Name and last-seen share a column so the row keeps one
+                  height whether or not there is a duration to show. */}
+              <div className="mem-text">
+                <div className="mname">
+                  {m.user.displayName || m.user.username}
+                </div>
+                {!m.online && m.lastSeenAt && (
+                  <div
+                    className="mem-seen"
+                    title={`Last seen ${stamp(m.lastSeenAt)}`}
+                  >
+                    {lastSeenLabel(m.lastSeenAt, now)}
+                  </div>
+                )}
+              </div>
+              {m.mutedUntil && (
+                <span className="mem-muted" title={muteLabel(m.mutedUntil)}>
+                  🔇
+                </span>
+              )}
+              {canModerate(m) && (
+                <div className="mem-menu-wrap" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    className="mem-more"
+                    title="Moderate"
+                    onClick={(e) => {
+                      if (menuFor?.userId === m.user.id) return onMenuChange(null);
+                      const r = e.currentTarget.getBoundingClientRect();
+                      onMenuChange({ userId: m.user.id, x: r.right, y: r.bottom });
+                    }}
+                  >
+                    ⋯
+                  </button>
+                  {menuFor?.userId === m.user.id && (
+                    <div
+                      className="menu"
+                      style={{
+                        left: menuFor.x - MENU_WIDTH,
+                        // Flip up rather than off the bottom of the window.
+                        top: Math.min(menuFor.y + 4, window.innerHeight - MENU_HEIGHT),
+                      }}
+                    >
+                      <div className="menu-label">Mute microphone for</div>
+                      {MUTE_OPTIONS.map((o) => (
+                        <button
+                          key={o.label}
+                          onClick={() => {
+                            onMenuChange(null);
+                            onMute(m, o.minutes);
+                          }}
+                        >
+                          {o.label}
+                        </button>
+                      ))}
+                      {m.mutedUntil && (
+                        <button
+                          onClick={() => {
+                            onMenuChange(null);
+                            onUnmute(m);
+                          }}
+                        >
+                          Unmute
+                        </button>
+                      )}
+                      <div className="menu-sep" />
+                      <button
+                        className="danger"
+                        onClick={() => {
+                          onMenuChange(null);
+                          onKick(m);
+                        }}
+                      >
+                        Kick
+                      </button>
+                      <button
+                        className="danger"
+                        onClick={() => {
+                          onMenuChange(null);
+                          onBan(m);
+                        }}
+                      >
+                        Ban
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className={'pdot ' + (m.online ? 'on' : 'off')} />
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}

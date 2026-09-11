@@ -360,3 +360,47 @@ export function ForwardModal({
     </div>
   );
 }
+
+/** Why the app stopped: an admin kicked or banned this account. */
+export interface Removal {
+  kind: 'kick' | 'ban';
+  reason: string | null;
+}
+
+/**
+ * The one dialog with no way out but the door.
+ *
+ * No click-away wrapper and no close button, unlike everything above: the
+ * session behind it is over, and dismissing this would leave somebody looking
+ * at a server they have already been removed from, wondering why nothing
+ * works. Signing out is the only thing left to do, so it is the only thing
+ * offered.
+ */
+export function RemovedModal({
+  removal,
+  onSignOut,
+}: {
+  removal: Removal;
+  onSignOut: () => void;
+}) {
+  return (
+    <div className="modal-wrap">
+      <div className="modal">
+        <div className="modal-head">
+          {removal.kind === 'ban' ? 'You were banned' : 'You were removed'}
+        </div>
+        <div className="modal-body">
+          <p style={{ margin: 0 }}>
+            {removal.kind === 'ban'
+              ? 'An admin banned you from this server. This account cannot rejoin.'
+              : 'An admin removed you from this server. You can come back with a new invite.'}
+          </p>
+          {removal.reason && <p className="hint">Reason: {removal.reason}</p>}
+        </div>
+        <div className="modal-foot">
+          <button onClick={onSignOut}>Sign out</button>
+        </div>
+      </div>
+    </div>
+  );
+}
