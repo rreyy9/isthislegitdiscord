@@ -22,6 +22,15 @@ import {
   type MentionQuery,
   type MentionUser,
 } from '../mention-utils';
+import {
+  applyEmoji,
+  emojiQuery,
+  matchEmoji,
+  toEmoji,
+  type EmojiMatch,
+  type EmojiQuery,
+} from '../emoji-utils';
+import { EMOJI_PAIRS, emojiFor } from '../emoji-data';
 import { playPing } from '../ping';
 import {
   connectSocket,
@@ -43,12 +52,15 @@ import {
   VoicePanel,
 } from './Voice';
 import { Avatar } from './Avatar';
+import { EmojiBrowser } from './EmojiBrowser';
+import { ReactionBar } from './ReactionBar';
 import { useImageActions } from './ImageViewer';
 import { NetworkButton } from './NetworkStats';
 import {
   MAX_MESSAGE_CHARS,
   dayLabel,
   describeBytes,
+  guessReactions,
   isForever,
   lastSeenLabel,
   muteLabel,
@@ -282,12 +294,36 @@ export function Chat({
     sound: true,
   });
   /**
-   * The tag being typed in the composer, and which row of the list is
-   * selected. Null whenever the popup is closed, which is most of the time.
+   * The tag or shortcode being typed in the composer, and which row of the
+   * list is selected. Null whenever the popup is closed, which is most of the
+   * time.
+   *
+   * One piece of state with a discriminator rather than one per list, and that
+   * is the whole point: while a list is open it owns the arrow keys, Enter,
+   * Tab and Escape, and two of them able to be open at once would mean two
+   * handlers claiming the same keys. `MentionQuery` and `EmojiQuery` are the
+   * same `{ start, query }` shape, so `kind` is the only thing that separates
+   * them -- and it is what decides which list is drawn and what a pick does.
    */
-  const [mentionPicker, setMentionPicker] = useState<
-    (MentionQuery & { index: number }) | null
+  const [picker, setPicker] = useState<
+    | ({ kind: 'mention'; index: number } & MentionQuery)
+    | ({ kind: 'emoji'; index: number } & EmojiQuery)
+    | null
   >(null);
+  /**
+   * Whether the emoji grid is open over the composer.
+   *
+   * Separate from `picker` and not part of its union: that one is a list the
+   * caret is inside, driven by what is being typed and owning the arrow keys
+   * while it is open. This is a panel somebody opened with a button, which
+   * takes the focus itself and owns nothing in the textarea.
+   */
+  const [emojiBrowser, setEmojiBrowser] = useState(false);
+  /**
+   * The message whose reaction grid is open, if any. One at a time: two grids
+   * on screen would both be claiming Escape and the next click.
+   */
+  const [reactingTo, setReactingTo] = useState<string | null>(null);
   /** The message currently open for editing, and its working copy. */
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
@@ -472,6 +508,15 @@ export function Chat({
   const msgsRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   /**
+   * Where the caret was in the composer when it last had it.
+   *
+   * Kept because the emoji grid takes the focus the moment it opens -- its
+   * search box wants it -- so by the time something is picked, the textarea's
+   * own `selectionStart` has collapsed to the end. Without this, choosing an
+   * emoji from the grid mid-sentence would append it to the paragraph.
+   */
+  const caretRef = useRef<number>(0);
+  /**
    * Ids chosen from the tag list while writing this message.
    *
    * The draft holds names, not ids — it is a plain textarea — so the ids are
@@ -583,11 +628,23 @@ export function Chat({
     [members],
   );
 
-  /** What is in the tag list right now, for the query being typed. */
+  /**
+   * What is in the open list right now, for the query being typed.
+   *
+   * Two memos rather than one of a union type, so each list keeps its own
+   * element type and nothing has to be cast at the point of picking. Only one
+   * of them is ever non-empty, because only one picker is ever open.
+   */
   const mentionMatches = useMemo(
-    () => (mentionPicker ? matchUsers(mentionUsers, mentionPicker.query) : []),
-    [mentionPicker, mentionUsers],
+    () => (picker?.kind === 'mention' ? matchUsers(mentionUsers, picker.query) : []),
+    [picker, mentionUsers],
   );
+  const emojiMatches = useMemo(
+    () => (picker?.kind === 'emoji' ? matchEmoji(EMOJI_PAIRS, picker.query) : []),
+    [picker],
+  );
+  /** How many rows the open list has, whichever list it is. */
+  const pickerRowCount = mentionMatches.length + emojiMatches.length;
 
   /* ------------------------------------------------------ initial + socket */
 
@@ -900,6 +957,31 @@ export function Chat({
         // row this client may never have had, and a pin adds one that may be a
         // thousand messages further back than anything loaded.
         setPinsVersion((v) => v + 1);
+      },
+      onReactionChanged: ({ channelId, messageId, emoji, userIds }) => {
+        if (channelId !== activeChannelRef.current) return;
+        setMessages((prev) =>
+          prev.map((x) => {
+            if (x.id !== messageId) return x;
+            const others = (x.reactions ?? []).filter((r) => r.emoji !== emoji);
+            // Nobody left in the pile means the last person took theirs back,
+            // and the pile goes rather than sitting there reading "👍 0".
+            if (userIds.length === 0) return { ...x, reactions: others };
+            // Appended when it is new to this message, which is where the
+            // server has it too -- piles are ordered by first use. An existing
+            // one keeps its place, so the row does not reshuffle under the
+            // cursor of whoever is about to click the next one.
+            const kept = (x.reactions ?? []).map((r) =>
+              r.emoji === emoji ? { emoji, userIds } : r,
+            );
+            return {
+              ...x,
+              reactions: kept.length === others.length
+                ? [...kept, { emoji, userIds }]
+                : kept,
+            };
+          }),
+        );
       },
       onMention: ({ message, channelName, kind }) => {
         // The badge counts what is still unread. A tag in the channel that is
@@ -1976,10 +2058,19 @@ export function Chat({
   /* ------------------------------------------------------------- sending */
 
   async function send() {
-    // Names become ids here, once, on the way out. The textarea has held plain
-    // text the whole time it was being written, which is what keeps the
-    // composer a textarea; see mention-utils.ts.
-    const content = toMarkup(draft, mentionUsers, pickedRef.current).trim();
+    // Names become ids here, once, on the way out, and any shortcode still
+    // spelled out becomes the emoji it names. The textarea has held plain text
+    // the whole time it was being written, which is what keeps the composer a
+    // textarea; see mention-utils.ts.
+    //
+    // Tags first, and the order is load-bearing: `toMarkup` reads display
+    // names, which may contain a colon, so converting shortcodes first could
+    // rewrite a name out from under it. The reverse cannot happen -- a
+    // `<@id>` holds no colon for `toEmoji` to find.
+    const content = toEmoji(
+      toMarkup(draft, mentionUsers, pickedRef.current),
+      emojiFor,
+    ).trim();
     const files = pending.map((p) => p.file);
     // A pasted screenshot with nothing typed is a perfectly good message.
     if ((!content && files.length === 0) || !activeChannel) return;
@@ -2042,7 +2133,7 @@ export function Chat({
     setDraft('');
     cancelReply();
     pickedRef.current = new Set();
-    setMentionPicker(null);
+    setPicker(null);
     // The object URLs now belong to the outbox entry rather than to `pending`,
     // so this clears the staged list without revoking them -- the optimistic
     // row is still drawing them, and a retry would need them again.
@@ -2191,39 +2282,145 @@ export function Chat({
   );
 
   /**
-   * Open, move or close the tag list from wherever the caret now is.
+   * Open, move or close whichever list the caret is now inside.
    *
    * Driven by the caret rather than by the last keystroke, so it behaves the
    * same whether the `@` was typed, pasted, or arrived at with an arrow key.
    * The selected row resets to the top on every change: after another
    * character the old row is answering a question nobody asked any more.
+   *
+   * Tags are asked about first, and the two cannot both be open because this
+   * returns as soon as one of them answers. They rarely both could: an `@`
+   * query may contain spaces and a shortcode may not, so "@bob :sm" is a tag
+   * query that matches nobody and falls through to the shortcode, and ":sm
+   * @bob" is not a shortcode query at all.
    */
-  function syncMentionPicker(text: string, caret: number) {
+  function syncPicker(text: string, caret: number) {
+    caretRef.current = caret;
     const done = justPickedRef.current;
     if (done && done.text === text && done.caret === caret) {
-      setMentionPicker(null);
+      setPicker(null);
       return;
     }
     justPickedRef.current = null;
 
-    const query = mentionQuery(text, caret);
     // Nothing matching closes it. That is what stops an "@" in ordinary prose
     // from leaving a popup hanging over the rest of the sentence.
-    if (!query || matchUsers(mentionUsers, query.query, 1).length === 0) {
-      setMentionPicker(null);
+    const tag = mentionQuery(text, caret);
+    if (tag && matchUsers(mentionUsers, tag.query, 1).length > 0) {
+      setPicker({ kind: 'mention', ...tag, index: 0 });
       return;
     }
-    setMentionPicker({ ...query, index: 0 });
+
+    const shortcode = emojiQuery(text, caret);
+    if (shortcode && matchEmoji(EMOJI_PAIRS, shortcode.query, 1).length > 0) {
+      setPicker({ kind: 'emoji', ...shortcode, index: 0 });
+      return;
+    }
+
+    setPicker(null);
+  }
+
+  /* ---------------------------------------------------------- reactions */
+
+  /**
+   * Add or take back my reaction, showing the result before the server agrees.
+   *
+   * Optimistic, and rolled back if the request fails -- the same deal
+   * `retrySend` offers. Without it there is a visible pause between clicking
+   * an emoji and the number moving, on the one interaction in the app that has
+   * to feel instant because people use it instead of typing.
+   *
+   * The response carries every pile on the message, not just the one that
+   * changed, so the answer replaces the guess wholesale and a reaction
+   * somebody else added in the same moment arrives with it.
+   */
+  async function toggleReaction(m: Msg, emoji: string, mine: boolean) {
+    if (!activeChannel || m.pending) return;
+    const channelId = m.channelId;
+
+    const before = m.reactions ?? [];
+    setMessages((prev) =>
+      prev.map((x) =>
+        x.id === m.id ? { ...x, reactions: guessReactions(before, emoji, mine, me.id) } : x,
+      ),
+    );
+
+    try {
+      const reactions = mine
+        ? await api.unreact(channelId, m.id, emoji)
+        : await api.react(channelId, m.id, emoji);
+      setMessages((prev) =>
+        prev.map((x) => (x.id === m.id ? { ...x, reactions } : x)),
+      );
+    } catch (e: any) {
+      // Back to exactly what was there. The cap is the refusal people will
+      // actually meet, and it arrives with a sentence worth showing.
+      setMessages((prev) =>
+        prev.map((x) => (x.id === m.id ? { ...x, reactions: before } : x)),
+      );
+      setBanner(e?.message ?? 'That reaction could not be saved.');
+    }
+  }
+
+  /**
+   * Put an emoji from the grid into the draft, where the caret last was.
+   *
+   * Not `applyEmoji`: that one replaces a half-typed `:shortcode`, and there
+   * is no query here -- the grid is what you open when you do not know the
+   * name.
+   */
+  function insertEmoji(emoji: string) {
+    const at = Math.min(caretRef.current, draft.length);
+    const next = draft.slice(0, at) + emoji + draft.slice(at);
+    const caret = at + emoji.length;
+    caretRef.current = caret;
+    setDraft(next);
+    setEmojiBrowser(false);
+    // After React has written the value, or the caret lands in the old text.
+    requestAnimationFrame(() => {
+      const box = composerRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(caret, caret);
+    });
+  }
+
+  /** Put the row at `index` of the open list into the draft, whichever it is. */
+  function choosePickerRow(index: number) {
+    if (picker?.kind === 'mention') chooseMention(mentionMatches[index]);
+    else if (picker?.kind === 'emoji') chooseEmoji(emojiMatches[index]);
+  }
+
+  /**
+   * Put the chosen emoji in the draft.
+   *
+   * Nothing is remembered about it, unlike a tag: a name has to be resolved to
+   * an id on the way out and two people can answer to one string, whereas the
+   * character inserted here *is* what gets sent.
+   */
+  function chooseEmoji(match: EmojiMatch) {
+    if (picker?.kind !== 'emoji') return;
+    const next = applyEmoji(draft, picker, match.emoji);
+    justPickedRef.current = next;
+    setDraft(next.text);
+    setPicker(null);
+    requestAnimationFrame(() => {
+      const box = composerRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(next.caret, next.caret);
+    });
   }
 
   /** Put the chosen name in the draft and remember whose it was. */
   function chooseMention(user: MentionUser) {
-    if (!mentionPicker) return;
-    const next = applyMention(draft, mentionPicker, user);
+    if (picker?.kind !== 'mention') return;
+    const next = applyMention(draft, picker, user);
     pickedRef.current.add(user.id);
     justPickedRef.current = next;
     setDraft(next.text);
-    setMentionPicker(null);
+    setPicker(null);
     // React has not written the new value yet, so the caret is placed after it
     // has -- otherwise it lands at the end of the old text.
     requestAnimationFrame(() => {
@@ -2236,7 +2433,7 @@ export function Chat({
 
   function onDraftChange(v: string, caret: number) {
     setDraft(v);
-    syncMentionPicker(v, caret);
+    syncPicker(v, caret);
     if (!activeChannel) return;
     if (v && !typingSentRef.current) {
       typingSentRef.current = true;
@@ -2263,10 +2460,10 @@ export function Chat({
   /** Your own, or anyone's if you administer the server. */
   const canDelete = (m: Msg) => (m.author.id === me.id || iAmAdmin) && !m.pending;
   /**
-   * Whether this message can be answered or passed on. Anybody's, including
-   * your own -- but not one the server has never heard of, since both actions
-   * point at an id, and a message still in flight has one that is about to be
-   * replaced by a real one.
+   * Whether this message can be answered, passed on, or reacted to. Anybody's,
+   * including your own -- but not one the server has never heard of, since all
+   * three point at an id, and a message still in flight has one that is about
+   * to be replaced by a real one.
    */
   const canQuote = (m: Msg) => !m.pending && !m.failed;
 
@@ -2283,10 +2480,12 @@ export function Chat({
   }
 
   async function saveEdit(m: Msg) {
-    // Back to markers, the same conversion `send` does. Compared against the
-    // stored content afterwards, so re-saving an untouched message with tags
-    // in it is still recognised as no change.
-    const content = toMarkup(editDraft, mentionUsers).trim();
+    // Back to markers and emoji, the same conversion `send` does and in the
+    // same order. Compared against the stored content afterwards, so re-saving
+    // an untouched message with tags in it is still recognised as no change --
+    // which holds for emoji too, because the stored form is already the
+    // character and converting it again leaves it alone.
+    const content = toEmoji(toMarkup(editDraft, mentionUsers), emojiFor).trim();
     if (content === m.content) return cancelEdit();
     // Emptying a message is how Discord users delete one, so treat it that way
     // rather than bouncing it off the server's "cannot be empty".
@@ -2940,15 +3139,44 @@ export function Chat({
                                 <a onClick={() => discardFailed(m)}>Discard</a>
                               </div>
                             )}
+                            {/* Under everything the message itself carries,
+                                because it is what other people said about it
+                                rather than part of it. Drawn here rather than
+                                inside MessageContent so the pin board and the
+                                search results -- which draw the same content
+                                -- do not get a count nobody can click. */}
+                            <ReactionBar
+                              reactions={m.reactions ?? []}
+                              meId={me.id}
+                              lookupName={(id) => {
+                                const user = lookupUser(id);
+                                return user ? mentionName(user) : null;
+                              }}
+                              onToggle={(emoji, mine) =>
+                                void toggleReaction(m, emoji, mine)
+                              }
+                            />
                           </>
                         )}
                       </div>
                       {editingId !== m.id &&
                         (canQuote(m) || canEdit(m) || canPin(m) || canDelete(m)) && (
                           <div className="msg-actions">
-                            {/* First in the row, because it is the one action
-                                anybody uses on somebody else's message and the
-                                only one that is not about managing it. */}
+                            {/* First in the row, ahead of replying, because it
+                                is the lightest thing anybody does to somebody
+                                else's message -- and the one people reach for
+                                instead of typing. */}
+                            {canQuote(m) && (
+                              <button
+                                className={reactingTo === m.id ? 'on' : undefined}
+                                title="Add a reaction"
+                                onClick={() =>
+                                  setReactingTo((open) => (open === m.id ? null : m.id))
+                                }
+                              >
+                                ☺
+                              </button>
+                            )}
                             {canQuote(m) && (
                               <button title="Reply" onClick={() => beginReply(m)}>
                                 ↩
@@ -2989,6 +3217,26 @@ export function Chat({
                             )}
                           </div>
                         )}
+                      {/* Anchored to the message rather than to the row of
+                          buttons, which is only there while the pointer is
+                          over the message -- and the pointer leaves it the
+                          moment it moves into the grid. */}
+                      {reactingTo === m.id && (
+                        <EmojiBrowser
+                          className="over-message"
+                          onPick={(emoji) => {
+                            setReactingTo(null);
+                            void toggleReaction(
+                              m,
+                              emoji,
+                              (m.reactions ?? []).some(
+                                (r) => r.emoji === emoji && r.userIds.includes(me.id),
+                              ),
+                            );
+                          }}
+                          onClose={() => setReactingTo(null)}
+                        />
+                      )}
                     </div>
                   </div>
                 );
@@ -3108,14 +3356,31 @@ export function Chat({
               )}
             </div>
           )}
-          {mentionPicker && mentionMatches.length > 0 && (
+          {picker?.kind === 'mention' && mentionMatches.length > 0 && (
             <MentionPicker
               matches={mentionMatches}
-              index={mentionPicker.index}
+              index={picker.index}
               onHover={(i) =>
-                setMentionPicker((prev) => (prev ? { ...prev, index: i } : prev))
+                setPicker((prev) => (prev ? { ...prev, index: i } : prev))
               }
               onPick={chooseMention}
+            />
+          )}
+          {picker?.kind === 'emoji' && emojiMatches.length > 0 && (
+            <EmojiPicker
+              matches={emojiMatches}
+              index={picker.index}
+              onHover={(i) =>
+                setPicker((prev) => (prev ? { ...prev, index: i } : prev))
+              }
+              onPick={chooseEmoji}
+            />
+          )}
+          {emojiBrowser && (
+            <EmojiBrowser
+              className="over-composer"
+              onPick={insertEmoji}
+              onClose={() => setEmojiBrowser(false)}
             />
           )}
           {/* Until now files only arrived by paste or drag, which are both
@@ -3127,6 +3392,26 @@ export function Chat({
             onClick={() => fileInputRef.current?.click()}
           >
             📎
+          </button>
+          {/* The other half of the shortcodes: `:tada:` is faster than any
+              grid for somebody who knows the name, and this is for everybody
+              who does not. */}
+          <button
+            className="attach-btn"
+            title="Emoji"
+            disabled={!activeChannelObj || activeChannelObj.kind !== 'TEXT'}
+            onClick={() => {
+              // The textarea loses the caret to the panel's search box, so
+              // where it was is read now rather than when something is picked.
+              const box = composerRef.current;
+              if (box && document.activeElement === box) {
+                caretRef.current = box.selectionStart;
+              }
+              setPicker(null);
+              setEmojiBrowser((open) => !open);
+            }}
+          >
+            😀
           </button>
           <input
             ref={fileInputRef}
@@ -3166,29 +3451,30 @@ export function Chat({
             onSelect={(e) => {
               const box = e.currentTarget;
               if (document.activeElement === box) {
-                syncMentionPicker(box.value, box.selectionStart);
+                syncPicker(box.value, box.selectionStart);
               }
             }}
             onBlur={() => {
               stopTyping();
-              setMentionPicker(null);
+              setPicker(null);
             }}
             onKeyDown={(e) => {
-              // While the list is open it owns the keys that move around it,
-              // and nothing else: every other key still types.
-              if (mentionPicker && mentionMatches.length > 0) {
+              // While a list is open it owns the keys that move around it, and
+              // nothing else: every other key still types. Which list it is
+              // does not matter here -- only one can be open, and the row
+              // count and the pick are asked for without naming it.
+              if (picker && pickerRowCount > 0) {
                 if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                   e.preventDefault();
                   const step = e.key === 'ArrowDown' ? 1 : -1;
-                  setMentionPicker((prev) =>
+                  setPicker((prev) =>
                     prev
                       ? {
                           ...prev,
                           // Wraps, so holding one arrow key cannot strand the
                           // selection at an end of a short list.
                           index:
-                            (prev.index + step + mentionMatches.length) %
-                            mentionMatches.length,
+                            (prev.index + step + pickerRowCount) % pickerRowCount,
                         }
                       : prev,
                   );
@@ -3196,16 +3482,16 @@ export function Chat({
                 }
                 if (e.key === 'Enter' || e.key === 'Tab') {
                   e.preventDefault();
-                  chooseMention(mentionMatches[mentionPicker.index]);
+                  choosePickerRow(picker.index);
                   return;
                 }
                 if (e.key === 'Escape') {
                   e.preventDefault();
-                  setMentionPicker(null);
+                  setPicker(null);
                   return;
                 }
               }
-              // After the tag list, which owns Escape while it is open: one
+              // After the picker, which owns Escape while it is open: one
               // press closes the list, the next lets go of the reply.
               if (e.key === 'Escape' && replyTo) {
                 e.preventDefault();
@@ -3537,6 +3823,49 @@ function MentionPicker({
           {user.displayName && user.displayName !== user.username && (
             <span className="mention-row-handle">{user.username}</span>
           )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The list that opens when you type `:` and two more characters.
+ *
+ * The same box as the tag list above, in the same place, with the same
+ * `onMouseDown` rather than `onClick` -- a click blurs the textarea, the blur
+ * closes the list, and an `onClick` would land on nothing.
+ *
+ * Two characters before it opens, where a tag opens on a bare `@`. A colon is
+ * ordinary punctuation in a way `@` is not, and the reasoning is in
+ * `emoji-utils.ts` beside the constant.
+ */
+function EmojiPicker({
+  matches,
+  index,
+  onHover,
+  onPick,
+}: {
+  matches: EmojiMatch[];
+  index: number;
+  onHover: (index: number) => void;
+  onPick: (match: EmojiMatch) => void;
+}) {
+  return (
+    <div className="mention-picker">
+      <div className="mention-picker-head">Emoji</div>
+      {matches.map((match, i) => (
+        <button
+          key={match.shortcode}
+          className={'mention-row' + (i === index ? ' on' : '')}
+          onMouseEnter={() => onHover(i)}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            onPick(match);
+          }}
+        >
+          <span className="emoji-row-glyph">{match.emoji}</span>
+          <span className="mention-row-name">:{match.shortcode}:</span>
         </button>
       ))}
     </div>

@@ -347,7 +347,10 @@ button { font-family: inherit; cursor: pointer; }
 
 .typing { height: 22px; padding: 0 18px; font-size: 12.5px; color: var(--dim); font-style: italic; }
 
-.composer { padding: 0 18px 18px; }
+/* `relative` only so the emoji grid has something to hang off. It changes no
+   layout by itself, which is the point -- the composer is a block with its
+   children stacked, and that is left exactly as it was. */
+.composer { padding: 0 18px 18px; position: relative; }
 .composer textarea {
   width: 100%; resize: none; background: var(--panel); border: 1px solid var(--line);
   color: var(--text); border-radius: 9px; padding: 11px 13px; font-size: 14.5px;
@@ -565,6 +568,92 @@ button { font-family: inherit; cursor: pointer; }
 .mention-row.on { background: var(--accent-dim); }
 .mention-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mention-row-handle { margin-left: auto; color: var(--faint); font-size: 11.5px; }
+
+/* Where an avatar sits in a tag row. Sized to match one, so the two lists are
+   the same shape and the box does not resize as you switch between them. */
+.emoji-row-glyph {
+  width: 22px; font-size: 17px; line-height: 22px; text-align: center;
+  flex: 0 0 22px;
+}
+
+/* ------------------------------------------------------- the emoji grid */
+
+/* Floated over the message list rather than pushing it, because it is twice
+   the height of the composer and a panel that shoved the conversation up
+   every time it opened would lose your place in it. */
+.emoji-browser {
+  width: 328px; height: 342px; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px; box-shadow: 0 -8px 26px rgba(0, 0, 0, .45); z-index: 30;
+}
+.emoji-browser.over-composer { position: absolute; right: 18px; bottom: 100%; }
+/* Hung off the message, not off the hover row -- that row only exists while
+   the pointer is over the message, and the pointer leaves it the moment it
+   moves into the grid. Pulled up so a message near the bottom of the list does
+   not open a panel half off the screen. */
+.emoji-browser.over-message { position: absolute; right: 8px; top: -8px; }
+
+/* ------------------------------------------------------------- reactions */
+
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.reaction {
+  display: flex; align-items: center; gap: 5px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 11px;
+  padding: 2px 8px 2px 6px; line-height: 1;
+}
+.reaction:hover { border-color: var(--faint); }
+/* Lit when you are in the pile, so "have I already" is answered without
+   reading the tooltip -- which is the question people ask of this row. */
+.reaction.mine { background: var(--accent-dim); border-color: var(--accent); }
+.reaction-glyph { font-size: 14px; }
+.reaction-count {
+  font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums;
+}
+.reaction.mine .reaction-count { color: #fff; }
+
+.emoji-search {
+  width: 100%; background: var(--bg); border: 1px solid var(--line);
+  color: var(--text); border-radius: 7px; padding: 6px 9px; font-size: 13px;
+}
+.emoji-search:focus { outline: none; border-color: var(--accent); }
+
+.emoji-tabs {
+  display: flex; gap: 2px; padding: 7px 0 5px; margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.emoji-tab {
+  flex: 1; background: none; border: none; font-size: 15px; line-height: 1;
+  padding: 4px 0; border-radius: 5px;
+  /* Grey until it is the one you are looking at, so the row reads as a set of
+     tabs rather than as nine more emoji to pick from. */
+  filter: grayscale(1); opacity: .55;
+}
+.emoji-tab:hover { opacity: 1; }
+.emoji-tab.on { background: var(--panel2); filter: none; opacity: 1; }
+
+.emoji-scroll { flex: 1; overflow-y: auto; margin-top: 2px; }
+.emoji-group-head {
+  color: var(--faint); font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .4px; padding: 6px 2px 4px; font-weight: 600;
+  position: sticky; top: 0; background: var(--panel);
+}
+.emoji-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 1px; }
+.emoji-cell {
+  background: none; border: none; font-size: 20px; line-height: 1;
+  padding: 5px 0; border-radius: 5px;
+}
+.emoji-cell:hover { background: var(--panel2); }
+.emoji-loading { color: var(--faint); font-size: 12.5px; padding: 14px 4px; }
+
+/* A message that is nothing but emoji. Three sizes rather than one, so two
+   hearts are a gesture and twenty are still readable at a glance. */
+.msg-content.big { line-height: 1.25; }
+.msg-content.big-1 { font-size: 40px; }
+.msg-content.big-2 { font-size: 32px; }
+.msg-content.big-3 { font-size: 24px; }
+/* The mark stays the size it is everywhere else: it is a note about the
+   message, not part of what was said. */
+.msg-content.big .edited { font-size: 11px; }
 
 /* A rule with the date sitting in it, rather than a floating label: the line
    is what actually separates the days at a glance. */

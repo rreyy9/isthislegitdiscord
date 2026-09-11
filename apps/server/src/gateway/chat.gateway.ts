@@ -392,6 +392,30 @@ export class ChatGateway
       .emit('pin:changed', { channelId, messageId, pinnedAt });
   }
 
+  /**
+   * A reaction was added or taken back.
+   *
+   * The channel room, on the same reasoning as a pin: the only thing that
+   * changes is what is drawn for the channel on screen. Somebody scrolled away
+   * in another channel misses it and does not need it -- history carries
+   * reactions, so opening that channel is what brings them.
+   *
+   * The whole pile for that emoji, not a delta. A client that has been asleep
+   * cannot apply "+1" to a number it never had, and a pile it can drop in
+   * place is right however far behind it was. Empty means the last person took
+   * theirs back.
+   */
+  broadcastReactionChanged(
+    channelId: string,
+    messageId: string,
+    emoji: string,
+    userIds: string[],
+  ) {
+    this.server
+      .to(`channel:${channelId}`)
+      .emit('reaction:changed', { channelId, messageId, emoji, userIds });
+  }
+
   broadcastMemberUpdated(
     guildId: string,
     userId: string,

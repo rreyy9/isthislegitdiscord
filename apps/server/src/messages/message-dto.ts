@@ -1,4 +1,9 @@
-import { isInlineType, type Message, type MessageRef } from '@isthislegit/shared';
+import {
+  isInlineType,
+  type Message,
+  type MessageRef,
+  type Reaction,
+} from '@isthislegit/shared';
 
 /**
  * One message, on the wire.
@@ -63,6 +68,16 @@ export const withAuthor = {
   // somebody who is not in the guild was never stored and must not come back
   // out of history looking like it was.
   mentions: { select: { userId: true } },
+  // What people reacted with. One more join on the hot path -- every history
+  // page, every search result, every socket echo -- which is affordable
+  // because the table is empty for most messages and `[messageId]` is indexed.
+  //
+  // Ordered so the names under a pile are in the order people arrived at it,
+  // which is the only order that means anything.
+  reactions: {
+    select: { emoji: true, userId: true },
+    orderBy: { createdAt: 'asc' },
+  },
 } as const;
 
 export function toAttachmentDto(a: any) {
@@ -113,6 +128,27 @@ export function toRefDto(row: any): MessageRef | null {
   };
 }
 
+/**
+ * The reaction rows on one message, gathered into one pile per emoji.
+ *
+ * A Map rather than a plain object, because insertion order is what puts the
+ * piles in the order they were first added -- an object with emoji for keys is
+ * not guaranteed to keep that, and "reactions jump around between renders" is
+ * the kind of bug that is noticed long after it is introduced.
+ *
+ * Exported so the gateway can build one pile the same way when it broadcasts a
+ * change, rather than assembling the same shape slightly differently.
+ */
+export function toReactionDtos(rows: any[]): Reaction[] {
+  const piles = new Map<string, string[]>();
+  for (const row of rows ?? []) {
+    const users = piles.get(row.emoji);
+    if (users) users.push(row.userId);
+    else piles.set(row.emoji, [row.userId]);
+  }
+  return [...piles].map(([emoji, userIds]) => ({ emoji, userIds }));
+}
+
 export function toDto(row: any): Message {
   return {
     id: row.id,
@@ -133,5 +169,6 @@ export function toDto(row: any): Message {
     attachments: (row.attachments ?? []).map(toAttachmentDto),
     replyTo: toRefDto(row.replyTo),
     forwardedFrom: toRefDto(row.forwardedFrom),
+    reactions: toReactionDtos(row.reactions),
   };
 }

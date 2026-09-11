@@ -187,6 +187,92 @@ export const MessageRef = z.object({
 });
 export type MessageRef = z.infer<typeof MessageRef>;
 
+/* --------------------------------------------------------------- reactions */
+
+/**
+ * How many distinct emoji one message may carry.
+ *
+ * A cap for the reason `MAX_PINS_PER_CHANNEL` is one: the row is drawn under
+ * every message, and an unbounded one stops being a reaction and becomes a
+ * second message. Twenty is Discord's number and is well past what anybody
+ * uses. One person may add as many of those twenty as they like; what is
+ * capped is the number of different emoji on the message, not the number of
+ * people who agreed with one.
+ */
+export const MAX_REACTIONS_PER_MESSAGE = 20;
+
+/**
+ * Whether a string is one emoji, by Unicode's own definition of the set that
+ * is meant to be displayable everywhere.
+ *
+ * The `v` flag is ES2024, which is why this package targets it. Matching a
+ * property *of strings* rather than of characters is what makes a family of
+ * five codepoints and four joiners one match instead of nine.
+ */
+const RGI_EMOJI = /^\p{RGI_Emoji}$/v;
+
+/**
+ * One spelling per emoji, or null for anything that is not one.
+ *
+ * Reactions arrive from a client, in a URL, so this is the same rule tags get:
+ * what turns up is a claim, not a fact. `\p{RGI_Emoji}` answers the "is it an
+ * emoji" half on its own and needs no table to do it -- it accepts ZWJ
+ * families, skin tones and flags, and refuses `a`, `👍👍` and `:smile:`.
+ *
+ * The other half is the one that bites. RGI is strict about U+FE0F, the
+ * variation selector, in *both* directions and by emoji:
+ *
+ *     👍  (1F44D)       matches      👍️ (1F44D FE0F)  does NOT
+ *     ❤️  (2764 FE0F)   matches      ❤  (2764)        does NOT
+ *
+ * A character that is already emoji-presentation must not carry the selector;
+ * one that defaults to text presentation must. Emoji datasets hand out the
+ * fully-qualified form, which is the wrong one for about two thirds of them --
+ * so a bare RGI test refuses characters a picker itself produced. And without
+ * a rule that settles on one form, `👍` and `👍️` are two different strings,
+ * two different rows, and two reaction piles on one message that look
+ * identical and cannot be merged.
+ *
+ * So: drop the selector where it is not wanted, keep it where it is, add it
+ * where it is missing. Verified over the whole emojibase set including every
+ * skin-tone variant -- 3,953 sequences, none rejected, no two collapsing onto
+ * one another, and running it twice changes nothing.
+ *
+ * One thing to know before upgrading Node: `\p{RGI_Emoji}` is tied to the
+ * *runtime's* Unicode tables, not to any dataset. A server on an older Node
+ * than the client's emoji data will refuse the newest handful of emoji, and
+ * the refusal is a 400 rather than anything mysterious -- but it is worth
+ * knowing that the fix is the server, not the client.
+ */
+export function canonicalEmoji(input: string): string | null {
+  const bare = input.replace(/️/g, '');
+  if (RGI_EMOJI.test(bare)) return bare;
+  if (RGI_EMOJI.test(input)) return input;
+  const qualified = bare + '️';
+  return RGI_EMOJI.test(qualified) ? qualified : null;
+}
+
+/**
+ * One pile of reactions on a message: the emoji, and everyone who added it.
+ *
+ * The ids rather than a count and a `me` flag, and that is deliberate. One
+ * `Message` object is broadcast to everybody in the channel, so a per-viewer
+ * field on it would be wrong for all but one of them -- the same problem
+ * `mentions` has and the same answer: send the list, and let each client ask
+ * whether it is in it. It also hands the tooltip its names for nothing, which
+ * a bare count cannot do.
+ *
+ * Bounded by `MAX_REACTIONS_PER_MESSAGE` times the size of the guild, which
+ * for the deployment this is built for is a few hundred short strings on the
+ * busiest message anyone will ever send.
+ */
+export const Reaction = z.object({
+  emoji: z.string(),
+  /** Everyone who added it, oldest first. */
+  userIds: z.array(z.string()),
+});
+export type Reaction = z.infer<typeof Reaction>;
+
 export const Message = z.object({
   id: z.string(),
   channelId: z.string(),
@@ -230,6 +316,17 @@ export const Message = z.object({
    * this is always the original and never another forward.
    */
   forwardedFrom: MessageRef.nullable(),
+  /**
+   * What people have reacted with, and who. Empty for the overwhelming
+   * majority of messages, which is why it costs nothing to carry here rather
+   * than to fetch separately.
+   *
+   * On the message rather than on its own endpoint for the reason `pinnedAt`
+   * is: every place that already hands over a message -- history, a window
+   * around a search result, the socket echo -- then hands over its reactions
+   * for free, and there is no second call that can disagree with the first.
+   */
+  reactions: z.array(Reaction),
 });
 export type Message = z.infer<typeof Message>;
 
@@ -936,6 +1033,34 @@ export interface ServerToClientEvents {
     messageId: string;
     /** ISO date when it was pinned, null when it was just unpinned. */
     pinnedAt: string | null;
+  }) => void;
+  /**
+   * Somebody added or removed a reaction.
+   *
+   * A new event rather than a `message:updated` carrying the whole message,
+   * which is the cheap way to ship anything additive: a client too old to know
+   * about reactions never registered a handler and drops it, where a changed
+   * `message:updated` would reach every client whether or not it understood.
+   * It also keeps a click on an emoji from re-broadcasting a message and every
+   * quote of it.
+   *
+   * To the channel room, like `pin:changed` and for the same reason -- the only
+   * thing that changes is what is drawn for the channel on screen, and that is
+   * the one room a client joins. A reaction to a message in a channel nobody
+   * here is looking at is missed, which costs nothing: history carries
+   * reactions, so opening that channel asks for and gets the current state.
+   *
+   * Carries the whole pile for that one emoji rather than a delta. A client
+   * applying "+1 to 👍" has to have had the right number to start with, and
+   * one that has been asleep has not; a pile it can drop in place is correct
+   * however far behind it was. An empty `userIds` means the last person took
+   * theirs back and the pile is gone.
+   */
+  'reaction:changed': (payload: {
+    channelId: string;
+    messageId: string;
+    emoji: string;
+    userIds: string[];
   }) => void;
   /**
    * Somebody came online or went offline.

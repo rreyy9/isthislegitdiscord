@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   dayLabel,
   describeBytes,
+  guessReactions,
   isForever,
   lastSeenLabel,
   muteLabel,
@@ -165,5 +166,73 @@ describe('quoteLine', () => {
     // The server sends no content for a deleted message; this is belt and
     // braces on the one path where a quote could otherwise outlive a deletion.
     expect(quoteLine('what was said', 2, true)).toBe('Message deleted');
+  });
+});
+
+describe('guessReactions', () => {
+  const me = 'u-me';
+
+  it('adds an emoji nobody has used yet, at the end', () => {
+    // At the end because that is where the server puts it -- piles are
+    // ordered by when they were first added, so anywhere else would make the
+    // row jump when the real answer lands.
+    expect(guessReactions([{ emoji: '👍', userIds: ['u-a'] }], '🎉', false, me)).toEqual([
+      { emoji: '👍', userIds: ['u-a'] },
+      { emoji: '🎉', userIds: [me] },
+    ]);
+  });
+
+  it('joins a pile that already exists without moving it', () => {
+    expect(
+      guessReactions(
+        [
+          { emoji: '👍', userIds: ['u-a'] },
+          { emoji: '🎉', userIds: ['u-b'] },
+        ],
+        '👍',
+        false,
+        me,
+      ),
+    ).toEqual([
+      { emoji: '👍', userIds: ['u-a', me] },
+      { emoji: '🎉', userIds: ['u-b'] },
+    ]);
+  });
+
+  it('leaves a pile it is already in alone', () => {
+    // Two windows can disagree about whether it is mine. A second copy of one
+    // id would show a count that cannot be taken back down.
+    const before = [{ emoji: '👍', userIds: ['u-a', me] }];
+    expect(guessReactions(before, '👍', false, me)).toEqual(before);
+  });
+
+  it('takes mine back and leaves the others', () => {
+    expect(
+      guessReactions([{ emoji: '👍', userIds: ['u-a', me, 'u-b'] }], '👍', true, me),
+    ).toEqual([{ emoji: '👍', userIds: ['u-a', 'u-b'] }]);
+  });
+
+  it('removes the pile when the last person takes theirs back', () => {
+    // An empty pile drawn as "👍 0" is the bug this exists to prevent.
+    expect(
+      guessReactions(
+        [
+          { emoji: '👍', userIds: [me] },
+          { emoji: '🎉', userIds: ['u-a'] },
+        ],
+        '👍',
+        true,
+        me,
+      ),
+    ).toEqual([{ emoji: '🎉', userIds: ['u-a'] }]);
+  });
+
+  it('does not mutate what it was given', () => {
+    const before = [{ emoji: '👍', userIds: ['u-a'] }];
+    const snapshot = JSON.parse(JSON.stringify(before));
+    guessReactions(before, '👍', false, me);
+    // The rollback path holds on to the original array, so mutating it here
+    // would make a failed request un-undoable.
+    expect(before).toEqual(snapshot);
   });
 });

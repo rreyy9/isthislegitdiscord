@@ -40,7 +40,15 @@ const ADMIN_ONLY: Action[] = [
   'invite.create',
 ];
 
-const EVERY_MEMBER: Action[] = ['channel.read', 'channel.write', 'voice.join'];
+const EVERY_MEMBER: Action[] = [
+  'channel.read',
+  'channel.write',
+  'voice.join',
+  // Its own action, but not an admin one -- reacting is something anybody in
+  // the channel does. The name exists so the rule can move later, not because
+  // it is different today.
+  'message.react',
+];
 
 describe('isMuted', () => {
   it('is false for someone who was never muted', () => {

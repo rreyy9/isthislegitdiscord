@@ -9,6 +9,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   UploadedFiles,
   UseFilters,
@@ -18,13 +19,16 @@ import {
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import {
+  canonicalEmoji,
   EditMessageInput,
   EPHEMERAL_FILE_HOURS,
   MAX_PINS_PER_CHANNEL,
+  MAX_REACTIONS_PER_MESSAGE,
   MessageHistoryQuery,
   SendMessageInput,
   type Message,
   type MessagePage,
+  type Reaction,
 } from '@isthislegit/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthGuard, CurrentUser, type SessionUser } from '../auth/auth.guard';
@@ -34,7 +38,7 @@ import { MentionsService } from '../mentions/mentions.service';
 import { ZodPipe } from '../common/zod.pipe';
 import { UploadLimitFilter } from '../common/upload-limit.filter';
 import { newId } from '../common/ids';
-import { toDto, withAuthor } from './message-dto';
+import { toDto, toReactionDtos, withAuthor } from './message-dto';
 import {
   maxUploadBytes,
   store,
@@ -628,5 +632,139 @@ export class MessagesController {
 
     this.gateway.broadcastPinChanged(channelId, id, null);
     return { ok: true };
+  }
+
+  /* ----------------------------------------------------------- reactions */
+
+  /**
+   * Add my reaction. Idempotent: doing it twice is doing it once.
+   *
+   * `PUT` rather than `POST` because that is exactly what it is -- "let this
+   * row exist" -- and because a double-click, a retry after a dropped
+   * connection and two open windows all have to land on the same outcome. The
+   * unique constraint is what makes that true under a race rather than a
+   * check-then-insert that two requests can both pass.
+   */
+  @Put(':id/reactions/:emoji')
+  async react(
+    @CurrentUser() user: SessionUser,
+    @Param('channelId') channelId: string,
+    @Param('id') id: string,
+    @Param('emoji') rawEmoji: string,
+  ): Promise<Reaction[]> {
+    const { emoji } = await this.reactionTarget(user, channelId, id, rawEmoji);
+
+    // The cap counts distinct emoji on the message, not people: twenty of us
+    // agreeing is one pile, and it is a wall of twenty different piles that
+    // turns the row under a message into a second message.
+    //
+    // Counted before the insert and only when this emoji is new to the
+    // message, so joining a pile that already exists is never refused for
+    // being the twenty-first.
+    const existing = await this.prisma.messageReaction.findFirst({
+      where: { messageId: id, emoji },
+      select: { id: true },
+    });
+    if (!existing) {
+      const distinct = await this.prisma.messageReaction.groupBy({
+        by: ['emoji'],
+        where: { messageId: id },
+      });
+      if (distinct.length >= MAX_REACTIONS_PER_MESSAGE) {
+        throw new BadRequestException(
+          `A message can carry ${MAX_REACTIONS_PER_MESSAGE} different reactions. Take one off first.`,
+        );
+      }
+    }
+
+    await this.prisma.messageReaction.createMany({
+      data: [{ id: newId(), messageId: id, userId: user.id, emoji }],
+      // Reacting twice is reacting once, and two windows clicking together
+      // must not turn that into a 500.
+      skipDuplicates: true,
+    });
+
+    return this.publishReaction(channelId, id, emoji);
+  }
+
+  /** Take mine back. Idempotent the same way, and for the same reasons. */
+  @Delete(':id/reactions/:emoji')
+  async unreact(
+    @CurrentUser() user: SessionUser,
+    @Param('channelId') channelId: string,
+    @Param('id') id: string,
+    @Param('emoji') rawEmoji: string,
+  ): Promise<Reaction[]> {
+    const { emoji } = await this.reactionTarget(user, channelId, id, rawEmoji);
+
+    await this.prisma.messageReaction.deleteMany({
+      where: { messageId: id, userId: user.id, emoji },
+    });
+
+    return this.publishReaction(channelId, id, emoji);
+  }
+
+  /**
+   * The checks both reaction routes make, and the canonical emoji they agree on.
+   *
+   * The emoji arrives as a path segment, so it is a string somebody chose --
+   * the same footing as an id in message text. `canonicalEmoji` answers both
+   * halves at once: whether it is an emoji at all, and which of its spellings
+   * is the one that reaches the unique index. Without the second half, `👍` and
+   * `👍️` are two piles on one message that look identical and cannot merge.
+   */
+  private async reactionTarget(
+    user: SessionUser,
+    channelId: string,
+    id: string,
+    rawEmoji: string,
+  ): Promise<{ emoji: string }> {
+    const emoji = canonicalEmoji(decodeURIComponent(rawEmoji));
+    if (!emoji) throw new BadRequestException('That is not an emoji.');
+
+    if (!(await this.permissions.canInChannel(user.id, channelId, 'message.react'))) {
+      throw new ForbiddenException('No access to that channel.');
+    }
+
+    const target = await this.prisma.message.findUnique({
+      where: { id },
+      select: { channelId: true, deletedAt: true },
+    });
+    // A deleted message is gone from every client, and a reaction to one would
+    // be a row nobody can see attached to a message nobody can read.
+    if (!target || target.channelId !== channelId || target.deletedAt) {
+      throw new NotFoundException('No such message.');
+    }
+
+    return { emoji };
+  }
+
+  /**
+   * Re-read one pile, tell the channel, and hand it back to the caller.
+   *
+   * Read back rather than computed from what was just written, because the
+   * answer has to include everybody else's reactions too and somebody may have
+   * clicked in the same moment. The broadcast and the response are then the
+   * same object, so the person who clicked and everybody watching cannot end
+   * up with different numbers.
+   */
+  private async publishReaction(
+    channelId: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<Reaction[]> {
+    const rows = await this.prisma.messageReaction.findMany({
+      where: { messageId },
+      select: { emoji: true, userId: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const all = toReactionDtos(rows);
+    // Absent from the list means the last person took theirs back. The event
+    // still has to go out saying so, with nobody in it -- that is what removes
+    // the pile from everyone's screen.
+    const pile = all.find((r) => r.emoji === emoji) ?? { emoji, userIds: [] };
+    this.gateway.broadcastReactionChanged(channelId, messageId, emoji, pile.userIds);
+    return all;
   }
 }

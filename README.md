@@ -20,7 +20,7 @@ goes direct to the box; only signalling and the HTTP API go through the proxy.
 - [Updating the client](#updating-the-client) · [Older clients](#older-clients)
 - [Configuration](#configuration) · [Going public](#going-public) · [Database](#database) · [Backups](#backups) · [Retention](#retention)
 - [Voice quality](#voice-quality) · [Mentions](#mentions) · [Pinned messages](#pinned-messages)
-- [Replies and forwards](#replies-and-forwards)
+- [Replies and forwards](#replies-and-forwards) · [Emoji and reactions](#emoji-and-reactions)
 - [Search](#search) · [Attachments](#attachments) · [API](#api) · [Tests](#tests) · [Logs](#logs)
 - [Decisions worth not re-litigating](#decisions-worth-not-re-litigating)
 - [Bugs that cost real time](#bugs-that-cost-real-time)
@@ -1128,6 +1128,150 @@ npm run db:migrate
 
 ---
 
+## Emoji and reactions
+
+Type `:` and two more characters and a list of emoji opens — arrow keys move, Enter or Tab
+picks, Escape closes, exactly like the tag list, because it is the same list with different
+rows. There is a 😀 button beside the paperclip for when you do not know the name: nine
+categories, a search box over labels and tags, and whatever you reached for last. Hover a
+message and the row of buttons has gained a **☺** at the front; pick an emoji and it
+appears under the message as a pile with a count. Click a pile to join it or take yourself
+back out. Hovering one says who is in it.
+
+**The stored form is the emoji, not the shortcode.** This is the opposite of what
+[mentions](#mentions) do, for the opposite reason. A tag travels as `<@id>` because the
+name it stands for changes; a codepoint does not — U+1F604 was U+1F604 when it was added
+and will be in twenty years. So `:smile:` becomes 😄 on the way out, once, where
+`toMarkup` turns names into markers, and the message row holds the character. Three things
+fall out of that: `MessageContent` needs no emoji pass at all, a client older than this
+feature draws it perfectly because to it the message is just text, and the edit box shows
+😄 rather than `:smile:` with no inverse conversion to write. It is the one feature that
+gets to skip the *unrecognised content renders as a placeholder* rule, and it skips it by
+having nothing to recognise.
+
+**Tags convert before emoji, and the order is load-bearing.** `toMarkup` reads display
+names, which may contain a colon; converting shortcodes first could rewrite a name out
+from under it. The reverse cannot happen — a `<@id>` holds no colon for `toEmoji` to find.
+
+**Two characters before the list opens, where a tag opens on a bare `@`.** A colon is
+ordinary punctuation in a way `@` is not: it is in `12:30`, in `note: this`, and in every
+URL. The word-boundary test throws all three out on its own — none of them has a colon
+after a space — but a line that genuinely begins with one would otherwise leave a popup
+hanging over the rest of the sentence.
+
+**One picker state, not two.** While a list is open it owns the arrow keys, Enter, Tab and
+Escape. Two of them able to be open at once would be two handlers claiming the same keys,
+so `mention` and `emoji` are one piece of state with a discriminator on it. The grid is
+separate again: it is a panel somebody opened with a button, it takes the focus itself,
+and it owns nothing in the textarea.
+
+**The data is emojibase, split in two and committed.** `scripts/build-emoji-data.mjs`
+turns it into a 39 KB shortcode table that rides in the bundle — it is consulted on every
+keystroke after a colon and on every send — and a 189 KB catalogue of labels, tags and
+categories behind a dynamic import, which arrives the first time somebody opens the grid
+and never again. Same bargain as the YouTube still: nothing is paid until it is asked for.
+The output is committed, so an ordinary checkout builds without emojibase-data installed;
+regenerate with `npm run emoji:build --workspace @isthislegit/desktop` after bumping it.
+The shortcodes are GitHub's, which are the ones people arrive already knowing.
+
+**No sprite sheet, no CDN, no webfont.** Emoji are drawn by Segoe UI Emoji, which Windows
+has. An image set would mean either a CDN — and `index.html` is `default-src 'self'` with
+no `font-src`, so that is a CSP edit for decoration — or several megabytes in the
+installer. Custom emoji stay where the list at the bottom of this file puts them.
+
+**Country flags are kept out of the grid.** Windows ships no glyphs for them; Chromium
+falls back to drawing the indicator letters, so 🇬🇧 comes out as "GB". That is 262 of the
+270 entries in the Flags category, and a category where every tile is a pair of capital
+letters reads as a broken picker. They stay in the shortcode table — browsing is where the
+letters would be a surprise, and typing `:gb:` is deliberate — and the eight real flags in
+that group (chequered, pirate, rainbow and the rest) are ordinary glyphs and stay.
+
+**A message that is nothing but emoji is drawn large**, up to twenty-seven of them. Past
+that it is somebody trying to take over the channel, and it renders at the ordinary size.
+
+### Reactions
+
+**A row per person per emoji, and no count column anywhere.** The count is `COUNT(*)` over
+those rows, so a double-click, two open windows or a retry cannot leave a number that
+disagrees with the people behind it — which is what a counter maintained alongside the
+rows eventually does. The unique constraint on `(messageId, userId, emoji)` is the whole
+concurrency story, the same as `MessageMention`'s: the second write loses to the
+constraint rather than to a check-then-insert that two requests can both pass. Both routes
+are idempotent, so clicking twice is clicking once.
+
+**The emoji column is validated and canonicalised, never trusted.** It arrives as a URL
+path segment, which puts it on exactly the same footing as an id in message text.
+`canonicalEmoji` in the shared package does both halves. `\p{RGI_Emoji}` answers "is this
+an emoji" with no table at all — it takes ZWJ families, skin tones and flags, and refuses
+`a`, `👍👍` and `:smile:`.
+
+The half that bites is U+FE0F, the variation selector. RGI is strict about it in *both*
+directions and by emoji: `👍` matches and `👍️` does not; `❤️` matches and `❤` does not.
+Emoji datasets hand out the fully-qualified form, which is the wrong one for about two
+thirds of them — so a bare RGI test refuses characters the picker itself produced. And
+without a rule that settles on one spelling, `👍` and `👍️` are two rows, and two piles on
+one message that look identical and cannot merge. So: drop the selector where it is not
+wanted, keep it where it is, add it where it is missing. Verified across the whole
+emojibase set including every skin-tone variant — 3,953 sequences, none rejected, no two
+collapsing onto one another, idempotent.
+
+**`\p{RGI_Emoji}` follows the runtime's Unicode tables, not the dataset's.** A server on
+an older Node than the client's emoji data refuses the newest handful of emoji. It is a
+400 with a sentence rather than anything mysterious, but the fix is the server. This box
+is Unicode 17 on Node 24, which is what emojibase-data 17 was built against.
+
+**Reactions travel as ids, like mentions, and for the same reason.** One `Message` object
+is broadcast to everybody in the channel, so a per-viewer `me` flag on it would be wrong
+for all but one of them. The count is `userIds.length`, "mine" is
+`userIds.includes(me.id)`, and the tooltip gets its names for nothing — which a bare count
+cannot do. Bounded by twenty emoji times the size of the guild.
+
+**`reaction:changed` goes to the channel room**, like `pin:changed` and on the same
+reasoning: the only thing that changes is what is drawn for the channel on screen, and
+that is the one room a client joins. A reaction in a channel nobody here is looking at is
+missed and costs nothing, because history carries reactions. It is a new event rather than
+a `message:updated` carrying the whole message — a client too old to know about reactions
+never registered a handler and drops it, and a click on an emoji should not re-broadcast a
+message and every quote of it. It carries the whole pile for that emoji rather than a
+delta: a client that has been asleep cannot apply "+1" to a number it never had.
+
+**`message.react` is its own permission.** It behaves exactly like membership today —
+`channel.read` and `channel.write` both do too, since neither is admin-only and a mute
+denies nothing — which is the point. Picking one of those would not have been choosing
+behaviour, it would have been choosing which future rule reactions silently inherit. The
+day there is a channel people may read and not post in, "can they still react" is a real
+question with a real answer, and a name is what lets it be answered in one line. Exactly
+the argument `message.pin` won against `message.moderate`.
+
+**Twenty distinct emoji per message**, Discord's number. The cap counts emoji, not people:
+twenty of us agreeing is one pile, and it is a wall of twenty different piles that turns
+the row under a message into a second message. It is only checked when the emoji is new to
+the message, so joining a pile that already exists is never refused for being the
+twenty-first.
+
+**Reactions do not notify.** No toast, no sound, no sidebar badge, no `MessageMention`
+row. Discord does not either, and this is written down so nobody adds it later thinking it
+was an oversight.
+
+**They are not drawn on the pin board or in search results.** Both are reading lists — you
+open one to find a message and then jump to it — so a count sitting in one is a number
+nobody can click and nothing refreshes. `ReactionBar` is rendered by the message list
+rather than by `MessageContent`, which is what makes "not there" the default instead of
+something to remember to suppress twice.
+
+**One skin tone.** No preference, no long-press, no stored setting. The variants are
+dropped when the picker catalogue is built; `canonicalEmoji` still accepts one, because
+not offering it is a decision about the picker rather than about what the column may hold.
+
+The migration adds one table, one unique constraint and two indexes. After pulling this,
+run:
+
+```bash
+npm run db:migrate
+```
+
+---
+
 ## Search
 
 A magnifying glass next to the pin in the channel header. Type two characters and results
@@ -1236,6 +1380,8 @@ every signed-in member, which is exactly what rule 2 forbids for anything else.
 | GET | `/api/channels/:id/messages/pinned` | The pin board, newest post first. Capped, never paged |
 | POST | `/api/channels/:id/messages/:msgId/pin` | Pin — admins only |
 | DELETE | `/api/channels/:id/messages/:msgId/pin` | Unpin — admins only |
+| PUT | `/api/channels/:id/messages/:msgId/reactions/:emoji` | React. Idempotent; returns every pile on the message |
+| DELETE | `/api/channels/:id/messages/:msgId/reactions/:emoji` | Take mine back. Idempotent the same way |
 | POST | `/api/guilds/:id/invites` | Admins only |
 | POST | `/api/guilds/:id/members/:userId/mute` | `{ durationMinutes }`, null for indefinite |
 | POST | `/api/guilds/:id/members/:userId/kick` | Removed; can return with a new invite |
@@ -1299,7 +1445,9 @@ been wrong.
 |---|---|
 | `link-utils.ts` | That a URL does not swallow the full stop after it, and that only `http(s)` ever becomes an href — `javascript:` and `data:` must never match. YouTube and TikTok ids are checked against lookalike hosts, because both get interpolated into an embed URL. |
 | `audio-levels.ts` | Silence floors at −100 rather than −Infinity; the gate stays shut while it measures the room, holds through the gaps between words, and takes less to stay open than to open. |
-| `chat-format.ts` | Byte sizes worded the way the server words them, "Yesterday" decided by the calendar and not by elapsed hours, and `lastSeenLabel` refusing to go negative when a clock is a few seconds ahead. |
+| `chat-format.ts` | Byte sizes worded the way the server words them, "Yesterday" decided by the calendar and not by elapsed hours, `lastSeenLabel` refusing to go negative when a clock is a few seconds ahead, and `guessReactions` removing a pile when the last person leaves it rather than drawing "👍 0". |
+| `emoji-utils.ts` | That a colon in `12:30`, in `note: this` and in every URL does not open the picker, that `:joy::joy:` is two emoji and not one and a leftover, that an unknown `:name:` is left exactly as it was typed rather than silently deleted, and that ❤️ keeps its variation selector — without it the server refuses the reaction outright. |
+| `canonicalEmoji` (shared) | The half of reaction validation that is not guessable: `👍` and `👍️` settling on one spelling, `❤` and `❤️` settling on the other one, and both being idempotent — so a stored value re-canonicalised is unchanged. Plus the refusals: two emoji, an emoji and a letter, a shortcode, and half a flag. |
 | `image-size.ts` | All four headers, a Huffman table not being mistaken for a JPEG frame header, and — the reason this code is not a dependency — that a malformed stream terminates instead of looping. Every truncation of every header is asserted not to throw. |
 | `permission.guard.ts` | The admin-only set, and that **a mute denies nothing**. It used to deny `channel.write` and `voice.join`, which was three punishments delivered under one name. |
 | `audio-config.ts` | RED on everywhere but studio, DTX only on `voice`, and a typo in `VOICE_QUALITY` falling back rather than refusing to start. |
@@ -1555,16 +1703,25 @@ Ordered by what hurts soonest.
    both the HTTP API and the socket, and the default list carries `null` because a packaged
    Electron renderer loads from `file://`. That is reasoned rather than observed. A build
    that fails to connect after this change is this line.
-6. **`Chat.tsx` is 3,557 lines and went up, not down.** It was 3,270 after the first split
-   — the formatting helpers, the shared types, both message panels and all the modals live in
-   `chat-format.ts`, `chat-types.ts`, `ChatPanels.tsx` and `ChatModals.tsx`, and replies and
-   forwards put their own presentation in `MessageRefs.tsx` and their dialog in
-   `ChatModals.tsx` rather than here. The component body still grew by about 290 lines, which
-   is the point: **everything that goes in it stays in it**, because the message list, the
-   composer, editing, moderation, attachments, unread markers, embeds and the volume popup
-   are one function sharing one closure. Reactions go on top of that unless the message list
-   comes out first, and that extraction needs a props interface nobody has designed yet.
-   Replies were the last feature that could be added without one.
+6. **`Chat.tsx` is 3,923 lines and has never once gone down.** It was 3,270 after the first
+   split and 3,557 after replies — the formatting helpers, the shared types, both message
+   panels and all the modals live in `chat-format.ts`, `chat-types.ts`, `ChatPanels.tsx` and
+   `ChatModals.tsx`, and replies and forwards put their presentation in `MessageRefs.tsx`.
+   **Everything that goes in it stays in it**, because the message list, the composer,
+   editing, moderation, attachments, unread markers, embeds and the volume popup are one
+   function sharing one closure.
+
+   This entry used to say reactions could not be added until the message list came out
+   first. That turned out to be wrong, and usefully so: the *presentation* extracts cleanly
+   — `ReactionBar.tsx` and `EmojiBrowser.tsx` take a few props and know nothing about the
+   closure — and what had to stay here was the optimistic toggle, the socket patch and two
+   buttons. About 190 lines rather than the several hundred that was feared, and the pure
+   part of it (`guessReactions`) went to `chat-format.ts` where it could be tested.
+
+   So the rule is narrower than it looked: **what cannot leave is the state, not the
+   markup.** The extraction is still worth doing and still needs a props interface nobody
+   has designed. It is not a prerequisite for the next feature either, and assuming it was
+   is how this entry nearly blocked one.
 7. **`rtc.ips.excludes` is set but unproven.** VirtualBox, Hyper-V and link-local ranges are
    now excluded in `livekit.yaml`. Whether LiveKit stops advertising them has not been
    watched on the wire. Also note `livekit.yaml` is still in **LAN mode** (`node_ip`
@@ -1576,8 +1733,9 @@ Ordered by what hurts soonest.
 
 **Product**
 
-9. Emoji reactions and a theme toggle. Non-image attachments, mentions and notifications,
-   search, and replies and forwards are done — see [Attachments](#attachments) and [Search](#search). Images in a
+9. A theme toggle. Emoji and reactions, non-image attachments, mentions and notifications,
+   search, and replies and forwards are done — see [Emoji and reactions](#emoji-and-reactions),
+   [Attachments](#attachments) and [Search](#search). Images in a
    message open full size on click and copy on right-click — the copy goes through main,
    because an uploaded image is a `blob:` URL the renderer can rasterise but a linked one is
    another origin, where a canvas is tainted and `fetch` is a CORS failure.
@@ -1591,10 +1749,13 @@ Ordered by what hurts soonest.
 
 **Done since this list was written**
 
+Emoji shortcuts in the composer, a browse-and-search picker, and reactions on messages —
+see [Emoji and reactions](#emoji-and-reactions).
+
 Replies with a ping and a jump-to-original, and forwarding a message to another channel —
 see [Replies and forwards](#replies-and-forwards).
 
-Backups and restore, a Vitest suite over ten pure modules ([Tests](#tests)), the login rate
+Backups and restore, a Vitest suite over twelve pure modules ([Tests](#tests)), the login rate
 limiter, a CORS allowlist on both the API and the socket, `crypto.randomInt` for invite
 codes, `rtc.ips.excludes`, a separate dev database, file [logs](#logs), and the first pass
 at splitting `Chat.tsx`.

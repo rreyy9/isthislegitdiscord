@@ -168,3 +168,63 @@ export function quoteLine(
   // a strip saying so beats one that is empty.
   return 'Message';
 }
+
+/**
+ * One pile of reactions: the emoji, and everyone who added it.
+ *
+ * Declared here rather than imported from `../api` so this module stays what
+ * it is -- pure functions over plain data, with nothing that reaches the
+ * network in its import graph. It is structurally the same type, which is all
+ * TypeScript asks.
+ */
+export interface ReactionPile {
+  emoji: string;
+  userIds: string[];
+}
+
+/**
+ * What the reaction row should look like the instant somebody clicks, before
+ * the server has said anything.
+ *
+ * Pure, and here rather than inline in the click handler, because the awkward
+ * cases are the ones nobody thinks to check by hand: taking back the only
+ * reaction in a pile has to remove the pile rather than leave an empty one,
+ * and adding an emoji nobody has used yet has to put it at the end rather than
+ * anywhere that would make the existing piles jump.
+ *
+ * The guess is replaced wholesale by the server's answer a moment later, which
+ * is why this can afford to be optimistic: the worst it can be is briefly
+ * wrong about somebody else's click, and that corrects itself.
+ */
+export function guessReactions(
+  reactions: ReactionPile[],
+  emoji: string,
+  mine: boolean,
+  meId: string,
+): ReactionPile[] {
+  if (mine) {
+    return reactions
+      .map((r) =>
+        r.emoji === emoji
+          ? { ...r, userIds: r.userIds.filter((id) => id !== meId) }
+          : r,
+      )
+      // The last person taking theirs back takes the pile with it.
+      .filter((r) => r.userIds.length > 0);
+  }
+
+  if (reactions.some((r) => r.emoji === emoji)) {
+    return reactions.map((r) =>
+      // Guarded, because the click that got here believed it was not mine and
+      // two windows can disagree. Adding a second copy of one id would show a
+      // count nobody can take back down.
+      r.emoji === emoji && !r.userIds.includes(meId)
+        ? { ...r, userIds: [...r.userIds, meId] }
+        : r,
+    );
+  }
+
+  // New to the message: at the end, which is where the server will put it too
+  // -- piles are ordered by when they were first added.
+  return [...reactions, { emoji, userIds: [meId] }];
+}

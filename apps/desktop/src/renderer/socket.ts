@@ -56,6 +56,23 @@ export interface SocketEvents {
     pinnedAt: string | null;
   }) => void;
   /**
+   * Somebody added or took back a reaction in the open channel.
+   *
+   * Carries the whole pile for that one emoji rather than a delta: a client
+   * that has been asleep cannot apply "+1" to a number it never had. Empty
+   * `userIds` means the last person took theirs back and the pile goes.
+   *
+   * Per channel like the pin, so a reaction in a channel this client is not
+   * looking at is missed -- which costs nothing, because history carries
+   * reactions and opening that channel asks for them.
+   */
+  onReactionChanged: (p: {
+    channelId: string;
+    messageId: string;
+    emoji: string;
+    userIds: string[];
+  }) => void;
+  /**
    * Somebody changed their display name or picture. Sent to everyone, because
    * the same user is drawn in several lists at once and they all have to move
    * together.
@@ -139,6 +156,7 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('mention:new', events.onMention);
   socket.on('moderation:removed', events.onRemoved);
   socket.on('pin:changed', events.onPinChanged);
+  socket.on('reaction:changed', events.onReactionChanged);
   socket.on('user:updated', events.onUserUpdated);
   socket.on('guild:changed', events.onGuildChanged);
   socket.on('presence:changed', events.onPresence);

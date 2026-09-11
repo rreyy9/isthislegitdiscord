@@ -8,6 +8,19 @@ export type Action =
   | 'voice.join'
   | 'message.moderate'
   | 'message.pin'
+  /**
+   * Adding and removing your own reaction.
+   *
+   * Its own name rather than riding on `channel.write`, and the two are
+   * indistinguishable today -- both are plain membership. That is the point:
+   * the moment there is a channel people may read and not post in, "can they
+   * still react" is a real question with a real answer (Discord's is yes), and
+   * a name is what lets it be answered in one line instead of by unpicking
+   * which of `channel.write`'s callers meant which thing.
+   *
+   * Exactly the argument `message.pin` won against `message.moderate`.
+   */
+  | 'message.react'
   | 'member.moderate'
   | 'member.kick'
   | 'member.role'

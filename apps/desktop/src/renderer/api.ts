@@ -257,6 +257,25 @@ export interface MessageDto {
   replyTo?: MessageRefDto | null;
   /** The message this one carries from elsewhere in the guild, or null. */
   forwardedFrom?: MessageRefDto | null;
+  /**
+   * What people reacted with, and who. Empty for most messages, and absent
+   * from a server older than the feature -- read it with `?? []`, the same as
+   * `mentions` and `pinnedAt`.
+   */
+  reactions?: ReactionDto[];
+}
+
+/**
+ * One pile of reactions: the emoji, and everyone who added it.
+ *
+ * The ids rather than a count and a "did I" flag, because one message object
+ * is broadcast to everybody and a per-viewer field on it would be wrong for
+ * all but one of them. The count is `userIds.length`, "mine" is
+ * `userIds.includes(me.id)`, and the tooltip gets its names for free.
+ */
+export interface ReactionDto {
+  emoji: string;
+  userIds: string[];
 }
 export interface MessagePageDto {
   messages: MessageDto[];
@@ -561,6 +580,32 @@ export const api = {
     request<{ ok: boolean }>(`/api/channels/${channelId}/messages/${id}/pin`, {
       method: 'DELETE',
     }),
+
+  /* ---------------------------------------------------------- reactions */
+
+  /**
+   * Add or take back my reaction. Both hand back every pile on the message,
+   * not just the one that changed, so the caller can drop the whole row in
+   * rather than patch it -- and so a reaction somebody else added in the same
+   * moment arrives with the answer instead of a render later.
+   *
+   * The emoji is encoded because it is a path segment and some of them are
+   * several codepoints; the server decodes and canonicalises before it stores
+   * anything, so the spelling sent here is not what decides the row.
+   *
+   * `PUT` for add: it says "let this exist", which is exactly right for
+   * something a double-click must not do twice.
+   */
+  react: (channelId: string, id: string, emoji: string) =>
+    request<ReactionDto[]>(
+      `/api/channels/${channelId}/messages/${id}/reactions/${encodeURIComponent(emoji)}`,
+      { method: 'PUT' },
+    ),
+  unreact: (channelId: string, id: string, emoji: string) =>
+    request<ReactionDto[]>(
+      `/api/channels/${channelId}/messages/${id}/reactions/${encodeURIComponent(emoji)}`,
+      { method: 'DELETE' },
+    ),
 
   /* --------------------------------------------------------- moderation */
 

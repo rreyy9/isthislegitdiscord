@@ -14,6 +14,7 @@ import {
   youtubeStart,
 } from '../link-utils';
 import { MENTION_RE } from '../mention-utils';
+import { emojiOnly } from '../emoji-utils';
 import { useImageActions } from './ImageViewer';
 
 /**
@@ -549,10 +550,17 @@ export function MessageContent({
   }
   if (last < content.length) parts.push(content.slice(last));
 
+  // A message that is nothing but emoji is drawn large. It is not the same
+  // kind of message as a paragraph, and at body size it is a line of specks.
+  // Read off `content` rather than off `parts`, because a tag or a link in
+  // there is exactly what makes it ordinary text again -- and `emojiOnly`
+  // says so by finding something that is not an emoji.
+  const big = emojiOnly(content);
+
   return (
     <>
       {(content || edited) && (
-        <div className="msg-content">
+        <div className={'msg-content' + (big ? ` big big-${Math.min(big, 3)}` : '')}>
           {parts}
           {edited && <span className="edited"> (edited)</span>}
         </div>

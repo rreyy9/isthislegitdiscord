@@ -38,6 +38,7 @@ model User {
   bans        GuildBan[]         @relation("BannedUser")
   bansIssued  GuildBan[]         @relation("BanIssuer")
   mentions    MessageMention[]
+  reactions   MessageReaction[]
 
   @@map("user")
 }
@@ -229,6 +230,7 @@ model Message {
 
   attachments Attachment[]
   mentions    MessageMention[]
+  reactions   MessageReaction[]
 
   // Ids are UUIDv7, so id order is chronological order: this one index serves
   // the cursor pagination in both directions.
@@ -274,6 +276,54 @@ model MessageMention {
   // Ids are UUIDv7, so "unread" is `messageId > lastReadMessageId` and this
   // index answers it without touching Message at all.
   @@index([userId, channelId, messageId])
+}
+
+/**
+ * One person reacting to one message with one emoji.
+ *
+ * A row per person per emoji, and no count column anywhere. The count is
+ * `COUNT(*)` over these, so a double-click, two windows, or a retry cannot
+ * leave a number that disagrees with the people behind it -- which is exactly
+ * what a counter maintained alongside the rows eventually does.
+ *
+ * The unique constraint is the whole concurrency story, the same way it is for
+ * MessageMention: adding a reaction twice is adding it once, and the second
+ * write loses to the constraint rather than to a check-then-insert that two
+ * requests can both pass.
+ *
+ * `emoji` holds one canonical emoji character, never a shortcode and never an
+ * id into a table of emoji -- there is no such table, and custom emoji are
+ * deliberately not done. What "canonical" means, and why it needs saying at
+ * all, is in `canonicalEmoji` in the shared package: RGI is strict about the
+ * variation selector in both directions, so `👍` and `👍️` would otherwise be
+ * two piles on one message that look identical. Nothing writes this column
+ * without going through that function.
+ *
+ * No `channelId` copied down, unlike MessageMention. That one has it because
+ * its query is "how many unread in this channel" and joining Message to find
+ * out would undo the index. Reactions are only ever asked for by message, and
+ * they arrive with the message they belong to.
+ */
+model MessageReaction {
+  id        String   @id
+  messageId String
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emoji     String
+  // What orders the names in "Alice, Bob and Carol reacted with 👍". A
+  // timestamp rather than leaning on the id, because these are not the only
+  // rows in the table and insertion order across users is the thing being
+  // recorded.
+  createdAt DateTime @default(now())
+
+  @@unique([messageId, userId, emoji])
+  // "The reactions on these messages" -- asked for every message of every
+  // history page, and otherwise a scan of every reaction ever made.
+  @@index([messageId])
+  // Nothing reads this; ON DELETE CASCADE does. Deleting an account has to
+  // find its reactions, and without an index that is a full scan per row.
+  @@index([userId])
 }
 
 model Attachment {
