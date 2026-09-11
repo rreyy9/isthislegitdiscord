@@ -48,10 +48,16 @@ export function ConfirmModal({
 /**
  * Create a channel, or rename one. Admin only, and refused again on the server.
  *
- * One dialog for both because they are one form: a name. The kind is not a
- * control — a new channel takes it from the section the `+` was clicked in,
- * and an existing one cannot change it, since a text channel full of messages
- * is not a voice room and there is nothing sensible to do with the history.
+ * One dialog for both because they are very nearly one form: a name. The kind
+ * is not a control — a new channel takes it from the section the `+` was
+ * clicked in, and an existing one cannot change it, since a text channel full
+ * of messages is not a voice room and there is nothing sensible to do with the
+ * history.
+ *
+ * The one thing beside the name is the AFK switch, and it only appears while
+ * making a voice channel. It is not offered on a rename because it is not a
+ * rename: changing it moves people who are mid-sentence, and a dialog whose
+ * title says "Rename" is not where that should happen.
  */
 export function ChannelModal({
   edit,
@@ -67,6 +73,8 @@ export function ChannelModal({
   const creating = edit.mode === 'create';
   const kind = creating ? edit.kind : edit.channel.kind;
   const [name, setName] = useState(creating ? '' : edit.channel.name);
+  /** An AFK room: joinable and audible, with nobody's microphone granted. */
+  const [listenOnly, setListenOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,7 +93,14 @@ export function ChannelModal({
     setError(null);
     try {
       const channel = creating
-        ? await api.createChannel(edit.guildId, { name, kind })
+        ? await api.createChannel(edit.guildId, {
+            name,
+            kind,
+            // Sent whatever the kind, because the server decides: a text
+            // channel is stored with it false, and the checkbox that would
+            // have set it is not drawn there anyway.
+            listenOnly,
+          })
         : await api.renameChannel(edit.channel.id, name);
       onDone(channel);
     } catch (e: any) {
@@ -119,10 +134,31 @@ export function ChannelModal({
               }}
             />
           </div>
+          {creating && kind === 'VOICE' && (
+            <label className="row-label">
+              <input
+                type="checkbox"
+                checked={listenOnly}
+                onChange={(e) => setListenOnly(e.target.checked)}
+              />
+              AFK channel — nobody can talk
+            </label>
+          )}
+          {/* The consequence, not a restatement of the label: the parts
+              worth saying out loud are that it applies to you too, and that
+              the only way back is a different channel. */}
           <p className="hint">
-            {kind === 'VOICE'
-              ? 'Everyone on the server can see it and join the call.'
-              : 'Everyone on the server can see it and read it.'}
+            {kind !== 'VOICE' ? (
+              'Everyone on the server can see it and read it.'
+            ) : listenOnly ? (
+              <>
+                Somewhere to be parked. Everyone can join and hear, and nobody
+                gets a microphone — you included. It cannot be turned off
+                later, so a channel made this way stays this way.
+              </>
+            ) : (
+              'Everyone on the server can see it and join the call.'
+            )}
           </p>
         </div>
         <div className="modal-foot">

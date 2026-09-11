@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  channelIcon,
   dayLabel,
   describeBytes,
   guessReactions,
@@ -84,6 +85,29 @@ describe('isForever', () => {
   it('recognises the year-9999 sentinel an indefinite mute is stored as', () => {
     expect(isForever('9999-12-31T23:59:59.000Z')).toBe(true);
     expect(isForever('2026-09-08T00:00:00.000Z')).toBe(false);
+  });
+});
+
+describe('channelIcon', () => {
+  it('marks an AFK channel differently from one people talk in', () => {
+    // The sidebar is where somebody picks a channel, and these two rows are
+    // otherwise identical -- so this character is the entire difference
+    // between joining a call and parking.
+    expect(channelIcon({ kind: 'VOICE', listenOnly: false })).toBe('🔊');
+    expect(channelIcon({ kind: 'VOICE', listenOnly: true })).toBe('🔇');
+  });
+
+  it('leaves a text channel alone whatever the flag says', () => {
+    // The server stores false on every text channel, but the icon must not
+    // depend on that holding -- a hash is what a text channel is.
+    expect(channelIcon({ kind: 'TEXT', listenOnly: false })).toBe('#');
+    expect(channelIcon({ kind: 'TEXT', listenOnly: true })).toBe('#');
+  });
+
+  it('treats a missing flag as a channel people can talk in', () => {
+    // What a server too old to send the field looks like. Silencing a room
+    // because a field was absent is the one wrong answer here.
+    expect(channelIcon({ kind: 'VOICE' })).toBe('🔊');
   });
 });
 

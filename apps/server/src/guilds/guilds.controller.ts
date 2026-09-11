@@ -33,6 +33,7 @@ export class GuildsController {
         name: c.name,
         kind: c.kind,
         position: c.position,
+        listenOnly: c.listenOnly,
       })),
     }));
   }

@@ -41,6 +41,11 @@ export class ChannelsService {
         name: input.name,
         kind: input.kind,
         position: input.position ?? (last ? last.position + 1 : 0),
+        // The kind decides, here, once. A listen-only text channel would be a
+        // read-only one, which is a different feature nobody has asked for --
+        // so rather than refuse the combination and make every caller think
+        // about it, the flag is simply a thing only voice rooms can be.
+        listenOnly: input.kind === 'VOICE' ? input.listenOnly : false,
       },
     });
 
@@ -103,6 +108,7 @@ export class ChannelsService {
     name: string;
     kind: string;
     position: number;
+    listenOnly: boolean;
   }): ChannelDto {
     return {
       id: c.id,
@@ -110,6 +116,7 @@ export class ChannelsService {
       name: c.name,
       kind: c.kind as ChannelDto['kind'],
       position: c.position,
+      listenOnly: c.listenOnly,
     };
   }
 }

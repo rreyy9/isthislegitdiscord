@@ -49,12 +49,19 @@ export class VoiceController {
 
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
-      select: { kind: true },
+      select: { kind: true, listenOnly: true },
     });
     if (!channel) throw new NotFoundException('No such channel.');
     if (channel.kind !== 'VOICE') {
       throw new ForbiddenException('That is not a voice channel.');
     }
+
+    // The channel's own silence and one person's mute arrive at the same
+    // place: no microphone in the grant. They are kept apart up to here
+    // because they are different facts -- one expires, applies to a person and
+    // follows them into every room; the other belongs to this room and applies
+    // to whoever walks in, admins included -- and only the answer is shared.
+    const silenced = mutedUntil !== null || channel.listenOnly;
 
     const room = roomForChannel(channelId);
     const at = new AccessToken(
@@ -83,7 +90,7 @@ export class VoiceController {
       // VoiceService compares against this list and an absent one means
       // "everything" — two different ways of saying the same thing is one more
       // than that comparison can tell apart.
-      canPublishSources: publishableSources(mutedUntil !== null),
+      canPublishSources: publishableSources(silenced),
     });
 
     return {
@@ -93,6 +100,11 @@ export class VoiceController {
       // Sent every join so the deployment's quality setting reaches clients
       // without anyone reinstalling anything.
       audio: voiceAudioConfig(),
+      // The room's silence, not this person's: a mute of their own already has
+      // somewhere to be said, in the member list, and the client says it
+      // differently. This is the line that stops the client opening a capture
+      // device for a track the grant above will not accept.
+      listenOnly: channel.listenOnly,
     };
   }
 }

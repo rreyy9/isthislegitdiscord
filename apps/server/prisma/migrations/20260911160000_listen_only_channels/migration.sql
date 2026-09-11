@@ -1,0 +1,17 @@
+-- A voice channel nobody may speak in: somewhere to be parked, not somewhere
+-- to talk. An AFK channel.
+--
+-- A column on Channel rather than a new kind, because it is not one: it is a
+-- voice channel in every respect -- people join it, leave it, appear in the
+-- sidebar sitting in it, and can share a screen in it -- and everything that
+-- switches on `kind` would have had to learn a third value that answers
+-- "VOICE" to all of those questions.
+--
+-- The rule is enforced on the LiveKit grant, not here. A false in this column
+-- is the absence of a punishment; the microphone is only ever handed out by
+-- the token mint and the sweep that keeps participants in line with it, and
+-- both read this row.
+--
+-- Defaulted rather than nullable: every channel that already exists is one
+-- people may talk in, which is a fact about them and not an unknown.
+ALTER TABLE "Channel" ADD COLUMN "listenOnly" BOOLEAN NOT NULL DEFAULT false;

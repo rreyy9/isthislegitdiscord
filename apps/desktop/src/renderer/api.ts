@@ -151,6 +151,13 @@ export interface ChannelDto {
   name: string;
   kind: 'TEXT' | 'VOICE';
   position: number;
+  /**
+   * A voice channel nobody may speak in -- an AFK room. Always false on a text
+   * channel, and false on every channel a server too old to know about them
+   * describes, which is the right way round: the flag only ever takes the
+   * microphone away, so a missing one leaves things as they were.
+   */
+  listenOnly: boolean;
 }
 export interface GuildDto {
   id: string;
@@ -316,6 +323,8 @@ export interface VoiceTokenDto {
   livekitUrl: string;
   room: string;
   audio: VoiceAudioDto;
+  /** The room is listen-only, so this token carries no microphone. */
+  listenOnly: boolean;
 }
 export interface VoiceChannelStateDto {
   channelId: string;
@@ -405,7 +414,10 @@ export const api = {
    * so a channel made from the app is indistinguishable from one made in the
    * console, including the `guild:changed` every other client hears.
    */
-  createChannel: (guildId: string, body: { name: string; kind: 'TEXT' | 'VOICE' }) =>
+  createChannel: (
+    guildId: string,
+    body: { name: string; kind: 'TEXT' | 'VOICE'; listenOnly?: boolean },
+  ) =>
     request<ChannelDto>(`/api/guilds/${guildId}/channels`, {
       method: 'POST',
       body,

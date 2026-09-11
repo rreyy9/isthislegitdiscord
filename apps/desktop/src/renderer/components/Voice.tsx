@@ -15,6 +15,7 @@ import {
 } from '../api';
 import type { Updates } from '../updates';
 import { bridge } from '../bridge';
+import { channelIcon } from './chat-format';
 import { ProfileSettings } from './ProfileSettings';
 import {
   listAudioDevices,
@@ -980,11 +981,13 @@ export function VoicePanel({
    */
   pttLabel: string | null;
   /**
-   * Why an admin has taken the microphone away, ready to read, or null.
+   * Why there is no microphone, ready to read, or null.
    *
-   * The phrasing rather than a boolean, because the only thing this panel does
-   * with it is show it — and "until 21:40" is the part somebody actually wants
-   * from a mute they did not ask for.
+   * Two things put a line here — an admin's mute, and a channel nobody may
+   * speak in — and the panel does not care which: what it needs is a sentence
+   * to show beside a button it has to disable. The phrasing rather than a
+   * boolean, because "until 21:40" is the part somebody actually wants from a
+   * mute they did not ask for, and the caller is where both are worded.
    */
   serverMuted: string | null;
 }) {
@@ -1010,7 +1013,14 @@ export function VoicePanel({
           Leave
         </button>
       </div>
-      <div className="vp-channel">🔊 {channelName}</div>
+      {/* The same icon the sidebar draws, from the same function: this strip
+          is what somebody looks at while they are in the call, and it saying
+          "speaker" over a room nobody can speak in would be the one place that
+          disagreed. */}
+      <div className="vp-channel">
+        {channelIcon({ kind: 'VOICE', listenOnly: voice.listenOnly })}{' '}
+        {channelName}
+      </div>
 
       {voice.error && (
         <div
@@ -1024,7 +1034,7 @@ export function VoicePanel({
       )}
 
       {/* Above the push-to-talk line, and instead of nothing at all: without
-          it a muted person sees a microphone button that does nothing and no
+          it somebody with no microphone sees a button that does nothing and no
           reason anywhere for why nobody can hear them. */}
       {serverMuted && <div className="vp-gagged">🔇 {serverMuted}</div>}
 
@@ -1061,9 +1071,10 @@ export function VoicePanel({
           className={
             voice.muted || voice.pushMuted || serverMuted ? 'on' : ''
           }
-          // An admin's mute is enforced on the server, where this button
-          // cannot reach. Leaving it live would let somebody click it, watch
-          // it change, and still not be heard.
+          // A mute, whether the admin's or the whole channel's, is enforced
+          // on the server, where this button cannot reach. Leaving it live
+          // would let somebody click it, watch it change, and still not be
+          // heard.
           disabled={connecting || Boolean(serverMuted)}
           onClick={() => void voice.setMuted(!voice.muted)}
           title={

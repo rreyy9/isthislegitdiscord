@@ -19,7 +19,7 @@ goes direct to the box; only signalling and the HTTP API go through the proxy.
 - [Running it](#running-it) · [The two installers](#the-two-installers)
 - [Updating the client](#updating-the-client) · [Older clients](#older-clients)
 - [Configuration](#configuration) · [Going public](#going-public) · [Database](#database) · [Backups](#backups) · [Retention](#retention)
-- [Voice quality](#voice-quality) · [Mentions](#mentions) · [Pinned messages](#pinned-messages)
+- [Voice quality](#voice-quality) · [AFK channels](#afk-channels) · [Mentions](#mentions) · [Pinned messages](#pinned-messages)
 - [Replies and forwards](#replies-and-forwards) · [Emoji and reactions](#emoji-and-reactions)
 - [Search](#search) · [Attachments](#attachments) · [API](#api) · [Tests](#tests) · [Logs](#logs)
 - [Decisions worth not re-litigating](#decisions-worth-not-re-litigating)
@@ -941,6 +941,48 @@ candidate works.
 
 ---
 
+## AFK channels
+
+A voice channel can be made **listen-only**: an AFK room. Tick *AFK channel — nobody can
+talk* while creating one, and it is a normal voice channel in every other respect —
+people join it, leave it, show up in the sidebar sitting in it, and can still share a
+screen — except that no microphone is ever granted in it. The sidebar draws it with a
+crossed-out speaker, so nobody has to join to find out.
+
+It applies to everybody in the room, admins included. There is no exemption to write
+down, which is the point: "somewhere to be parked" is not a punishment, so there is
+nobody it should not apply to.
+
+**It is a column on `Channel`, not a third kind.** Everything that switches on `kind`
+would have had to learn a value that answers "VOICE" to every question it asks.
+
+**It is enforced on the LiveKit grant, exactly like a mute.** The join token is minted
+without `MICROPHONE` in `canPublishSources`, and the thirty-second sweep in
+`VoiceService` keeps every participant's permissions matching that — so a LiveKit that
+restarted, a webhook that went missing, or a permission changed by hand is repaired on
+the next pass rather than leaving a working microphone in a silent room. The client is
+told at join time, in the token response, and does not open the capture device at all:
+that is a courtesy, not the enforcement, and it is what puts a reason on screen instead
+of a live-looking mic button that changes nothing.
+
+**A mute and a listen-only channel are different facts that meet at the same place.** One
+expires, belongs to a person and follows them into every room; the other belongs to the
+room and applies to whoever walks in. They are only combined at the point of deciding
+what a token may publish. When both are true the voice panel says the mute, because that
+is the one still true after leaving.
+
+**It cannot be changed after the channel is made.** `UpdateChannelInput` takes a name and
+a position, and nothing else; turning the flag off under a room full of people is a
+different operation from renaming one, and there is no dialog that means it. Make another
+channel.
+
+**An older client does the safe thing.** It has never heard of the field, so it draws a
+speaker and lets somebody join and click unmute — and the server refuses the track
+anyway. The failure is a mic button that does nothing, not audio in a room that should be
+silent.
+
+---
+
 ## Mentions
 
 Type `@` in the composer and a list of members opens. Arrow keys move, Enter or Tab
@@ -1445,10 +1487,11 @@ been wrong.
 |---|---|
 | `link-utils.ts` | That a URL does not swallow the full stop after it, and that only `http(s)` ever becomes an href — `javascript:` and `data:` must never match. YouTube and TikTok ids are checked against lookalike hosts, because both get interpolated into an embed URL. |
 | `audio-levels.ts` | Silence floors at −100 rather than −Infinity; the gate stays shut while it measures the room, holds through the gaps between words, and takes less to stay open than to open. |
-| `chat-format.ts` | Byte sizes worded the way the server words them, "Yesterday" decided by the calendar and not by elapsed hours, `lastSeenLabel` refusing to go negative when a clock is a few seconds ahead, and `guessReactions` removing a pile when the last person leaves it rather than drawing "👍 0". |
+| `chat-format.ts` | Byte sizes worded the way the server words them, "Yesterday" decided by the calendar and not by elapsed hours, `lastSeenLabel` refusing to go negative when a clock is a few seconds ahead, and `guessReactions` removing a pile when the last person leaves it rather than drawing "👍 0". Also `channelIcon`: an AFK channel gets a different character from one people talk in, and a text channel gets a hash whatever the flag says. |
 | `emoji-utils.ts` | That a colon in `12:30`, in `note: this` and in every URL does not open the picker, that `:joy::joy:` is two emoji and not one and a leftover, that an unknown `:name:` is left exactly as it was typed rather than silently deleted, and that ❤️ keeps its variation selector — without it the server refuses the reaction outright. |
 | `canonicalEmoji` (shared) | The half of reaction validation that is not guessable: `👍` and `👍️` settling on one spelling, `❤` and `❤️` settling on the other one, and both being idempotent — so a stored value re-canonicalised is unchanged. Plus the refusals: two emoji, an emoji and a letter, a shortcode, and half a flag. |
 | `image-size.ts` | All four headers, a Huffman table not being mistaken for a JPEG frame header, and — the reason this code is not a dependency — that a malformed stream terminates instead of looping. Every truncation of every header is asserted not to throw. |
+| `channels.service.ts` | That the kind decides the AFK flag: a voice channel keeps it, a text channel is stored with it false however the request asks. A listen-only text channel would be a read-only one, which is a different feature that does not exist. |
 | `permission.guard.ts` | The admin-only set, and that **a mute denies nothing**. It used to deny `channel.write` and `voice.join`, which was three punishments delivered under one name. |
 | `audio-config.ts` | RED on everywhere but studio, DTX only on `voice`, and a typo in `VOICE_QUALITY` falling back rather than refusing to start. |
 | `cors.ts` | That the allowlist does not prefix-match, so `https://good.example.evil.example` is refused. |
@@ -1457,7 +1500,8 @@ been wrong.
 | `file-logger.ts` | That the pruner removes only files it could have written. |
 
 Nothing renders a React tree and nothing touches a database — `PermissionService` is
-exercised against a two-row fake. That is a deliberate ceiling, not an oversight: these run
+exercised against a two-row fake, and `ChannelsService` against one that records what it
+was asked to store. That is a deliberate ceiling, not an oversight: these run
 on a checkout that has never had PostgreSQL installed, which is what makes running them
 free enough to actually do.
 
@@ -1515,6 +1559,11 @@ it removes nothing it cannot prove is its own.
 - **The webhook route is mounted with a raw body parser** ahead of `express.json`, because
   the signature is over the raw bytes. Parsing first silently breaks verification.
 - **Join tokens live ten minutes.** They only have to survive the join.
+- **A silent channel takes the microphone off the grant, never off the join.** An AFK room
+  is somewhere to sit and listen, so `voice.join` is untouched and the token is simply
+  minted without `MICROPHONE` — the same mechanism a mute uses, for the same reason: one
+  place decides what may be published, and the sweep repairs anything that drifts from it.
+  See [AFK channels](#afk-channels).
 - **Keybindings are `uiohook-napi`, not Electron's `globalShortcut`.** `globalShortcut`
   reports presses but never releases, so it cannot express "hold", and it does not see the
   mouse at all. The same hook reports both, so a key and a mouse button bind through one

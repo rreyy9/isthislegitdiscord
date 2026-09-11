@@ -261,16 +261,28 @@ export class VoiceService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Which of these people are muted in the guild this channel belongs to. */
+  /**
+   * Which of these people may not speak here: everyone whose own mute is still
+   * running, or everyone at all if the channel itself is listen-only.
+   *
+   * The channel's flag is read on every pass rather than remembered, which is
+   * what makes it behave like the mute beside it -- an AFK room that was
+   * changed in the database takes effect on the next sweep, in a call already
+   * in progress, without anyone rejoining.
+   */
   private async mutedAmong(
     channelId: string,
     userIds: string[],
   ): Promise<Set<string>> {
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
-      select: { guildId: true },
+      select: { guildId: true, listenOnly: true },
     });
     if (!channel) return new Set();
+
+    // Nobody talks in an AFK channel, so there is nothing to ask the member
+    // table: the answer is everyone in the room, admins included.
+    if (channel.listenOnly) return new Set(userIds);
 
     // The deadline is applied in the query rather than in JavaScript, so an
     // expired mute simply does not come back and needs no clearing.

@@ -58,6 +58,7 @@ import { useImageActions } from './ImageViewer';
 import { NetworkButton } from './NetworkStats';
 import {
   MAX_MESSAGE_CHARS,
+  channelIcon,
   dayLabel,
   describeBytes,
   guessReactions,
@@ -2765,8 +2766,20 @@ export function Chat({
                       <div key={c.id}>
                         <div
                           className={'chan' + (here ? ' in-voice' : '')}
+                          // The AFK room says so before anyone joins it: the
+                          // crossed-out speaker is the whole difference between
+                          // a quiet channel and one that cannot be spoken in,
+                          // and somebody who has to join to find out has
+                          // already walked out of the conversation they were
+                          // in to do it.
                           title={
-                            here ? 'You are in this channel' : 'Join voice'
+                            c.listenOnly
+                              ? here
+                                ? 'You are parked here — nobody can talk in this channel'
+                                : 'Park here — nobody can talk in this channel'
+                              : here
+                                ? 'You are in this channel'
+                                : 'Join voice'
                           }
                           onClick={() => (here ? leaveVoice() : joinVoice(c.id))}
                           onContextMenu={(e) => {
@@ -2779,7 +2792,7 @@ export function Chat({
                             });
                           }}
                         >
-                          <span className="hash">🔊</span>
+                          <span className="hash">{channelIcon(c)}</span>
                           {c.name}
                           {occupants.length > 0 && (
                             <span className="chan-count">{occupants.length}</span>
@@ -2818,13 +2831,21 @@ export function Chat({
                               <span className="vm-name">{nameOfUser(id)}</span>
                               {/* One icon, not two: deafening mutes you as
                                   well, and a row carrying both says nothing
-                                  the deafen icon did not already say. */}
+                                  the deafen icon did not already say.
+
+                                  And no mute icon at all in an AFK channel,
+                                  where every row would carry one: the channel
+                                  said it once, at the top, and repeating it
+                                  per person reads as something each of them
+                                  did. Deafen still shows — that is a choice
+                                  somebody made in a room nobody talks in. */}
                               {peer?.deafened ? (
                                 <span className="vm-icon" title="Deafened">
                                   🔕
                                 </span>
                               ) : (
-                                peer?.muted && (
+                                peer?.muted &&
+                                !c.listenOnly && (
                                   <span className="vm-icon" title="Muted">
                                     🔇
                                   </span>
@@ -2851,7 +2872,16 @@ export function Chat({
           // Every key that would work, not just the first: a reminder that
           // names one of two bound keys is wrong about the other.
           pttLabel={pttLabel}
-          serverMuted={iAmMuted ? muteLabel(myMutedUntil!) : null}
+          // A mute of our own is said first when both are true: it is the one
+          // that outlives this channel, so it is the one still worth knowing
+          // about after leaving. The room's rule stops applying at the door.
+          serverMuted={
+            iAmMuted
+              ? muteLabel(myMutedUntil!)
+              : voice.listenOnly
+                ? 'Nobody talks in this channel'
+                : null
+          }
           onLeave={leaveVoice}
         />
 
@@ -2886,7 +2916,7 @@ export function Chat({
       <div className="col chat">
         <div className="chat-head">
           <span className="hash" style={{ color: 'var(--faint)' }}>
-            {activeChannelObj?.kind === 'VOICE' ? '🔊' : '#'}
+            {activeChannelObj ? channelIcon(activeChannelObj) : '#'}
           </span>
           {activeChannelObj?.name ?? '—'}
           {/* Always there, whether or not anything is pinned: an icon that
@@ -3667,7 +3697,7 @@ export function Chat({
           onClick={(e) => e.stopPropagation()}
         >
           <div className="menu-label">
-            {channelMenu.channel.kind === 'VOICE' ? '🔊' : '#'}{' '}
+            {channelIcon(channelMenu.channel)}{' '}
             {channelMenu.channel.name}
           </div>
           <button

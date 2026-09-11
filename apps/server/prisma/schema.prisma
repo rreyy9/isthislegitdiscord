@@ -118,13 +118,18 @@ model Guild {
 }
 
 model Channel {
-  id        String      @id
-  guildId   String
-  guild     Guild       @relation(fields: [guildId], references: [id], onDelete: Cascade)
-  name      String
-  kind      ChannelKind @default(TEXT)
-  position  Int         @default(0)
-  createdAt DateTime    @default(now())
+  id         String      @id
+  guildId    String
+  guild      Guild       @relation(fields: [guildId], references: [id], onDelete: Cascade)
+  name       String
+  kind       ChannelKind @default(TEXT)
+  position   Int         @default(0)
+  // A voice room nobody may speak in -- an AFK channel. Only ever true on a
+  // VOICE row; ChannelsService is what holds that, since the two columns are
+  // written together and no constraint can say "depends on kind" without
+  // outliving the reason it was added.
+  listenOnly Boolean     @default(false)
+  createdAt  DateTime    @default(now())
 
   messages   Message[]
   readStates ChannelReadState[]

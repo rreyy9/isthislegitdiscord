@@ -30,6 +30,21 @@ export const Channel = z.object({
   name: z.string(),
   kind: ChannelKind,
   position: z.number().int(),
+  /**
+   * A voice channel nobody may speak in — somewhere to be parked rather than
+   * somewhere to talk. People join it, hear each other's absence, and their
+   * microphone is never granted.
+   *
+   * Not called `muted`, which is taken twice over and means neither of these
+   * things: a member has a `mutedUntil`, which is a punishment aimed at one
+   * person, and "mute channel" in every other chat client means silencing its
+   * notifications for yourself. This is a property of the room, it applies to
+   * everyone in it including admins, and it says exactly what it does.
+   *
+   * Always false on a text channel. Speaking is not something a text channel
+   * does, so the flag has nothing to say about one.
+   */
+  listenOnly: z.boolean(),
 });
 export type Channel = z.infer<typeof Channel>;
 
@@ -608,6 +623,16 @@ export const CreateChannelInput = z.object({
     .regex(/^[^\s#@]+$/, 'no spaces or # @ characters'),
   kind: ChannelKind.default('TEXT'),
   position: z.number().int().min(0).max(999).optional(),
+  /**
+   * Make this an AFK room: joinable, audible, with nobody able to talk. See
+   * `Channel.listenOnly`.
+   *
+   * Accepted on a text channel and ignored there rather than refused — the
+   * kind decides, and `ChannelsService` is where that is written down, so a
+   * caller cannot get a text channel that claims to be listen-only whichever
+   * way it asks.
+   */
+  listenOnly: z.boolean().default(false),
 });
 export type CreateChannelInput = z.infer<typeof CreateChannelInput>;
 
@@ -738,6 +763,18 @@ export const VoiceTokenResponse = z.object({
    * therefore takes effect on everyone's next join, with no app restart.
    */
   audio: VoiceAudioConfig,
+  /**
+   * The room this token is for is listen-only, so the grant above carries no
+   * microphone. See `Channel.listenOnly`.
+   *
+   * Told to the client rather than left to be discovered, and told *here*
+   * rather than read off the channel list, because this is the one moment the
+   * answer is needed before anything happens: the client is about to open a
+   * capture device for audio the server would refuse. The channel list arrives
+   * separately and can be a render behind, which is long enough to light
+   * somebody's microphone indicator for a track that goes nowhere.
+   */
+  listenOnly: z.boolean(),
 });
 export type VoiceTokenResponse = z.infer<typeof VoiceTokenResponse>;
 

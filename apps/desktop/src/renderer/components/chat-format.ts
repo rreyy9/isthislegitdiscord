@@ -67,6 +67,26 @@ export const sameDay = (a: string, b: string) =>
 export const stamp = (iso: string) => `${dayLabel(iso)} at ${timeOf(iso)}`;
 
 /**
+ * The character in front of a channel's name, everywhere one is drawn.
+ *
+ * Three places wanted it -- the sidebar, the chat header and the right-click
+ * menu -- and while it was a ternary in each of them it was only ever going to
+ * be two of the three that learned about a new kind of channel. The crossed-out
+ * speaker is the AFK room, and it has to be legible in the sidebar without
+ * hovering: that list is where somebody decides which channel to click.
+ *
+ * Structurally typed rather than taking a ChannelDto, so this file stays what
+ * its header says it is: values in, string out, no imports.
+ */
+export function channelIcon(channel: {
+  kind: 'TEXT' | 'VOICE';
+  listenOnly?: boolean;
+}): string {
+  if (channel.kind !== 'VOICE') return '#';
+  return channel.listenOnly ? '🔇' : '🔊';
+}
+
+/**
  * An indefinite mute is stored as a date in the year 9999, so that every check
  * is one comparison. Nobody wants to read that date, hence this.
  */

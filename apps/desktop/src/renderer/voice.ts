@@ -111,6 +111,14 @@ export interface VoiceState {
   gateOpen: boolean;
   /** The quality the server picked, learned when a token is minted. */
   audio: VoiceAudioDto | null;
+  /**
+   * The channel we are in is an AFK room: nobody in it may speak, us included.
+   *
+   * Learned from the token rather than from the channel list, so it is known
+   * before the capture device is opened rather than a render later. Cleared on
+   * leave, like everything else here that is about one particular call.
+   */
+  listenOnly: boolean;
 }
 
 export interface VoiceSettings {
@@ -285,6 +293,7 @@ export function useVoice(
     talking: false,
     gateOpen: true,
     audio: null,
+    listenOnly: false,
   });
 
   const roomRef = useRef<Room | null>(null);
@@ -309,6 +318,12 @@ export function useVoice(
   /** Same reason as the others: applyMic runs outside React's knowledge. */
   const serverMutedRef = useRef(serverMuted);
   serverMutedRef.current = serverMuted;
+  /**
+   * The room takes no microphone from anybody. Written from the token at join
+   * rather than passed in, because the answer has to be here before the device
+   * is opened and the channel list is a separate arrival.
+   */
+  const listenOnlyRef = useRef(false);
   // Held in a ref so the caller may pass a fresh closure every render without
   // tearing down and re-registering the keybinding listener each time.
   const onDisconnectRef = useRef(onDisconnect);
@@ -579,6 +594,9 @@ export function useVoice(
    * Read as a function rather than computed once, because opening the device
    * now spans a settle window and every one of these can change during it.
    *
+   * The room has the first word: in an AFK channel no microphone is granted to
+   * anybody, so there is nothing for the rest of these rules to decide.
+   *
    * Deafen is a term here in its own right, not something inherited from the
    * mute it also sets. It used to be the latter, and that was the whole bug:
    * anything that cleared `muted` without knowing about deafen -- the mute
@@ -590,6 +608,7 @@ export function useVoice(
   const wantsTrackNow = useCallback(
     () =>
       !serverMutedRef.current &&
+      !listenOnlyRef.current &&
       !mutedRef.current &&
       !pushMutedRef.current &&
       !deafenedRef.current &&
@@ -602,6 +621,7 @@ export function useVoice(
     const s = settingsRef.current;
     return (
       !serverMutedRef.current &&
+      !listenOnlyRef.current &&
       !mutedRef.current &&
       !pushMutedRef.current &&
       !deafenedRef.current &&
@@ -693,12 +713,12 @@ export function useVoice(
   );
 
   /**
-   * One place decides whether the microphone is live, because five things now
-   * fight over it. An admin's mute wins outright — the server will not accept
-   * the track anyway, so there is no reason to hold the capture device open
-   * and light somebody's microphone indicator for audio that goes nowhere.
-   * Then manual mute. With push-to-talk on, the mic is open only while the key
-   * is held. Otherwise the gate has a say.
+   * One place decides whether the microphone is live, because six things now
+   * fight over it. A listen-only channel and an admin's mute win outright —
+   * the server will not accept the track in either case, so there is no reason
+   * to hold the capture device open and light somebody's microphone indicator
+   * for audio that goes nowhere. Then manual mute. With push-to-talk on, the
+   * mic is open only while the key is held. Otherwise the gate has a say.
    *
    * `wantsTrackNow` is separate from `liveNow` on purpose: it is exactly the
    * old rule, and it decides whether a microphone track should exist at all.
@@ -880,6 +900,9 @@ export function useVoice(
     roomRef.current = null;
     teardownAudio();
     if (room) await room.disconnect().catch(() => {});
+    // A property of the room we were in, not of us: it goes with the room, or
+    // the next channel inherits its silence until its own token lands.
+    listenOnlyRef.current = false;
     setState((s) => ({
       ...s,
       channelId: null,
@@ -887,6 +910,7 @@ export function useVoice(
       peers: [],
       screenShares: [],
       screenSharing: false,
+      listenOnly: false,
     }));
   }, [teardownAudio]);
 
@@ -921,7 +945,15 @@ export function useVoice(
         token = res.token;
         url = res.livekitUrl;
         audioRef.current = res.audio ?? null;
-        setState((s) => ({ ...s, audio: res.audio ?? null }));
+        // `?? false` for a server too old to send it: the field only ever
+        // takes the microphone away, so an absent one leaves the call as it
+        // has always been rather than silencing a room nobody asked to silence.
+        listenOnlyRef.current = res.listenOnly ?? false;
+        setState((s) => ({
+          ...s,
+          audio: res.audio ?? null,
+          listenOnly: res.listenOnly ?? false,
+        }));
       } catch (err) {
         if (superseded()) return;
         setState((s) => ({
