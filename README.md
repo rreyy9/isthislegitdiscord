@@ -1762,13 +1762,17 @@ Ordered by what hurts soonest.
    both the HTTP API and the socket, and the default list carries `null` because a packaged
    Electron renderer loads from `file://`. That is reasoned rather than observed. A build
    that fails to connect after this change is this line.
-6. **`Chat.tsx` is 3,923 lines and has never once gone down.** It was 3,270 after the first
-   split and 3,557 after replies — the formatting helpers, the shared types, both message
-   panels and all the modals live in `chat-format.ts`, `chat-types.ts`, `ChatPanels.tsx` and
-   `ChatModals.tsx`, and replies and forwards put their presentation in `MessageRefs.tsx`.
-   **Everything that goes in it stays in it**, because the message list, the composer,
-   editing, moderation, attachments, unread markers, embeds and the volume popup are one
-   function sharing one closure.
+6. **`Chat.tsx` is 3,552 lines, and has gone down for the first time.** It was 3,270
+   after the first split, 3,557 after replies and 3,923 at its peak. The formatting helpers,
+   the shared types, both message panels and all the modals live in `chat-format.ts`,
+   `chat-types.ts`, `ChatPanels.tsx` and `ChatModals.tsx`, and replies and forwards put
+   their presentation in `MessageRefs.tsx`.
+
+   The cut that brought it down took out what had no other claim on the closure: the member
+   list and its moderation menu (`MembersPanel`), the tag and emoji pickers
+   (`ComposerPickers.tsx`), the upload previews (`UploadPreview.tsx`), the removal dialog,
+   and — in `chat-hooks.ts` — the search box's state, six identical click-away effects and
+   the two banner timers. 20 effects and 52 `useState` calls remain.
 
    This entry used to say reactions could not be added until the message list came out
    first. That turned out to be wrong, and usefully so: the *presentation* extracts cleanly
@@ -1778,9 +1782,12 @@ Ordered by what hurts soonest.
    part of it (`guessReactions`) went to `chat-format.ts` where it could be tested.
 
    So the rule is narrower than it looked: **what cannot leave is the state, not the
-   markup.** The extraction is still worth doing and still needs a props interface nobody
-   has designed. It is not a prerequisite for the next feature either, and assuming it was
-   is how this entry nearly blocked one.
+   markup** — and not all of the state, either. What leaves is state nothing else writes.
+   `pins` stays because the socket handler, the pin toggle and the channel switch all write
+   it, and the composer's picker state stays because it is welded to the draft and its
+   keys. None of this was ever a prerequisite for a feature, and assuming it was is how
+   this entry nearly blocked one. What is left is a reducer for the message list: the state
+   everything writes.
 7. **`rtc.ips.excludes` is set but unproven.** VirtualBox, Hyper-V and link-local ranges are
    now excluded in `livekit.yaml`. Whether LiveKit stops advertising them has not been
    watched on the wire. Also note `livekit.yaml` is still in **LAN mode** (`node_ip`
