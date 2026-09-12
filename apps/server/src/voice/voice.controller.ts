@@ -57,11 +57,11 @@ export class VoiceController {
     }
 
     // The channel's own silence and one person's mute arrive at the same
-    // place: no microphone in the grant. They are kept apart up to here
-    // because they are different facts -- one expires, applies to a person and
-    // follows them into every room; the other belongs to this room and applies
-    // to whoever walks in, admins included -- and only the answer is shared.
-    const silenced = mutedUntil !== null || channel.listenOnly;
+    // place, the grant, and are kept apart all the way there. They are
+    // different facts -- one expires, applies to a person and follows them
+    // into every room; the other belongs to this room and applies to whoever
+    // walks in, admins included -- and they do not take the same thing: an
+    // AFK room takes a shared screen's sound too. `publishableSources` decides.
 
     const room = roomForChannel(channelId);
     const at = new AccessToken(
@@ -90,7 +90,10 @@ export class VoiceController {
       // VoiceService compares against this list and an absent one means
       // "everything" — two different ways of saying the same thing is one more
       // than that comparison can tell apart.
-      canPublishSources: publishableSources(silenced),
+      canPublishSources: publishableSources({
+        muted: mutedUntil !== null,
+        listenOnly: channel.listenOnly,
+      }),
     });
 
     return {
@@ -103,7 +106,8 @@ export class VoiceController {
       // The room's silence, not this person's: a mute of their own already has
       // somewhere to be said, in the member list, and the client says it
       // differently. This is the line that stops the client opening a capture
-      // device for a track the grant above will not accept.
+      // device, or asking a screen share for its sound, for a track the grant
+      // above will not accept.
       listenOnly: channel.listenOnly,
     };
   }

@@ -1277,7 +1277,14 @@ export function useVoice(
     try {
       // Screen audio on Windows is the system mix, which is the whole point
       // when sharing a game; LiveKit publishes it as a second track.
-      await room.localParticipant.setScreenShareEnabled(!on, { audio: true });
+      //
+      // Not in an AFK room, whose grant carries no screen audio. Asking for it
+      // anyway is not refused up front: the picture publishes, the sound is
+      // rejected after it, and somebody sees an error banner over a share that
+      // has half started.
+      await room.localParticipant.setScreenShareEnabled(!on, {
+        audio: !listenOnlyRef.current,
+      });
     } catch (err) {
       // Cancelling always rejects, and what it rejects with is Chromium's
       // business — it has been a permission error and an "invalid capture

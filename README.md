@@ -946,8 +946,9 @@ candidate works.
 A voice channel can be made **listen-only**: an AFK room. Tick *AFK channel — nobody can
 talk* while creating one, and it is a normal voice channel in every other respect —
 people join it, leave it, show up in the sidebar sitting in it, and can still share a
-screen — except that no microphone is ever granted in it. The sidebar draws it with a
-crossed-out speaker, so nobody has to join to find out.
+screen — except that no microphone is ever granted in it, and a screen shared there goes
+out without its sound. The sidebar draws it with a crossed-out speaker, so nobody has to
+join to find out.
 
 It applies to everybody in the room, admins included. There is no exemption to write
 down, which is the point: "somewhere to be parked" is not a punishment, so there is
@@ -957,13 +958,20 @@ nobody it should not apply to.
 would have had to learn a value that answers "VOICE" to every question it asks.
 
 **It is enforced on the LiveKit grant, exactly like a mute.** The join token is minted
-without `MICROPHONE` in `canPublishSources`, and the thirty-second sweep in
+without `MICROPHONE` or `SCREEN_SHARE_AUDIO` in `canPublishSources`, and the thirty-second sweep in
 `VoiceService` keeps every participant's permissions matching that — so a LiveKit that
 restarted, a webhook that went missing, or a permission changed by hand is repaired on
 the next pass rather than leaving a working microphone in a silent room. The client is
-told at join time, in the token response, and does not open the capture device at all:
-that is a courtesy, not the enforcement, and it is what puts a reason on screen instead
-of a live-looking mic button that changes nothing.
+told at join time, in the token response, does not open the capture device at all, and
+shares a screen without asking for its sound: that is a courtesy, not the enforcement,
+and it is what puts a reason on screen instead of a live-looking mic button that changes
+nothing — or an error over a screen share that half started.
+
+**It takes a shared screen's sound; a mute does not.** A mute is aimed at one person's
+microphone, and leaves a shared game its audio on purpose. An AFK room promises that nobody
+can talk in it, and a screen share carrying the system mix is a second microphone: anything
+playing on that machine, another app's voice chat included, would go into the room. The
+picture stays. `publishableSources` in `voice.service.ts` is where the two lists part.
 
 **A mute and a listen-only channel are different facts that meet at the same place.** One
 expires, belongs to a person and follows them into every room; the other belongs to the
@@ -1494,6 +1502,7 @@ been wrong.
 | `channels.service.ts` | That the kind decides the AFK flag: a voice channel keeps it, a text channel is stored with it false however the request asks. A listen-only text channel would be a read-only one, which is a different feature that does not exist. |
 | `permission.guard.ts` | The admin-only set, and that **a mute denies nothing**. It used to deny `channel.write` and `voice.join`, which was three punishments delivered under one name. |
 | `audio-config.ts` | RED on everywhere but studio, DTX only on `voice`, and a typo in `VOICE_QUALITY` falling back rather than refusing to start. |
+| `voice.service.ts` | `publishableSources`, the one rule the join token and the sweep both ask: a mute takes only the microphone and leaves a shared game its sound, an AFK room takes the screen's sound as well, and the room decides when both are true. |
 | `cors.ts` | That the allowlist does not prefix-match, so `https://good.example.evil.example` is refused. |
 | `login-throttle.ts` | That the window slides rather than resetting in a block, and that a success clears the address. A second file mounts it on a real Express app the way `main.ts` does — one route on the router, one straight on the app above it — and asserts that two failures on the second plus one on the first exhausts a budget of three. That is the bug, reproduced. |
 | `ids.ts` | UUIDv7 sorting chronologically as a string, and the invite alphabet being drawn from evenly. |
@@ -1561,7 +1570,7 @@ it removes nothing it cannot prove is its own.
 - **Join tokens live ten minutes.** They only have to survive the join.
 - **A silent channel takes the microphone off the grant, never off the join.** An AFK room
   is somewhere to sit and listen, so `voice.join` is untouched and the token is simply
-  minted without `MICROPHONE` — the same mechanism a mute uses, for the same reason: one
+  minted without `MICROPHONE` or `SCREEN_SHARE_AUDIO` — the same mechanism a mute uses, for the same reason: one
   place decides what may be published, and the sweep repairs anything that drifts from it.
   See [AFK channels](#afk-channels).
 - **Keybindings are `uiohook-napi`, not Electron's `globalShortcut`.** `globalShortcut`

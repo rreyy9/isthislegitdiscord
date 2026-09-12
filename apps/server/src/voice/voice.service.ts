@@ -45,12 +45,38 @@ const SOURCES_WHILE_MUTED: readonly TrackSource[] = ALL_SOURCES.filter(
 );
 
 /**
+ * What an AFK room allows: the screen, without its sound.
+ *
+ * Narrower than a mute on purpose, and for the same reason the mute is narrow.
+ * A mute is aimed at one person's microphone, so the sound of a shared game is
+ * left alone. A listen-only room promises that nobody can talk in it, and a
+ * screen share carrying the system mix is a second microphone with extra
+ * steps: anything playing on that machine, another app's voice chat included,
+ * would go into the room. The picture stays, because a silent screen breaks no
+ * promise.
+ */
+const SOURCES_WHEN_LISTEN_ONLY: readonly TrackSource[] = SOURCES_WHILE_MUTED.filter(
+  (s) => s !== TrackSource.SCREEN_SHARE_AUDIO,
+);
+
+/**
  * What this person may publish right now. Exported because the join token has
  * to agree with the sweep — two places deciding this separately is how a
  * muted person ends up with a working microphone until the next sweep, or a
  * released one ends up without.
+ *
+ * Two facts rather than one boolean, because they no longer take the same
+ * thing away. The room's rule is the wider of the two, so when both hold it is
+ * the one that applies.
  */
-export function publishableSources(muted: boolean): TrackSource[] {
+export function publishableSources({
+  muted,
+  listenOnly,
+}: {
+  muted: boolean;
+  listenOnly: boolean;
+}): TrackSource[] {
+  if (listenOnly) return [...SOURCES_WHEN_LISTEN_ONLY];
   return [...(muted ? SOURCES_WHILE_MUTED : ALL_SOURCES)];
 }
 
@@ -243,13 +269,16 @@ export class VoiceService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     if (participants.length === 0) return;
     try {
-      const muted = await this.mutedAmong(
+      const policy = await this.micPolicyAmong(
         channelId,
         participants.map((p) => p.identity),
       );
       await Promise.all(
         participants.map((p) =>
-          this.applyMicPolicy(channelId, p, muted.has(p.identity)),
+          this.applyMicPolicy(channelId, p, {
+            muted: policy.muted.has(p.identity),
+            listenOnly: policy.listenOnly,
+          }),
         ),
       );
     } catch (err) {
@@ -262,27 +291,32 @@ export class VoiceService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Which of these people may not speak here: everyone whose own mute is still
-   * running, or everyone at all if the channel itself is listen-only.
+   * What stops these people being heard here: whose own mute is still running,
+   * and whether the channel itself is listen-only.
+   *
+   * Handed back apart rather than folded into one set of silenced people,
+   * because the two no longer take away the same thing -- an AFK room takes a
+   * shared screen's sound as well as the microphone, a mute takes only the
+   * microphone. See `publishableSources`.
    *
    * The channel's flag is read on every pass rather than remembered, which is
    * what makes it behave like the mute beside it -- an AFK room that was
    * changed in the database takes effect on the next sweep, in a call already
    * in progress, without anyone rejoining.
    */
-  private async mutedAmong(
+  private async micPolicyAmong(
     channelId: string,
     userIds: string[],
-  ): Promise<Set<string>> {
+  ): Promise<{ listenOnly: boolean; muted: Set<string> }> {
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
       select: { guildId: true, listenOnly: true },
     });
-    if (!channel) return new Set();
+    if (!channel) return { listenOnly: false, muted: new Set() };
 
     // Nobody talks in an AFK channel, so there is nothing to ask the member
-    // table: the answer is everyone in the room, admins included.
-    if (channel.listenOnly) return new Set(userIds);
+    // table: the room's rule is wider than any mute, and covers admins too.
+    if (channel.listenOnly) return { listenOnly: true, muted: new Set() };
 
     // The deadline is applied in the query rather than in JavaScript, so an
     // expired mute simply does not come back and needs no clearing.
@@ -294,17 +328,17 @@ export class VoiceService implements OnModuleInit, OnModuleDestroy {
       },
       select: { userId: true },
     });
-    return new Set(rows.map((r) => r.userId));
+    return { listenOnly: false, muted: new Set(rows.map((r) => r.userId)) };
   }
 
-  /** One participant, brought into line with one boolean. */
+  /** One participant, brought into line with what may be published here. */
   private async applyMicPolicy(
     channelId: string,
     participant: ParticipantInfo,
-    muted: boolean,
+    policy: { muted: boolean; listenOnly: boolean },
   ): Promise<void> {
     const room = roomForChannel(channelId);
-    const allowed = publishableSources(muted);
+    const allowed = publishableSources(policy);
 
     // LiveKit reads an empty list as "no restriction", so that is what it has
     // to be compared against — otherwise a participant from a client that
@@ -329,15 +363,20 @@ export class VoiceService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
-    if (!muted) return;
+    // The sound sources this grant withholds: the microphone under a mute,
+    // and a shared screen's audio as well in an AFK room.
+    const revoked = [TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE_AUDIO].filter(
+      (source) => !allowed.includes(source),
+    );
+    if (revoked.length === 0) return;
 
-    // Permission governs the next publish; a microphone already on the wire
-    // has to be told to stop separately. LiveKit unpublishes revoked sources
-    // itself in current versions, so this is usually a no-op -- and it is what
-    // makes the behaviour not depend on that.
+    // Permission governs the next publish; a track already on the wire has to
+    // be told to stop separately. LiveKit unpublishes revoked sources itself
+    // in current versions, so this is usually a no-op -- and it is what makes
+    // the behaviour not depend on that.
     await Promise.all(
       participant.tracks
-        .filter((t) => t.source === TrackSource.MICROPHONE && !t.muted)
+        .filter((t) => revoked.includes(t.source) && !t.muted)
         .map((t) =>
           this.client
             .mutePublishedTrack(room, participant.identity, t.sid, true)

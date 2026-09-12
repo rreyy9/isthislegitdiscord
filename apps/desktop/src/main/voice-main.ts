@@ -47,7 +47,7 @@ let pendingChoice: ((sourceId: string | null) => void) | null = null;
 
 export function registerScreenShare(getWindow: () => BrowserWindow | null) {
   session.defaultSession.setDisplayMediaRequestHandler(
-    (_request, callback) => {
+    (request, callback) => {
       /**
        * Cancelling is `callback(null)`, not `callback({})`.
        *
@@ -120,7 +120,14 @@ export function registerScreenShare(getWindow: () => BrowserWindow | null) {
           // Windows can hand over the system audio mix, which is the whole
           // point when sharing a game. Only whole screens, never single
           // windows — per-window audio is not a thing the OS offers.
-          audio: source.id.startsWith('screen:') ? 'loopback' : undefined,
+          //
+          // And only when the renderer asked for sound. A share in an AFK room
+          // asks for none, because its grant carries none, and handing loopback
+          // to a request that did not want it is capturing audio nobody meant to.
+          audio:
+            request.audioRequested && source.id.startsWith('screen:')
+              ? 'loopback'
+              : undefined,
         });
       })().catch(() => {
         // Nothing in here is worth taking the app down for, and a request left
