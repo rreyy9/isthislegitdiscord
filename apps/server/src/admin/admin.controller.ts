@@ -284,6 +284,9 @@ export class AdminController {
         name: c.name,
         kind: c.kind,
         position: c.position,
+        // The console draws an AFK room from this. Without it, every voice
+        // channel there looked like one people can talk in.
+        listenOnly: c.listenOnly,
       })),
     }));
   }
@@ -316,7 +319,12 @@ export class AdminController {
     @Body(new ZodPipe(CreateChannelInput)) body: CreateChannelInput,
   ) {
     const channel = await this.channels.create(guildId, body);
-    return { id: channel.id, name: channel.name, kind: channel.kind };
+    return {
+      id: channel.id,
+      name: channel.name,
+      kind: channel.kind,
+      listenOnly: channel.listenOnly,
+    };
   }
 
   @Patch('channels/:id')

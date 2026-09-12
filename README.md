@@ -948,7 +948,8 @@ talk* while creating one, and it is a normal voice channel in every other respec
 people join it, leave it, show up in the sidebar sitting in it, and can still share a
 screen — except that no microphone is ever granted in it, and a screen shared there goes
 out without its sound. The sidebar draws it with a crossed-out speaker, so nobody has to
-join to find out.
+join to find out. The console's Channels tab draws it the same way, tags it AFK, and
+can make one too — the checkbox appears once *Voice* is picked.
 
 It applies to everybody in the room, admins included. There is no exemption to write
 down, which is the point: "somewhere to be parked" is not a punishment, so there is

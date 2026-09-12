@@ -266,6 +266,7 @@
         <select id="ch-guild"></select>
         <input id="ch-name" placeholder="channel-name">
         <select id="ch-kind"><option value="TEXT">Text</option><option value="VOICE">Voice</option></select>
+        <label class="choice hidden" id="ch-afk-wrap"><input type="checkbox" id="ch-afk"> AFK channel &mdash; nobody can talk</label>
         <button class="btn primary" id="b-createch">Add channel</button>
         <span class="muted">|</span>
         <input id="g-name" placeholder="new guild name" style="width:170px">
@@ -1258,6 +1259,13 @@ $('#b-createinv').onclick = async () => {
 };
 
 /* -------------------------------------------------------------- channels */
+/**
+ * The same rule as `channelIcon` in the desktop client: an AFK room is the
+ * crossed-out speaker. Written out again because the console has no build step
+ * to import it through, and kept this short so the two cannot drift far.
+ */
+const channelIcon = c => c.kind !== 'VOICE' ? '#' : (c.listenOnly ? '🔇' : '🔊');
+
 async function loadChannels() {
   if (!token) return;
   try {
@@ -1267,9 +1275,9 @@ async function loadChannels() {
         <div style="margin-bottom:7px"><b>${esc(g.name)}</b>
           <span class="muted">· ${g.memberCount} member(s)</span></div>
         <table><tbody>${g.channels.map(c => `<tr>
-          <td style="width:26px" class="muted">${c.kind === 'VOICE' ? '🔊' : '#'}</td>
+          <td style="width:26px" class="muted">${channelIcon(c)}</td>
           <td class="mono">${esc(c.name)}</td>
-          <td><span class="tag">${c.kind}</span></td>
+          <td><span class="tag">${c.kind}</span>${c.listenOnly ? ' <span class="tag">AFK</span>' : ''}</td>
           <td class="muted">pos ${c.position}</td>
           <td style="text-align:right;white-space:nowrap">
             <button class="btn" data-ren="${c.id}" data-name="${esc(c.name)}">Rename</button>
@@ -1291,11 +1299,18 @@ async function loadChannels() {
   } catch (e) {}
 }
 
+// The AFK switch only means something on a voice channel, so it is only there
+// for one. The server ignores it on a text channel anyway.
+$('#ch-kind').onchange = () =>
+  $('#ch-afk-wrap').classList.toggle('hidden', $('#ch-kind').value !== 'VOICE');
+
 $('#b-createch').onclick = async () => {
+  const kind = $('#ch-kind').value;
   try {
     await api(`/api/admin/guilds/${$('#ch-guild').value}/channels`, { method:'POST',
-      body: JSON.stringify({ name: $('#ch-name').value.trim(), kind: $('#ch-kind').value }) });
-    $('#ch-name').value = ''; toast('channel created'); loadChannels();
+      body: JSON.stringify({ name: $('#ch-name').value.trim(), kind,
+        listenOnly: kind === 'VOICE' && $('#ch-afk').checked }) });
+    $('#ch-name').value = ''; $('#ch-afk').checked = false; toast('channel created'); loadChannels();
   } catch (e) { toast(e.message, true); }
 };
 $('#b-createguild').onclick = async () => {
