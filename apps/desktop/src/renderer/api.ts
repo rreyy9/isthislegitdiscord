@@ -153,11 +153,15 @@ export interface ChannelDto {
   position: number;
   /**
    * A voice channel nobody may speak in -- an AFK room. Always false on a text
-   * channel, and false on every channel a server too old to know about them
-   * describes, which is the right way round: the flag only ever takes the
-   * microphone away, so a missing one leaves things as they were.
+   * channel.
+   *
+   * Optional for the reason `mentions` and `pinnedAt` are: a server older than
+   * the feature sends no such field, so it arrives undefined, not false. Read
+   * it as truthy or not, never `=== false`. That is the right way round anyway:
+   * the flag only ever takes something away, so a missing one leaves things as
+   * they were.
    */
-  listenOnly: boolean;
+  listenOnly?: boolean;
 }
 export interface GuildDto {
   id: string;
@@ -323,8 +327,12 @@ export interface VoiceTokenDto {
   livekitUrl: string;
   room: string;
   audio: VoiceAudioDto;
-  /** The room is listen-only, so this token carries no microphone. */
-  listenOnly: boolean;
+  /**
+   * The room is listen-only, so this token carries no microphone and no screen
+   * audio. Absent from a server older than the feature; read it with
+   * `?? false`, as `useVoice` does.
+   */
+  listenOnly?: boolean;
 }
 export interface VoiceChannelStateDto {
   channelId: string;
