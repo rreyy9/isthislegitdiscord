@@ -19,6 +19,7 @@ import {
   labelFor,
   registerKeybinds,
   registerScreenShare,
+  registerVoiceDebugLog,
   type Binding,
   type Keybind,
   type KeybindAction,
@@ -743,6 +744,7 @@ app.whenReady().then(() => {
   allowEmbedReferrers();
 
   registerScreenShare(() => mainWindow);
+  registerVoiceDebugLog(); // TEMP: deafen debugging
   registerUpdater(() => mainWindow);
   // Before the first window, because on Windows the identity has to be set
   // before anything tries to raise a toast.

@@ -479,6 +479,67 @@ export function useVoice(
     }
   }, [volumeFor]);
 
+  /* ------------------------------------------- TEMP: deafen debugging */
+
+  /**
+   * Temporary. Writes the state of every remote audio element to
+   * voice-debug.log: the ones this hook tracks, any <audio> in the page it
+   * does not, and what LiveKit believes is attached to each track. Remove once
+   * the deafen bug is found.
+   */
+  const debugSnapshot = useCallback(
+    (label: string) => {
+      try {
+        const room = roomRef.current;
+        const tracked = new Set<HTMLMediaElement>();
+        const lines: string[] = [];
+        for (const [identity, els] of audioElsRef.current) {
+          for (const el of els) {
+            tracked.add(el);
+            lines.push(describeAudioEl(identity, el, volumeFor(identity)));
+          }
+        }
+        const untracked = [...document.querySelectorAll('audio')].filter(
+          (el) => !tracked.has(el),
+        );
+        for (const el of untracked) lines.push(describeAudioEl('UNTRACKED', el));
+        for (const p of room?.remoteParticipants.values() ?? []) {
+          for (const pub of p.audioTrackPublications.values()) {
+            const t = pub.track;
+            const attached = (t?.attachedElements ?? []).map((e) => {
+              const m = e as HTMLMediaElement;
+              return `${m.volume}/${m.muted ? 'muted' : 'unmuted'}/${tracked.has(m) ? 'ours' : 'NOT-OURS'}`;
+            });
+            lines.push(
+              `  lk ${p.identity}/${pub.source} subscribed=${pub.isSubscribed} ` +
+                `track=${t ? t.mediaStreamTrack?.readyState : 'none'} ` +
+                `attached=[${attached.join(', ')}]`,
+            );
+          }
+        }
+        bridge.voiceDebugLog?.(
+          `${label} | room=${room?.state ?? 'none'} deafenedRef=${deafenedRef.current} ` +
+            `mutedRef=${mutedRef.current} tracked=${tracked.size} ` +
+            `untracked=${untracked.length} sinkChildren=${audioBoxRef.current?.childElementCount ?? 'none'}\n` +
+            lines.join('\n'),
+        );
+      } catch (e) {
+        bridge.voiceDebugLog?.(`${label} | snapshot failed: ${(e as Error).message}`);
+      }
+    },
+    [volumeFor],
+  );
+
+  /** Snapshot now and again shortly after, to catch anything undoing it. */
+  const debugTrace = useCallback(
+    (label: string) => {
+      debugSnapshot(label);
+      setTimeout(() => debugSnapshot(`${label} +500ms`), 500);
+      setTimeout(() => debugSnapshot(`${label} +2s`), 2000);
+    },
+    [debugSnapshot],
+  );
+
   /* ------------------------------------------------------ derived state */
 
   const sync = useCallback(() => {
@@ -1063,6 +1124,9 @@ export function useVoice(
               }
             }
             sync();
+            debugSnapshot(
+              `subscribed ${participant.identity}/${track.source}`,
+            );
           },
         )
         .on(
@@ -1086,11 +1150,15 @@ export function useVoice(
               speakingRef.current.delete(participant.identity);
             }
             sync();
+            debugSnapshot(
+              `unsubscribed ${participant.identity}/${track.source}`,
+            );
           },
         )
         .on(RoomEvent.Reconnecting, () => {
           if (!isCurrent()) return;
           setState((st) => ({ ...st, status: 'reconnecting' }));
+          debugSnapshot('reconnecting');
         })
         .on(RoomEvent.Reconnected, () => {
           if (!isCurrent()) return;
@@ -1102,6 +1170,7 @@ export function useVoice(
           void publishDeafened(room);
           ensureMicMeter();
           sync();
+          debugTrace('reconnected');
         })
         .on(RoomEvent.Disconnected, () => {
           if (!isCurrent()) return;
@@ -1154,6 +1223,7 @@ export function useVoice(
         void publishDeafened(room);
         ensureMicMeter();
         sync();
+        debugTrace(`joined ${channelId}`);
       } catch (err) {
         // A join that has already been replaced fails with "client initiated
         // disconnect" precisely because it was replaced. Clean up its own room
@@ -1182,6 +1252,8 @@ export function useVoice(
       sync,
       teardownAudio,
       volumeFor,
+      debugSnapshot,
+      debugTrace,
     ],
   );
 
@@ -1221,6 +1293,7 @@ export function useVoice(
    */
   const setMuted = useCallback(
     async (next: boolean) => {
+      debugSnapshot(`mute(${next}) before`);
       const undeafening = !next && deafenedRef.current;
       mutedRef.current = next;
       if (undeafening) deafenedRef.current = false;
@@ -1236,13 +1309,16 @@ export function useVoice(
         void publishDeafened(roomRef.current);
         sync();
       }
+      debugSnapshot(`mute(${next}) applied`);
       await applyMic();
+      debugTrace(`mute(${next}) mic done`);
     },
-    [applyMic, applyVolumes, publishDeafened, sync],
+    [applyMic, applyVolumes, publishDeafened, sync, debugSnapshot, debugTrace],
   );
 
   const setDeafened = useCallback(
     async (next: boolean) => {
+      debugSnapshot(`deafen(${next}) before`);
       deafenedRef.current = next;
       // Deafening implies muting; un-deafening does not un-mute, which matches
       // what people expect from every other client they have used. The mute is
@@ -1261,9 +1337,11 @@ export function useVoice(
       // The local half of the same fact. `sync` reads the ref rather than the
       // attribute, so this does not wait on the round trip.
       sync();
+      debugSnapshot(`deafen(${next}) applied`);
       await applyMic();
+      debugTrace(`deafen(${next}) mic done`);
     },
-    [applyVolumes, applyMic, publishDeafened, sync],
+    [applyVolumes, applyMic, publishDeafened, sync, debugSnapshot, debugTrace],
   );
 
   const toggleScreenShare = useCallback(async () => {
@@ -1562,6 +1640,26 @@ export function useVoice(
     getInputLevel,
     getNetStats,
   };
+}
+
+/** TEMP: deafen debugging. One remote audio element, as a log line. */
+function describeAudioEl(identity: string, el: HTMLMediaElement, want?: number) {
+  const src = el.srcObject;
+  const tracks =
+    src instanceof MediaStream
+      ? src
+          .getAudioTracks()
+          .map(
+            (t) =>
+              `${t.id.slice(0, 8)}:${t.readyState}${t.enabled ? '' : ':disabled'}`,
+          )
+          .join('|') || 'no-audio-tracks'
+      : 'no-src';
+  return (
+    `  ${identity} vol=${el.volume} muted=${el.muted}` +
+    (want === undefined ? '' : ` want=${want}`) +
+    ` paused=${el.paused} inDom=${el.isConnected} tracks=${tracks}`
+  );
 }
 
 /**

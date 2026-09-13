@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   api,
   setToken,
@@ -1335,6 +1342,39 @@ export function Chat({
     // `jumpNonce` is here so a jump inside the channel that is already open
     // re-runs this. Nothing else about it changes in that case.
   }, [activeChannel, settingsReady, jumpNonce]);
+
+  /**
+   * Following the end of the channel. A reader parked at the bottom stays
+   * there as the list grows, whatever grew it -- a socket message, a backfill,
+   * their own send.
+   *
+   * This is a layout effect rather than the `requestAnimationFrame` the
+   * handlers queue, because a frame is not guaranteed to come after React has
+   * committed the new row: when it came first, the scroll went to the old
+   * bottom and the new message was left hanging below the fold, with no jump
+   * button to say so since the reader had never scrolled away.
+   */
+  useLayoutEffect(() => {
+    if (atBottomRef.current && !inHistoryRef.current) scrollToBottom();
+  }, [messages]);
+
+  /**
+   * The same for media that finishes loading after its row is drawn. Neither
+   * event bubbles, so they are caught on the way down instead.
+   */
+  useEffect(() => {
+    const box = msgsRef.current;
+    if (!box) return;
+    const follow = () => {
+      if (atBottomRef.current && !inHistoryRef.current) scrollToBottom();
+    };
+    box.addEventListener('load', follow, true);
+    box.addEventListener('loadedmetadata', follow, true);
+    return () => {
+      box.removeEventListener('load', follow, true);
+      box.removeEventListener('loadedmetadata', follow, true);
+    };
+  }, []);
 
   /**
    * Read state plus the newest message id per channel. Both are needed: unread

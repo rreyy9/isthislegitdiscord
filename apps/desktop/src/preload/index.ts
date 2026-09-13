@@ -332,6 +332,11 @@ const bridge = {
       ipcRenderer.off('keybind:fired', handler);
     };
   },
+
+  /** TEMP: deafen debugging. Appends to voice-debug.log in userData. */
+  voiceDebugLog: (text: string): void => {
+    ipcRenderer.send('voice:debug-log', text);
+  },
 };
 
 contextBridge.exposeInMainWorld('desktop', bridge);

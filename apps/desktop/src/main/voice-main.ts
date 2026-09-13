@@ -1,5 +1,7 @@
-import { BrowserWindow, desktopCapturer, ipcMain, session } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, session } from 'electron';
 import type { Streams } from 'electron';
+import { appendFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   matchesDown,
   matchesUp,
@@ -372,4 +374,28 @@ export function registerKeybinds(getWindow: () => BrowserWindow | null) {
   });
 
   return { stopHook };
+}
+
+/* ------------------------------------------------ TEMP: deafen debugging */
+
+/**
+ * Temporary. The renderer's snapshots of every remote audio element, written
+ * to `voice-debug.log` beside updater.log, because the installed build has no
+ * console to read them from. Remove once the deafen bug is found.
+ */
+export function registerVoiceDebugLog() {
+  ipcMain.on('voice:debug-log', (_e, text: unknown) => {
+    if (typeof text !== 'string') return;
+    const path = join(app.getPath('userData'), 'voice-debug.log');
+    try {
+      if (statSync(path).size > 1024 * 1024) writeFileSync(path, '');
+    } catch {
+      // No file yet.
+    }
+    try {
+      appendFileSync(path, `[${new Date().toISOString()}] ${text}\n`);
+    } catch {
+      // A debug log must never take the call down with it.
+    }
+  });
 }
