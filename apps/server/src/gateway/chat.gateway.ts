@@ -325,8 +325,19 @@ export class ChatGateway
 
   /* ----------------------------------------------- called by controllers */
 
+  /**
+   * The message goes to the channel room; the fact of it goes to everyone.
+   * A client only joins the room for the channel it has open, so without the
+   * second emit nothing tells it another channel has something new, and the
+   * unread dot there stays dark until the next launch. Ids only, like a
+   * deletion, so it carries nothing a reader of that channel would not see.
+   */
   broadcastMessage(message: Message) {
     this.server.to(`channel:${message.channelId}`).emit('message:new', message);
+    this.server.emit('channel:activity', {
+      channelId: message.channelId,
+      messageId: message.id,
+    });
   }
 
   broadcastMessageUpdated(message: Message) {

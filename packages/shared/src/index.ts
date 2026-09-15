@@ -1010,6 +1010,12 @@ export interface ServerToClientEvents {
   'message:updated': (message: Message) => void;
   'message:deleted': (payload: { id: string; channelId: string }) => void;
   /**
+   * A message was posted somewhere. Sent to everyone, because `message:new`
+   * only reaches the room for the channel on screen, and the unread dot is
+   * for every other channel. Ids only, no content, same as a deletion.
+   */
+  'channel:activity': (payload: { channelId: string; messageId: string }) => void;
+  /**
    * A member's moderation state changed — today that means muted or unmuted.
    * Everyone gets it, because everyone's member list shows the mute marker.
    */

@@ -872,9 +872,16 @@ export function Chat({
         }
       },
       onServerRestarting: () => setServerRestarting(true),
+      // What makes the unread dot appear on a channel you are not looking at.
+      // `onMessage` cannot do it: the server only sends a message to the room
+      // for the channel that is open, and this client is in no other.
+      onChannelActivity: ({ channelId, messageId }) =>
+        setLatest((prev) =>
+          !prev[channelId] || messageId > prev[channelId]
+            ? { ...prev, [channelId]: messageId }
+            : prev,
+        ),
       onMessage: (m) => {
-        // Recorded for every channel, not just the open one: that is what
-        // makes the unread dot appear on a channel you are not looking at.
         setLatest((prev) =>
           !prev[m.channelId] || m.id > prev[m.channelId]
             ? { ...prev, [m.channelId]: m.id }
@@ -1332,6 +1339,9 @@ export function Chat({
         if (!restored) scrollToBottom();
         holdAt(restored ? anchor : null);
         updateScrollState();
+        // Back where they stopped reading, with newer messages underneath:
+        // the button says so, rather than the plain "Jump to latest".
+        if (restored && !atBottomRef.current) setHasNew(true);
       });
     })();
     return () => {
@@ -1643,8 +1653,20 @@ export function Chat({
     if (inHistoryRef.current) return;
 
     const id = bottomVisibleId(box);
-    if (!id || positionsRef.current[channelId] === id) return;
-    positionsRef.current = { ...positionsRef.current, [channelId]: id };
+    // Nothing loaded yet -- the list is emptied on every channel switch -- says
+    // nothing about where the reader is, and must not wipe what was saved.
+    if (!id) return;
+    if (bottom) {
+      // At the end, the position is "the end", not the message that happens
+      // to be last right now. Keeping that message would reopen the channel on
+      // it, with everything posted since left below the fold.
+      if (!(channelId in positionsRef.current)) return;
+      const { [channelId]: _end, ...rest } = positionsRef.current;
+      positionsRef.current = rest;
+    } else {
+      if (positionsRef.current[channelId] === id) return;
+      positionsRef.current = { ...positionsRef.current, [channelId]: id };
+    }
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(savePositions, 500);
   }

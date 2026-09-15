@@ -16,6 +16,12 @@ export interface SocketEvents {
   onMessage: (m: MessageDto) => void;
   onMessageUpdated: (m: MessageDto) => void;
   onMessageDeleted: (p: { id: string; channelId: string }) => void;
+  /**
+   * A message was posted in some channel, open or not. `onMessage` only fires
+   * for the open one, so this is what lights the unread dot everywhere else.
+   * Never sent by a server older than this event, which just means no dot.
+   */
+  onChannelActivity: (p: { channelId: string; messageId: string }) => void;
   onMemberUpdated: (p: {
     guildId: string;
     userId: string;
@@ -152,6 +158,7 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('message:new', events.onMessage);
   socket.on('message:updated', events.onMessageUpdated);
   socket.on('message:deleted', events.onMessageDeleted);
+  socket.on('channel:activity', events.onChannelActivity);
   socket.on('member:updated', events.onMemberUpdated);
   socket.on('mention:new', events.onMention);
   socket.on('moderation:removed', events.onRemoved);
