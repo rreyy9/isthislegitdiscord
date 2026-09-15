@@ -466,10 +466,20 @@ export function useVoice(
    * It costs a float assignment per remote person per event, on a handful of
    * elements. Writing the value it already had is free.
    */
-  const enforceVolumes = useCallback(() => {
+  const enforceVolumes = useCallback((force = false) => {
     for (const [identity, els] of audioElsRef.current) {
       const v = volumeFor(identity);
       for (const el of els) {
+        // `force` is for the moments Chromium may have rebuilt the renderer
+        // behind the element — an output device switch, a default device
+        // change, a sink id set during attach. The new renderer plays at full
+        // volume while `el.volume` still reports the slider's value, and the
+        // setter ignores a write of the value it already holds, so nothing
+        // short of a different number reaches it. That is why nudging the
+        // slider by 1% used to be the only way back. Writing a neighbour first
+        // makes the real value a change; both land in the same task, so
+        // nothing is heard at the in-between level.
+        if (force) el.volume = v > 0.5 ? v - 0.01 : v + 0.01;
         if (el.volume !== v) el.volume = v;
         // A second lock on the same door. Volume is a number, and a number is
         // the sort of thing something else can plausibly write; `muted` is
@@ -618,7 +628,7 @@ export function useVoice(
    * that runs constantly.
    */
   const applyVolumes = useCallback(() => {
-    enforceVolumes();
+    enforceVolumes(true);
     const room = roomRef.current;
     if (!room) return;
     for (const p of room.remoteParticipants.values()) {
@@ -1055,7 +1065,10 @@ export function useVoice(
         // carried this way, so there is no need to look at what changed.
         .on(RoomEvent.ParticipantAttributesChanged, sync)
         .on(RoomEvent.TrackMuted, sync)
-        .on(RoomEvent.TrackUnmuted, sync)
+        .on(RoomEvent.TrackUnmuted, () => {
+          applyVolumes();
+          sync();
+        })
         .on(RoomEvent.LocalTrackPublished, () => {
           ensureMicMeter();
           sync();
@@ -1067,7 +1080,12 @@ export function useVoice(
         .on(RoomEvent.TrackPublished, sync)
         .on(RoomEvent.TrackUnpublished, sync)
         .on(RoomEvent.ActiveSpeakersChanged, sync)
-        .on(RoomEvent.MediaDevicesChanged, () => ensureMicMeter())
+        .on(RoomEvent.MediaDevicesChanged, () => {
+          ensureMicMeter();
+          // Headphones plugged in, or Windows moving the default device, can
+          // put every remote element on a fresh renderer at full volume.
+          applyVolumes();
+        })
         .on(
           RoomEvent.TrackSubscribed,
           (
@@ -1101,6 +1119,11 @@ export function useVoice(
                 audioElsRef.current.set(participant.identity, els);
               }
               els.add(el);
+              // Once a picked output device is in play, LiveKit's attach sets
+              // the element's sink id without waiting for it, and the switch
+              // lands after the volume above. Push it through again once that
+              // has had time to finish.
+              setTimeout(applyVolumes, 1000);
               // The microphone only. There is one meter per person and it is
               // what lights their portrait, so metering a screen-share audio
               // track here replaced it — and the ring then followed whatever
@@ -1391,11 +1414,15 @@ export function useVoice(
     [ensureMicMeter],
   );
 
-  const setOutputDevice = useCallback(async (deviceId: string) => {
-    await roomRef.current
-      ?.switchActiveDevice('audiooutput', deviceId)
-      .catch(() => {});
-  }, []);
+  const setOutputDevice = useCallback(
+    async (deviceId: string) => {
+      await roomRef.current
+        ?.switchActiveDevice('audiooutput', deviceId)
+        .catch(() => {});
+      applyVolumes();
+    },
+    [applyVolumes],
+  );
 
   /**
    * Throw the microphone track away and make a new one. Capture constraints
