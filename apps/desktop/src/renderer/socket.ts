@@ -1,6 +1,12 @@
 import { io, type Socket } from 'socket.io-client';
 import { getClientVersion, getServerUrl, getToken } from './api';
 import type { MessageDto, PublicUserDto } from './api';
+import type {
+  PartyAck,
+  WatchPartyActionName,
+  WatchPartyChatDto,
+  WatchPartyStateDto,
+} from './watch-party-types';
 
 /**
  * Socket lifecycle. Two things here matter beyond "connect and listen":
@@ -122,6 +128,27 @@ export interface SocketEvents {
    * the connection dropped.
    */
   onServerRestarting: () => void;
+  /**
+   * A watch party opened, changed, or ended somewhere in the guild.
+   *
+   * Three handlers rather than one, because the sidebar treats "there is one
+   * now" and "the one you are in moved on" differently -- and because a server
+   * older than the feature sends none of the three, which is exactly what an
+   * absent feature should look like: no strip, nothing to join, nothing drawn
+   * wrongly.
+   *
+   * `onPartyState` fires for every party in the guild, joined or not: the
+   * strip says who is watching and what is playing, and people who have not
+   * joined draw it too.
+   */
+  onPartyState: (state: WatchPartyStateDto, started: boolean) => void;
+  onPartyEnded: (p: { guildId: string; partyId: string }) => void;
+  /**
+   * Somebody said something in a party this socket is in. Session-only: there
+   * is no history behind it and nothing backfills it, so a client that was not
+   * connected simply missed it.
+   */
+  onPartyChat: (line: WatchPartyChatDto) => void;
   onStatus: (status: 'connected' | 'disconnected' | 'connecting') => void;
   onReconnected: () => void;
 }
@@ -170,6 +197,10 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('typing:changed', events.onTyping);
   socket.on('voice:participants', events.onVoiceParticipants);
   socket.on('client:update-available', events.onUpdateAvailable);
+  socket.on('party:started', (state) => events.onPartyState(state, true));
+  socket.on('party:updated', (state) => events.onPartyState(state, false));
+  socket.on('party:ended', events.onPartyEnded);
+  socket.on('party:chat', events.onPartyChat);
   socket.on('server:restarting', () => events.onServerRestarting());
 
   return socket;
@@ -198,6 +229,114 @@ export function typingStart(channelId: string) {
 }
 export function typingStop(channelId: string) {
   socket?.emit('typing:stop', { channelId });
+}
+
+/**
+ * A full set of handlers that do nothing, to be spread and then overridden.
+ *
+ * For the watch party window, which is the same renderer bundle connected to
+ * the same server but interested in almost none of it: it draws no channels,
+ * no member list and no unread marks, so a message arriving is genuinely
+ * nothing it has to do. Spreading these and overriding the four it wants is
+ * both shorter and more honest than fourteen inline `() => {}`.
+ *
+ * It also has the right behaviour as this interface grows: an event added
+ * later is ignored by that window until somebody decides it should not be,
+ * rather than breaking its build for a feature it has no part in.
+ */
+export function idleEvents(): SocketEvents {
+  const ignore = () => {};
+  return {
+    onMessage: ignore,
+    onMessageUpdated: ignore,
+    onMessageDeleted: ignore,
+    onChannelActivity: ignore,
+    onMemberUpdated: ignore,
+    onRemoved: ignore,
+    onMention: ignore,
+    onPinChanged: ignore,
+    onReactionChanged: ignore,
+    onUserUpdated: ignore,
+    onGuildChanged: ignore,
+    onPresence: ignore,
+    onTyping: ignore,
+    onVoiceParticipants: ignore,
+    onUpdateAvailable: ignore,
+    onServerRestarting: ignore,
+    onPartyState: ignore,
+    onPartyEnded: ignore,
+    onPartyChat: ignore,
+    onStatus: ignore,
+    onReconnected: ignore,
+  };
+}
+
+/* ------------------------------------------------------------ watch party */
+
+/**
+ * Every party emit, acked.
+ *
+ * Acked rather than fire-and-forget because each of these can be refused --
+ * a guest pressing pause, a video removed by somebody who did not queue it, a
+ * party that ended while the click was in flight -- and a UI that assumed
+ * success would show the room a state the server never agreed to. The ack also
+ * carries the new state, which is what lets the window that asked update
+ * without waiting for the broadcast to come back round.
+ *
+ * Resolves to `{ ok: false }` rather than rejecting when there is no socket,
+ * so no caller has to wrap this in a try.
+ */
+function emitParty(event: string, payload: unknown): Promise<PartyAck> {
+  return new Promise((resolve) => {
+    if (!socket) return resolve({ ok: false });
+    // A server too old to know this event never answers, so the promise would
+    // hang and whatever awaited it would sit there. Socket.IO's own timeout
+    // turns that into an ordinary refusal.
+    socket
+      .timeout(5000)
+      .emit(event, payload, (err: unknown, ack: PartyAck | undefined) => {
+        resolve(err || !ack ? { ok: false } : ack);
+      });
+  });
+}
+
+export function partyStart(guildId: string, title: string) {
+  return emitParty('party:start', { guildId, title });
+}
+export function partyJoin(partyId: string) {
+  return emitParty('party:join', { partyId });
+}
+export function partyLeave(partyId: string) {
+  return emitParty('party:leave', { partyId });
+}
+export function partySync(partyId: string) {
+  return emitParty('party:sync', { partyId });
+}
+/** Asked once per window on the way up. See `party:current` in shared. */
+export function partyCurrent(guildId: string) {
+  return emitParty('party:current', { guildId });
+}
+export function partyQueue(
+  partyId: string,
+  video: { videoId: string; title: string; duration: number | null },
+) {
+  return emitParty('party:queue', { partyId, ...video });
+}
+export function partyUnqueue(partyId: string, itemId: string) {
+  return emitParty('party:unqueue', { partyId, itemId });
+}
+export function partyControl(
+  partyId: string,
+  action: WatchPartyActionName,
+  position?: number,
+) {
+  return emitParty('party:control', { partyId, action, position });
+}
+export function partyVideoEnded(partyId: string, itemId: string) {
+  return emitParty('party:video-ended', { partyId, itemId });
+}
+export function partySay(partyId: string, content: string) {
+  return emitParty('party:say', { partyId, content });
 }
 
 export function disconnectSocket() {

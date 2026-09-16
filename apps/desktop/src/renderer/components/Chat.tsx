@@ -59,6 +59,12 @@ import {
   VoicePanel,
 } from './Voice';
 import { Avatar } from './Avatar';
+import {
+  StartPartyModal,
+  WatchPartyPanel,
+  WatchPartySection,
+} from './WatchPartyPanel';
+import { useWatchParty } from '../watch-party';
 import { EmojiBrowser } from './EmojiBrowser';
 import { ReactionBar } from './ReactionBar';
 import { NetworkButton } from './NetworkStats';
@@ -412,6 +418,29 @@ export function Chat({
   // `leaveVoice` is a hoisted declaration below, and is only ever called from
   // an event, so it is assigned long before anything can press the key.
   const voice = useVoice(voiceSettings, keybinds, iAmMuted, leaveVoice);
+
+  /**
+   * The watch party, which this file barely touches.
+   *
+   * All of its state lives in the hook because nothing else writes any of it --
+   * the distinction the README draws about what can leave this component. What
+   * stays here is the two bits that are genuinely this window's: whether the
+   * naming dialog is open, and whether the separate window is up.
+   */
+  const party = useWatchParty(me.id);
+  const [startingParty, setStartingParty] = useState(false);
+  const [partyWindowOpen, setPartyWindowOpen] = useState(false);
+
+  // Main owns the window, so main is asked rather than guessed at: this client
+  // can be reopened with the party window still up from before.
+  useEffect(() => {
+    void bridge.isPartyWindowOpen().then(setPartyWindowOpen);
+    return bridge.onPartyWindowClosed(() => setPartyWindowOpen(false));
+  }, []);
+
+  const openPartyWindow = useCallback(() => {
+    void bridge.openPartyWindow().then(() => setPartyWindowOpen(true));
+  }, []);
 
   /**
    * What the voice panel says to hold, or null if nothing would work.
@@ -862,6 +891,7 @@ export function Chat({
     loadServerConfig();
 
     connectSocket({
+      ...party.handlers,
       onStatus: (s) => {
         setStatus(s);
         // Cleared on the way back up, so the label says "updating" only for
@@ -1051,11 +1081,29 @@ export function Chat({
         void loadMentions();
         // Same for pins: an event missed while offline cannot be replayed.
         setPinsVersion((v) => v + 1);
+        // A reconnect is a new socket and party rooms are per socket, so this
+        // is what puts us back in one -- and re-joins, because the server drops
+        // somebody from a party when their last connection goes.
+        party.resync();
       },
     });
 
     return () => disconnectSocket();
-  }, [applyUserUpdate, loadMembers, refreshGuilds, me.id]);
+  }, [applyUserUpdate, loadMembers, refreshGuilds, me.id, party.handlers, party.resync]);
+
+  /**
+   * Ask once whether a party is already running.
+   *
+   * The strip is drawn from broadcasts, and one that went out before this
+   * socket existed is one this client never heard -- so opening the app into an
+   * evening in progress would otherwise show nothing at all until somebody
+   * pressed play.
+   */
+  useEffect(() => {
+    const guildId = guilds[0]?.id;
+    if (status !== 'connected' || !guildId) return;
+    void party.discover(guildId);
+  }, [status, guilds, party.discover]);
 
   // Expire stale typing indicators (a client that died mid-type).
   useEffect(() => {
@@ -2792,9 +2840,42 @@ export function Chat({
                   })}
                 </>
               )}
+
+              {/* Below Voice rather than above it: the sections above are the
+                  server's furniture and this is tonight. */}
+              <WatchPartySection
+                party={party.party}
+                meId={me.id}
+                people={{ nameOfUser, imageOfUser }}
+                onStart={() => setStartingParty(true)}
+                onOpen={() => {
+                  // One click does the obvious thing for where you are: join
+                  // if you are not in it, and bring the window back if you are.
+                  if (party.iAmWatching) openPartyWindow();
+                  else void party.join().then((ok) => ok && openPartyWindow());
+                }}
+              />
             </div>
           ))}
         </div>
+
+        {/* Above the voice panel, and the same shape as it: both say "here is
+            something you are currently in", and one glance should answer it
+            for both without reading. */}
+        <WatchPartyPanel
+          party={party.party}
+          meId={me.id}
+          windowOpen={partyWindowOpen}
+          error={party.error}
+          onDismissError={party.clearError}
+          onJoin={() => void party.join().then((ok) => ok && openPartyWindow())}
+          onLeave={() => {
+            void party.leave();
+            void bridge.closePartyWindow();
+          }}
+          onOpenWindow={openPartyWindow}
+        />
+
         <VoicePanel
           voice={voice}
           channelName={voiceChannelObj?.name ?? ''}
@@ -3489,6 +3570,18 @@ export function Chat({
         onBan={askBan}
       />
       <ScreenPicker />
+      {startingParty && (
+        <StartPartyModal
+          onClose={() => setStartingParty(false)}
+          onStart={(title) => {
+            const guildId = guilds[0]?.id;
+            if (!guildId) return;
+            // The window opens on success rather than optimistically: a party
+            // that was refused should not leave an empty window behind.
+            void party.start(guildId, title).then((ok) => ok && openPartyWindow());
+          }}
+        />
+      )}
       {volumeFor && (
         <UserVolumeMenu
           name={nameOfUser(volumeFor.userId)}

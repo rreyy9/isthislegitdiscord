@@ -6,6 +6,19 @@ export type Action =
   | 'channel.write'
   | 'channel.manage'
   | 'voice.join'
+  /**
+   * Starting or joining a watch party.
+   *
+   * Its own name rather than `voice.join`, for the reason `message.react`
+   * is not `channel.write`: the two are indistinguishable today -- both are
+   * plain membership -- and the moment somebody wants a server where people
+   * may sit in voice but not start a party, that is a real question with a
+   * real answer, and a name is what lets it be answered in one line.
+   *
+   * Deliberately not admin-only. A channel is the server's furniture; a
+   * party is an evening, and anybody may have one.
+   */
+  | 'party.join'
   | 'message.moderate'
   | 'message.pin'
   /**

@@ -12,11 +12,19 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { fromNodeHeaders } from 'better-auth/node';
-import { compareVersions } from '@isthislegit/shared';
-import type { ConnectedClient, Message, PublicUser } from '@isthislegit/shared';
+import { compareVersions, MAX_PARTY_CHAT } from '@isthislegit/shared';
+import type {
+  ConnectedClient,
+  Message,
+  PublicUser,
+  WatchPartyAction,
+  WatchPartyState,
+} from '@isthislegit/shared';
 import { AUTH, type Auth } from '../auth/auth.factory';
 import { PermissionService } from '../auth/permission.guard';
 import { PrismaService } from '../prisma/prisma.service';
+import { WatchPartyService } from '../watchparty/watch-party.service';
+import { newId } from '../common/ids';
 import { allowedOrigins, isOriginAllowed } from '../common/cors';
 
 interface SocketData {
@@ -68,6 +76,7 @@ export class ChatGateway
     @Inject(AUTH) private readonly auth: Auth,
     private readonly permissions: PermissionService,
     private readonly prisma: PrismaService,
+    private readonly parties: WatchPartyService,
   ) {}
 
   /**
@@ -164,6 +173,11 @@ export class ChatGateway
     const next = (this.connections.get(data.userId) ?? 1) - 1;
     if (next <= 0) {
       this.connections.delete(data.userId);
+      // Their last window has gone, so they have left any party they were in.
+      // Deliberately not on every disconnect: somebody in a party has two
+      // sockets -- the main window and the party window -- and closing the
+      // party window is putting the video away, not leaving.
+      this.dropFromParties(data.userId);
       this.server.emit('presence:changed', {
         userId: data.userId,
         online: false,
@@ -321,6 +335,231 @@ export class ChatGateway
       userId,
       typing: false,
     });
+  }
+
+  /* ------------------------------------------------------- watch parties */
+
+  /**
+   * Every party change leaves by this one door.
+   *
+   * The state goes to everyone rather than to the watchers, because the strip
+   * in the sidebar -- who is watching, what is playing -- is drawn by people
+   * who have not joined. Same reach as `guild:changed`, same reason.
+   */
+  private announce(state: WatchPartyState, started = false) {
+    this.server.emit(started ? 'party:started' : 'party:updated', state);
+  }
+
+  /** Take one person out of every party they were in, and say so. */
+  private dropFromParties(userId: string) {
+    for (const { party, ended } of this.parties.dropUser(userId)) {
+      if (ended) {
+        this.server.emit('party:ended', {
+          guildId: party.guildId,
+          partyId: party.id,
+        });
+      } else {
+        this.announce(party);
+      }
+    }
+  }
+
+  /**
+   * Where a party's chat and nothing else is delivered.
+   *
+   * Per socket rather than per person: both of somebody's windows are in it,
+   * and the party window is the one that draws the lines.
+   */
+  private partyRoom(partyId: string) {
+    return `party:${partyId}`;
+  }
+
+  @SubscribeMessage('party:start')
+  async partyStart(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() body: { guildId: string; title: string },
+  ) {
+    const { userId } = socket.data as SocketData;
+    if (!(await this.permissions.canInGuild(userId, body.guildId, 'party.join'))) {
+      return { ok: false as const };
+    }
+
+    const { party, created } = this.parties.start(
+      body.guildId,
+      userId,
+      body.title || 'Watch party',
+    );
+    await socket.join(this.partyRoom(party.id));
+    this.announce(party, created);
+    return { ok: true as const, state: party };
+  }
+
+  @SubscribeMessage('party:join')
+  async partyJoin(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() body: { partyId: string },
+  ) {
+    const { userId } = socket.data as SocketData;
+    const existing = this.parties.byId(body.partyId);
+    if (!existing) return { ok: false as const };
+    if (!(await this.permissions.canInGuild(userId, existing.guildId, 'party.join'))) {
+      return { ok: false as const };
+    }
+
+    const already = existing.watchers.includes(userId);
+    const party = this.parties.join(body.partyId, userId);
+    if (!party) return { ok: false as const };
+
+    // The room every time, the broadcast only when the watcher list actually
+    // changed. A second window joining is not news to anybody else's sidebar.
+    await socket.join(this.partyRoom(party.id));
+    if (!already) this.announce(party);
+    return { ok: true as const, state: party };
+  }
+
+  @SubscribeMessage('party:leave')
+  async partyLeave(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() body: { partyId: string },
+  ) {
+    const { userId } = socket.data as SocketData;
+    const { party, ended } = this.parties.leave(body.partyId, userId);
+    if (!party) return { ok: false as const };
+
+    // Every socket of theirs, not just the one that asked: leaving in the main
+    // window has to stop the party window hearing chat as well.
+    for (const s of await this.server.in(`user:${userId}`).fetchSockets()) {
+      void s.leave(this.partyRoom(party.id));
+    }
+
+    if (ended) {
+      this.server.emit('party:ended', {
+        guildId: party.guildId,
+        partyId: party.id,
+      });
+    } else {
+      this.announce(party);
+    }
+    return { ok: true as const };
+  }
+
+  @SubscribeMessage('party:sync')
+  partySync(@MessageBody() body: { partyId: string }) {
+    const party = this.parties.byId(body.partyId);
+    // Answered in the ack, not broadcast: nobody else's screen changes because
+    // this laptop woke up or this window just opened.
+    return party ? { ok: true as const, state: party } : { ok: false as const };
+  }
+
+  @SubscribeMessage('party:current')
+  async partyCurrent(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() body: { guildId: string },
+  ) {
+    const { userId } = socket.data as SocketData;
+    if (!(await this.permissions.canInGuild(userId, body.guildId, 'party.join'))) {
+      return { ok: false as const };
+    }
+    // `ok` with no state means "there is no party", which a client has to be
+    // able to tell apart from "you may not ask".
+    const party = this.parties.byGuild(body.guildId);
+    return { ok: true as const, state: party ?? undefined };
+  }
+
+  @SubscribeMessage('party:queue')
+  partyQueue(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody()
+    body: { partyId: string; videoId: string; title: string; duration: number | null },
+  ) {
+    const { userId } = socket.data as SocketData;
+    // The one shape check the server makes. Everything else about a video is
+    // whatever YouTube says it is, but the id is interpolated straight into an
+    // embed URL by every client in the room.
+    if (!/^[\w-]{11}$/.test(String(body.videoId ?? ''))) {
+      return { ok: false as const };
+    }
+
+    const party = this.parties.queue(body.partyId, userId, {
+      videoId: body.videoId,
+      title: String(body.title ?? ''),
+      duration:
+        typeof body.duration === 'number' && Number.isFinite(body.duration)
+          ? body.duration
+          : null,
+    });
+    if (!party) return { ok: false as const };
+    this.announce(party);
+    return { ok: true as const, state: party };
+  }
+
+  @SubscribeMessage('party:unqueue')
+  partyUnqueue(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() body: { partyId: string; itemId: string },
+  ) {
+    const { userId } = socket.data as SocketData;
+    const party = this.parties.unqueue(body.partyId, userId, body.itemId);
+    if (!party) return { ok: false as const };
+    this.announce(party);
+    return { ok: true as const, state: party };
+  }
+
+  @SubscribeMessage('party:control')
+  partyControl(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody()
+    body: { partyId: string; action: WatchPartyAction; position?: number },
+  ) {
+    const { userId } = socket.data as SocketData;
+    const party = this.parties.control(
+      body.partyId,
+      userId,
+      body.action,
+      body.position,
+    );
+    // Null here is the non-host case, which the client already hides the
+    // controls for. Somebody reaching it has a socket and an idea.
+    if (!party) return { ok: false as const };
+    this.announce(party);
+    return { ok: true as const, state: party };
+  }
+
+  @SubscribeMessage('party:video-ended')
+  partyVideoEnded(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() body: { partyId: string; itemId: string },
+  ) {
+    const { userId } = socket.data as SocketData;
+    const party = this.parties.ended(body.partyId, userId, body.itemId);
+    if (!party) return { ok: false as const };
+    this.announce(party);
+    return { ok: true as const, state: party };
+  }
+
+  @SubscribeMessage('party:say')
+  partySay(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() body: { partyId: string; content: string },
+  ) {
+    const { userId } = socket.data as SocketData;
+    const party = this.parties.byId(body.partyId);
+    if (!party || !party.watchers.includes(userId)) return { ok: false as const };
+
+    const content = String(body.content ?? '').slice(0, MAX_PARTY_CHAT).trim();
+    if (!content) return { ok: false as const };
+
+    // Straight out to the room and kept nowhere. No row, no id to edit later,
+    // no backfill for somebody who joins in ten minutes: that is the whole of
+    // what "session-only" means, and it is why this does not touch Prisma.
+    this.server.to(this.partyRoom(party.id)).emit('party:chat', {
+      partyId: party.id,
+      id: newId(),
+      userId,
+      content,
+      at: new Date().toISOString(),
+    });
+    return { ok: true as const };
   }
 
   /* ----------------------------------------------- called by controllers */

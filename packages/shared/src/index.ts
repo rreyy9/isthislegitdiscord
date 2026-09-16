@@ -1002,6 +1002,100 @@ export type ConnectedClient = z.infer<typeof ConnectedClient>;
 /** The header a REST call carries its version in. */
 export const CLIENT_VERSION_HEADER = 'x-client-version';
 
+/* ------------------------------------------------------------ watch party */
+
+/**
+ * A watch party: a shared YouTube queue with one person driving it.
+ *
+ * None of this is in the database and none of it is meant to survive a
+ * restart. A party is somewhere people are, like a call, not something a
+ * server keeps -- so it lives in `WatchPartyService`'s map, the chat in it is
+ * gone when it ends, and a server that restarts simply ends every party rather
+ * than restoring one into a room that has moved on. That is also what keeps
+ * this feature out of `schema.prisma` entirely.
+ */
+export const WatchPartyVideo = z.object({
+  /** This queue entry. The same video queued twice is two entries. */
+  id: z.string(),
+  /** The eleven-character YouTube id. */
+  videoId: z.string(),
+  /**
+   * Best effort, and often just the video id: the title comes from YouTube's
+   * oEmbed endpoint, which the client asks for and may not get. A queue that
+   * draws ids is worse than one that draws titles and better than one that
+   * refuses to accept a video because a third party did not answer.
+   */
+  title: z.string(),
+  /** Seconds, or null when nobody has managed to find out yet. */
+  duration: z.number().nullable(),
+  /** Who queued it. They, and the host, are the two who may remove it. */
+  addedBy: z.string(),
+  addedAt: z.string(),
+});
+export type WatchPartyVideo = z.infer<typeof WatchPartyVideo>;
+
+/**
+ * Everything about a party, sent whole on every change.
+ *
+ * Whole rather than as deltas for the reason `reaction:changed` carries the
+ * whole pile: a client applying "the queue moved on by one" has to have had
+ * the right queue to start with, and one that just opened its window, or was
+ * asleep, has not. A state it can drop in place is correct however far behind
+ * it was, and this is a handful of rows for ten people.
+ */
+export const WatchPartyState = z.object({
+  id: z.string(),
+  guildId: z.string(),
+  title: z.string(),
+  /** Whoever is driving now, which is not always whoever started it. */
+  hostId: z.string(),
+  /** User ids, in the order they arrived -- which is the handover order. */
+  watchers: z.array(z.string()),
+  /** `queue[0]` is playing; everything after it is up next. */
+  queue: z.array(WatchPartyVideo),
+  playing: z.boolean(),
+  /**
+   * Where the video was at `positionAt`, in seconds.
+   *
+   * A position and the instant it was true, rather than a position that would
+   * be stale the moment it was sent. While `playing`, a client works out where
+   * the video is now by adding the time since; while paused, the pair is the
+   * answer on its own.
+   */
+  position: z.number(),
+  /** Server clock, milliseconds, when `position` was true. */
+  positionAt: z.number(),
+  /**
+   * The server's clock when it sent this, so a client can measure its own skew
+   * against it without a second round trip. `net:ping` exists and would do,
+   * but it is the network panel's, and a player that silently desynced because
+   * somebody's clock is four minutes fast is exactly the failure this feature
+   * cannot afford.
+   */
+  serverTime: z.number(),
+  startedAt: z.string(),
+});
+export type WatchPartyState = z.infer<typeof WatchPartyState>;
+
+/** A line in party chat. Session-only: never written down, never backfilled. */
+export const WatchPartyChatLine = z.object({
+  partyId: z.string(),
+  id: z.string(),
+  userId: z.string(),
+  content: z.string(),
+  at: z.string(),
+});
+export type WatchPartyChatLine = z.infer<typeof WatchPartyChatLine>;
+
+/** What the host may do to playback. Everyone else may do none of it. */
+export const WatchPartyAction = z.enum(['play', 'pause', 'seek', 'skip']);
+export type WatchPartyAction = z.infer<typeof WatchPartyAction>;
+
+export const MAX_PARTY_QUEUE = 100;
+export const MAX_PARTY_CHAT = 2000;
+/** Long enough for a title nobody would read twice, short enough to draw. */
+export const MAX_PARTY_TITLE = 60;
+
 /* ------------------------------------------------------- socket.io events */
 
 /** Server -> client. */
@@ -1136,6 +1230,31 @@ export interface ServerToClientEvents {
    * drops it, which is the whole reason new features arrive as new events.
    */
   'client:update-available': (payload: { version: string }) => void;
+  /**
+   * A watch party opened, changed, or ended.
+   *
+   * Three events rather than one with a discriminator, so the sidebar can
+   * treat "there is one now" and "the one you are in moved on" as the
+   * different things they are -- and so a client too old to know about parties
+   * drops all three, which is the whole of its compatibility story. It sees no
+   * party, joins nothing, and nothing it draws is wrong.
+   *
+   * `party:started` and `party:updated` go to everyone, not to the watchers:
+   * the strip in the sidebar says who is watching and what is playing, and it
+   * is drawn by people who have not joined. That is the same reach
+   * `guild:changed` has, and for the same reason.
+   */
+  'party:started': (state: WatchPartyState) => void;
+  'party:updated': (state: WatchPartyState) => void;
+  'party:ended': (payload: { guildId: string; partyId: string }) => void;
+  /**
+   * Somebody said something in a party.
+   *
+   * To the party's room and nowhere else, because unlike the state above,
+   * nobody outside the party draws this. Nothing keeps it: a client that was
+   * not connected missed it, which is what "session-only" means.
+   */
+  'party:chat': (line: WatchPartyChatLine) => void;
 }
 
 /** Client -> server. */
@@ -1144,6 +1263,60 @@ export interface ClientToServerEvents {
   'channel:leave': (payload: { channelId: string }) => void;
   'typing:start': (payload: { channelId: string }) => void;
   'typing:stop': (payload: { channelId: string }) => void;
+  /* ----------------------------------------------------------- party */
+  'party:start': (payload: { guildId: string; title: string }) => void;
+  /**
+   * Join, or -- for a socket belonging to somebody already in -- subscribe.
+   *
+   * Both, because a person in a party has two windows open and each is its own
+   * socket: the main one that joined, and the party window that opened after
+   * it. Membership is per person and idempotent; the room is per socket, so
+   * the second window asks for the same thing and gets only what it is missing.
+   */
+  'party:join': (payload: { partyId: string }) => void;
+  'party:leave': (payload: { partyId: string }) => void;
+  'party:queue': (payload: {
+    partyId: string;
+    videoId: string;
+    title: string;
+    duration: number | null;
+  }) => void;
+  'party:unqueue': (payload: { partyId: string; itemId: string }) => void;
+  'party:control': (payload: {
+    partyId: string;
+    action: WatchPartyAction;
+    /** Seconds, for `seek`. Ignored by every other action. */
+    position?: number;
+  }) => void;
+  'party:say': (payload: { partyId: string; content: string }) => void;
+  /**
+   * The video ran out. Sent by the host's player only.
+   *
+   * Everybody is watching the same thing and everybody's player reaches the
+   * end, so without the host check the queue would jump forward once per
+   * person in the room. `itemId` names the video that finished, which makes a
+   * report that arrives after somebody already skipped match nothing and do
+   * nothing.
+   */
+  'party:video-ended': (payload: { partyId: string; itemId: string }) => void;
+  /**
+   * "What is the state now?" -- asked by a party window that has just opened,
+   * and by any client that has just reconnected. Answered in the ack rather
+   * than broadcast: nobody else's screen changes because somebody's laptop
+   * woke up.
+   */
+  'party:sync': (payload: { partyId: string }) => void;
+  /**
+   * "Is there a party in this guild?" -- asked once by every window as it
+   * opens.
+   *
+   * Without it a client that launches into an evening already in progress sees
+   * nothing until the next state change, which could be an hour: the strip is
+   * drawn from broadcasts, and a broadcast that happened before this socket
+   * existed is one it never heard. Answers `{ ok: true }` with no state when
+   * there is simply no party, which is a different thing from being refused.
+   */
+  'party:current': (payload: { guildId: string }) => void;
 }
 
 export const SOCKET_PATH = '/socket.io';

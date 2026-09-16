@@ -1,6 +1,6 @@
 {
   "name": "@isthislegit/server-app",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "private": true,
   "description": "Desktop app for administering an isthislegit server",
   "author": {

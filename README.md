@@ -19,7 +19,8 @@ goes direct to the box; only signalling and the HTTP API go through the proxy.
 - [Running it](#running-it) · [The two installers](#the-two-installers)
 - [Updating the client](#updating-the-client) · [Older clients](#older-clients)
 - [Configuration](#configuration) · [Going public](#going-public) · [Database](#database) · [Backups](#backups) · [Retention](#retention)
-- [Voice quality](#voice-quality) · [AFK channels](#afk-channels) · [Mentions](#mentions) · [Pinned messages](#pinned-messages)
+- [Voice quality](#voice-quality) · [AFK channels](#afk-channels) · [Watch party](#watch-party)
+- [Mentions](#mentions) · [Pinned messages](#pinned-messages)
 - [Replies and forwards](#replies-and-forwards) · [Emoji and reactions](#emoji-and-reactions)
 - [Search](#search) · [Attachments](#attachments) · [API](#api) · [Tests](#tests) · [Logs](#logs)
 - [Decisions worth not re-litigating](#decisions-worth-not-re-litigating)
@@ -992,6 +993,158 @@ silent.
 
 ---
 
+## Watch party
+
+Anybody can start one from the sidebar. Everyone on the server sees it appear, can join
+it, and can queue YouTube videos into it; one person — the host — drives playback for the
+room. The video itself opens in **its own window**, so it can go on a second monitor while
+the chat stays where it was.
+
+**It is not in the database, and it is not meant to be.** A party is somewhere people are
+for an evening, like a call. The queue lives in a `Map` in `WatchPartyService`, the chat in
+it is broadcast and never written down, and a server restart ends every party rather than
+restoring one into a room that has gone to bed. Persisting it would buy a resumed playlist
+and cost a migration, a retention rule, a purge kind, and a backup carrying somebody's
+Tuesday. There is no `schema.prisma` change in this feature at all.
+
+**One party per guild**, because the map is keyed by guild id. Starting a second returns
+the first and joins you to it. The sidebar draws one strip, and "which party am I in" is
+not a question anybody should have to answer.
+
+**Anybody may start one.** The `+` on the section is live for every member, unlike Text and
+Voice above it where it is an admin's. A channel is the server's furniture; a party is an
+evening, and needing an admin present would mean no parties on the evenings they are out.
+It has its own permission, `party.join`, which is plain membership today — named separately
+for the reason `message.react` is not `channel.write`.
+
+### The player talks to YouTube without YouTube's script
+
+The obvious way to control an embed is `https://www.youtube.com/iframe_api`, and this app
+cannot have it. The renderer's CSP is `default-src 'self'` with **no `script-src`
+exception**, which is the rule that makes the deliberately broad `connect-src` safe: the
+renderer runs no code it did not ship with. Spending it on a video player would be a bad
+trade.
+
+So `youtube-player.ts` speaks the protocol that library speaks over the wire —
+`enablejsapi=1`, a repeated `listening` handshake, `command` frames out, `infoDelivery`
+frames back — and does the library's job itself. `frame-src` already allows the origin
+because message embeds use it, so **this feature changes no CSP directive**. Inbound
+messages are checked against the two YouTube origins and against the frame's own
+`contentWindow`, so nothing else on the page can drive the player by shouting at it.
+
+The cost is that the protocol is undocumented. The failure is handled rather than assumed
+away: if the handshake goes unanswered for ten seconds the window says the player is not
+answering and suggests the host skip, instead of showing a black rectangle forever.
+
+**The one thing to know before packaging.** `enablejsapi` wants an `origin` parameter
+naming the page sending commands. In dev the renderer is served over http and has a real
+one; in a packaged build it loads from `file://`, where `location.origin` is the string
+`"null"` and there is nothing truthful to send. The parameter is omitted in that case
+rather than sent as a lie. **That difference means dev and packaged are not the same test**
+— a party that works under `electron-vite dev` has not yet proved the packaged client
+works, and this is the first thing to check on a real build.
+
+### Keeping everyone on the same second
+
+The server holds the clock. Every state carries `position` and `positionAt` — where the
+video was, and when that was true — so a client works out where the room is now by adding
+the time since. Every state also carries `serverTime`, which is what each client measures
+its own clock skew against. Without it a machine four minutes fast computes four minutes of
+drift and seeks to the end of the video, repeatedly, and no amount of tolerance catches it.
+
+`watch-party-sync.ts` is pure arithmetic in its own file, with the tests, for the reason
+the noise gate and the URL parser are: it is the part most likely to be wrong.
+
+- **It seeks rather than nudging the playback rate.** The neat fix for drift is to run
+  slightly fast until it is gone, and it is not available: YouTube's player takes a rate
+  from a fixed list, and the nearest steps are 0.75x and 1.25x. Correcting a second of drift
+  at 1.25x is four seconds of chipmunk — far more noticeable than the jump it avoids.
+- **Tolerance is a generous 1.5s.** A second either way is invisible with ten people
+  talking over a video, and a tight threshold against a player that reports its position a
+  few times a second produces a seek loop, which is worse than being a second behind.
+- **A correction is followed by a three-second cooldown.** A seek is not instant: the player
+  reports its old position for a moment afterwards, and a correction computed from that
+  stale reading seeks again, and again. The cooldown is what makes a loop into one jump.
+- **Buffering is not drift.** A stalled player reports the position it stopped at, so every
+  second of the stall looks like another second behind, and seeking makes it re-buffer
+  somewhere new. So the answer to "does one person's stall pause the room" is no: they
+  catch up alone when their buffer fills.
+- **Only the host's player reports the end of a video.** Everybody reaches it, and without
+  that check the queue would jump forward once per person in the room. The event names the
+  video that finished, so a report arriving after somebody already skipped matches nothing.
+
+### Who may do what
+
+| | Host | Anyone in the party |
+|---|---|---|
+| Play, pause, seek, skip | yes | no |
+| Queue a video | yes | yes |
+| Remove their own queue entry | yes | yes |
+| Remove anybody's queue entry | yes | no |
+| Chat | yes | yes |
+| Their own volume | yes | yes |
+
+Guest controls are **dimmed, not hidden** — a control that vanishes leaves somebody
+wondering where it went, and one that is visibly not theirs says who it belongs to, which
+the line underneath then names. The host's remove button on somebody else's video is drawn
+in amber, so using a host's power never looks like removing your own.
+
+**The host is inherited, not elected.** If the host leaves, the longest-present watcher
+takes the controls — a rule that needs no dialog and no vote. The party ends when the last
+person leaves, because a party of nobody is a queue nothing is playing to.
+
+**Volume is per person and local.** The bar in the transport is the video's volume for you
+alone; nobody hears you change it. Per-person *voice* volume is unchanged and still lives
+in the sidebar, where it already was — see `enforceVolumes` in `voice.ts`, and note that it
+is a different mechanism entirely: LiveKit audio elements have an `el.volume` with known
+device-switch fragility, and a video inside an iframe has only a `setVolume` command.
+
+### The second window
+
+It is a real `BrowserWindow`, created by main and loading the same renderer bundle with
+`#party` on the URL. `App.tsx` branches on that before anything else, so there is no second
+Vite entry point, no second preload, and no second CSP.
+
+- **Main has to create it.** `setWindowOpenHandler` denies every `window.open` in this app
+  and hands the URL to the system browser, so a renderer opening its own window would open
+  it in Chrome. Both windows now share `confineToApp` and `loadRenderer`.
+- **It has its own socket, and that was already handled.** The gateway counts connections
+  per user rather than holding a boolean, so somebody with both windows open is one online
+  person with two sessions. Party membership is per *person*: it is dropped when their last
+  connection goes, so closing the party window is putting the video away, not leaving.
+- **`backgroundThrottling: false`, for the same reason as the main window and more
+  pressingly.** The drift correction is a renderer timer, and Chromium throttles those to
+  about one a second in a hidden window. A party window sitting behind a game is the normal
+  case here, not an edge one.
+- **`autoplayPolicy: 'no-user-gesture-required'`.** There is no click to carry a gesture
+  into a freshly opened window, and without it the first video of the evening sits paused
+  for everyone who did not press something.
+- **It saves its own rectangle**, in `settings.partyWindow`. The whole point of the window
+  is that it goes somewhere else, and reopening it on top of the chat it was moved off would
+  undo that every evening. `rememberBounds` and `watchBounds` now take which key they are
+  saving into, and each window has its own debounce timer — one shared timer would let a
+  drag of one window cancel the pending write of the other.
+- **Voice never enters it.** A join token sets LiveKit `identity` to the user id, and a
+  second window joining the same room as the same identity evicts the first. The call stays
+  in the main window and people talk over the video exactly as they already were.
+
+### What an older client sees
+
+Nothing, which is the intended answer. Parties arrive as five new events; a client that
+never registered a handler drops all of them, sees no strip, joins nothing, and draws
+nothing wrongly. There is deliberately **no message row** behind a party — an earlier sketch
+had "so-and-so started a watch party" posted into `#general`, which is exactly the shape the
+compatibility rules warn about: a message an old client draws blankly is a lie about what
+was said. The line in the sidebar is drawn from the event instead, so a build that has never
+heard of parties simply has no sidebar section.
+
+`party:current` exists for the same class of reason: the strip is drawn from broadcasts, and
+one that went out before a socket existed is one that socket never heard. Every window asks
+once on the way up, or launching into an evening already in progress would show nothing
+until somebody pressed play.
+
+---
+
 ## Mentions
 
 Type `@` in the composer and a list of members opens. Arrow keys move, Enter or Tab
@@ -1612,6 +1765,34 @@ it removes nothing it cannot prove is its own.
   never at risk — capture, Opus and the jitter buffer are native real-time threads.
 - **The gate meters a *clone* of the microphone track.** Metering the published one would
   read silence the moment the gate muted it, and the mic would never open again.
+
+**Watch party**
+
+- **It is in memory, not in the database.** A party is an evening, not a record: the queue
+  dies with the server, the chat in it is never written down, and the feature adds no
+  Prisma model at all. See [Watch party](#watch-party).
+- **The player is driven by postMessage, not by YouTube's script.** `default-src 'self'`
+  with no `script-src` exception is what makes the broad `connect-src` safe, and a video
+  player is not worth spending it on. `youtube-player.ts` speaks their widget protocol
+  directly; no CSP directive changed for this feature.
+- **`origin` is omitted rather than faked from `file://`.** Which means a party working in
+  `electron-vite dev` has not proved one works in a packaged build. First thing to check on
+  a real installer.
+- **Drift is corrected by seeking, never by playback rate.** YouTube's rate steps are 0.75x
+  and 1.25x, and four seconds of chipmunk is more noticeable than the jump it avoided.
+- **One person's buffering does not pause the room.** A stalled player reports the position
+  it stopped at, so treating that as drift seeks it somewhere new and makes it stall again.
+  They catch up alone.
+- **Only the host's player reports a video ending.** Everybody's reaches the end, and the
+  queue would otherwise advance once per person in the room.
+- **The host is inherited by the longest-present watcher.** No dialog, no vote, and the
+  party ends when the last person leaves.
+- **A party posts no message anywhere.** "So-and-so started a watch party" as a row in
+  `#general` is precisely the shape the compatibility rules warn about — a message an older
+  client draws blankly. It is drawn from the event instead, so an older client has no
+  sidebar section rather than a blank message.
+- **The party window never joins LiveKit.** `identity` is the user id, and a second window
+  joining the same room as the same identity evicts the first.
 
 **Storage and updates**
 

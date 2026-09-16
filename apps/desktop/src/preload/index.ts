@@ -273,6 +273,34 @@ const bridge = {
     };
   },
 
+  /* -------------------------------------------------------- watch party */
+
+  /**
+   * Open the watch party window, or focus the one that is already up.
+   *
+   * It has to be main that makes it: `setWindowOpenHandler` denies every
+   * `window.open` in this app and hands the URL to the system browser, so a
+   * renderer opening its own window would open it in Chrome.
+   */
+  openPartyWindow: (): Promise<boolean> => ipcRenderer.invoke('party:open'),
+  /** Used when leaving the party: the window has nothing left to show. */
+  closePartyWindow: (): Promise<boolean> => ipcRenderer.invoke('party:close'),
+  isPartyWindowOpen: (): Promise<boolean> => ipcRenderer.invoke('party:is-open'),
+  /**
+   * The party window was closed.
+   *
+   * Which is putting the video away, not leaving -- the strip in the sidebar
+   * stays, with a button to bring the window back. The main window listens so
+   * that button can say the right thing.
+   */
+  onPartyWindowClosed: (cb: () => void): (() => void) => {
+    const handler = () => cb();
+    ipcRenderer.on('party:window-closed', handler);
+    return () => {
+      ipcRenderer.off('party:window-closed', handler);
+    };
+  },
+
   /* ---------------------------------------------------------- clipboard */
 
   /**

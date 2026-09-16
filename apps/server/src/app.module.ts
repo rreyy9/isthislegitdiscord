@@ -19,6 +19,7 @@ import { StorageModule } from './storage/storage.module';
 import { UpdatesModule } from './updates/updates.module';
 import { MentionsModule } from './mentions/mentions.module';
 import { ChannelsModule } from './channels/channels.module';
+import { WatchPartyModule } from './watchparty/watch-party.module';
 import { SearchController } from './search/search.controller';
 
 @Module({
@@ -35,6 +36,7 @@ import { SearchController } from './search/search.controller';
     UpdatesModule,
     MentionsModule,
     ChannelsModule,
+    WatchPartyModule,
   ],
   controllers: [
     AppController,

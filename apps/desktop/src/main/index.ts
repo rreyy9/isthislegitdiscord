@@ -117,6 +117,17 @@ interface Settings {
   /** Restored on launch; see `restoreBounds` for why it is not trusted blindly. */
   window: WindowBounds;
   /**
+   * Where the watch party window was last put.
+   *
+   * Its own rectangle rather than sharing the main window's, because the whole
+   * point of that window is that it goes somewhere else -- a second monitor,
+   * the corner of a TV -- and reopening it on top of the chat it was moved off
+   * would undo that every evening. Never maximized on restore: the flag is
+   * kept for symmetry with `window` and because a maximized video window is a
+   * perfectly ordinary thing to want back.
+   */
+  partyWindow: WindowBounds;
+  /**
    * The voice channel this client was in when it last stopped, or null if it
    * left on purpose. Only acted on when `voice.rejoinLastChannel` is set.
    */
@@ -168,6 +179,9 @@ const MIN_HEIGHT = 480;
 const defaultSettings: Settings = {
   serverUrl: 'http://localhost:3000',
   window: { x: null, y: null, width: 1100, height: 740, maximized: false },
+  // Wider than it is tall, because it is a 16:9 picture with a 306px rail
+  // beside it. This is the smallest size where both still read.
+  partyWindow: { x: null, y: null, width: 1180, height: 680, maximized: false },
   lastVoiceChannelId: null,
   rejoinAfterUpdate: null,
   lastTextChannelId: null,
@@ -301,6 +315,10 @@ function loadSettings(): Settings {
       ...defaultSettings,
       ...stored,
       window: { ...defaultSettings.window, ...(stored.window ?? {}) },
+      partyWindow: {
+        ...defaultSettings.partyWindow,
+        ...(stored.partyWindow ?? {}),
+      },
       chatPositions:
         stored.chatPositions && typeof stored.chatPositions === 'object'
           ? stored.chatPositions
@@ -391,7 +409,13 @@ function intersectsEnough(
  * is what makes Electron centre the window, which is the right answer for "we
  * no longer know where this should go".
  */
-function restoreBounds(saved: WindowBounds) {
+function restoreBounds(
+  saved: WindowBounds,
+  min: { width: number; height: number } = {
+    width: MIN_WIDTH,
+    height: MIN_HEIGHT,
+  },
+) {
   const wanted = {
     x: Math.round(saved.x ?? 0),
     y: Math.round(saved.y ?? 0),
@@ -406,8 +430,8 @@ function restoreBounds(saved: WindowBounds) {
       ? screen.getPrimaryDisplay().workArea
       : screen.getDisplayMatching(wanted).workArea;
 
-  const width = Math.max(MIN_WIDTH, Math.min(wanted.width, area.width));
-  const height = Math.max(MIN_HEIGHT, Math.min(wanted.height, area.height));
+  const width = Math.max(min.width, Math.min(wanted.width, area.width));
+  const height = Math.max(min.height, Math.min(wanted.height, area.height));
 
   if (saved.x === null || saved.y === null) return { width, height };
 
@@ -426,9 +450,18 @@ function restoreBounds(saved: WindowBounds) {
  * that one write when the mouse stops; `close` flushes it, because the last
  * position is the one that matters and a pending timer dies with the process.
  */
-let boundsTimer: NodeJS.Timeout | null = null;
+/**
+ * One timer per window, not one for the app.
+ *
+ * The watch party window is dragged onto another monitor while the main window
+ * sits still, and a single shared timer would let the second window's move
+ * cancel the first window's pending write -- losing the position somebody just
+ * chose. Keyed by the settings field each window saves into.
+ */
+type BoundsKey = 'window' | 'partyWindow';
+const boundsTimers = new Map<BoundsKey, NodeJS.Timeout>();
 
-function rememberBounds(win: BrowserWindow) {
+function rememberBounds(win: BrowserWindow, key: BoundsKey = 'window') {
   if (win.isDestroyed() || win.isMinimized()) return;
   // getNormalBounds, not getBounds: while maximized the latter is the screen,
   // and saving that would leave nothing to un-maximize back to.
@@ -436,29 +469,34 @@ function rememberBounds(win: BrowserWindow) {
   const current = loadSettings();
   saveSettings({
     ...current,
-    window: { x, y, width, height, maximized: win.isMaximized() },
+    [key]: { x, y, width, height, maximized: win.isMaximized() },
   });
 }
 
-function watchBounds(win: BrowserWindow) {
+function watchBounds(win: BrowserWindow, key: BoundsKey = 'window') {
   const later = () => {
-    if (boundsTimer) clearTimeout(boundsTimer);
-    boundsTimer = setTimeout(() => {
-      boundsTimer = null;
-      rememberBounds(win);
-    }, 400);
+    const pending = boundsTimers.get(key);
+    if (pending) clearTimeout(pending);
+    boundsTimers.set(
+      key,
+      setTimeout(() => {
+        boundsTimers.delete(key);
+        rememberBounds(win, key);
+      }, 400),
+    );
   };
 
   win.on('resize', later);
   win.on('move', later);
   // Not debounced: these are single deliberate acts, and the flag they change
   // is the one thing `getNormalBounds` cannot tell us later.
-  win.on('maximize', () => rememberBounds(win));
-  win.on('unmaximize', () => rememberBounds(win));
+  win.on('maximize', () => rememberBounds(win, key));
+  win.on('unmaximize', () => rememberBounds(win, key));
   win.on('close', () => {
-    if (boundsTimer) clearTimeout(boundsTimer);
-    boundsTimer = null;
-    rememberBounds(win);
+    const pending = boundsTimers.get(key);
+    if (pending) clearTimeout(pending);
+    boundsTimers.delete(key);
+    rememberBounds(win, key);
   });
 }
 
@@ -514,6 +552,10 @@ function createWindow() {
   watchBounds(win);
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
+    // The party window is not a window anybody meant to keep: it has no way
+    // back to the app without the app, and an orphan of it would hold the
+    // process open with nothing to sign in to.
+    closePartyWindow();
   });
 
   // Looking at the window is the answer to "somebody wants your attention",
@@ -523,14 +565,59 @@ function createWindow() {
   // A link in a message is a URL a friend typed. Handing it to the OS browser
   // keeps it out of this window entirely -- otherwise `window.open` spawns an
   // Electron BrowserWindow with no address bar, which is both a bad way to
-  // browse and a good way to be phished. Only http(s) is passed on.
+  // browse and a good way to be phished. The same rule stops anything
+  // navigating the renderer away from our own page. Both windows get both:
+  // see `confineToApp`.
+  confineToApp(win);
+
+  loadRenderer(win);
+  if (isDev && process.env['ELECTRON_RENDERER_URL']) win.webContents.openDevTools();
+}
+
+/* ------------------------------------------------------------ party window */
+
+let partyWindow: BrowserWindow | null = null;
+
+/** The party window's floor. Below this the video and the rail stop coexisting. */
+const PARTY_MIN_WIDTH = 900;
+const PARTY_MIN_HEIGHT = 540;
+
+/**
+ * Load the renderer into a window, dev server or packaged file alike.
+ *
+ * Factored out because there are now two windows doing it and the dev/packaged
+ * split is exactly the sort of thing that gets fixed in one of them. `hash` is
+ * what the renderer reads to decide which app it is: `App.tsx` branches on it
+ * before anything else, so one bundle and one preload serve both windows and
+ * the build config needs no second entry point.
+ */
+function loadRenderer(win: BrowserWindow, hash = '') {
+  const devUrl = process.env['ELECTRON_RENDERER_URL'];
+  if (isDev && devUrl) {
+    void win.loadURL(devUrl + (hash ? `#${hash}` : ''));
+  } else {
+    void win.loadFile(join(__dirname, '../renderer/index.html'), {
+      hash: hash || undefined,
+    });
+  }
+}
+
+/**
+ * Keep a window inside our own page and send every outward link to the browser.
+ *
+ * The same two rules `createWindow` has always had, applied to both windows:
+ * `window.open` never spawns an Electron window with no address bar, and
+ * nothing navigates the renderer away from the app it is meant to be. Iframes
+ * are untouched by either -- a YouTube embed is not a top-level navigation --
+ * which is what lets the party window hold a player while still refusing to
+ * browse anywhere.
+ */
+function confineToApp(win: BrowserWindow) {
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  // Same rule for anything trying to navigate the window itself away from the
-  // app: the renderer should only ever show our own page.
   win.webContents.on('will-navigate', (event, url) => {
     const isApp =
       url.startsWith('file://') ||
@@ -541,16 +628,90 @@ function createWindow() {
       if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     }
   });
+}
 
-  if (isDev && process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(process.env['ELECTRON_RENDERER_URL']);
-    win.webContents.openDevTools();
-  } else {
-    win.loadFile(join(__dirname, '../renderer/index.html'));
+/**
+ * The watch party window.
+ *
+ * A second window rather than a panel in the main one, because that is the
+ * whole feature: the video goes on whatever screen somebody wants it on while
+ * the chat they were already reading stays where it was. It carries its own
+ * copy of the renderer, which means its own socket -- the gateway counts
+ * connections per user, so two of them is an ordinary thing that does not
+ * disturb presence.
+ *
+ * Reopening focuses the one that exists rather than making a second.
+ */
+function createPartyWindow() {
+  if (partyWindow && !partyWindow.isDestroyed()) {
+    if (partyWindow.isMinimized()) partyWindow.restore();
+    partyWindow.focus();
+    return;
   }
+
+  const saved = loadSettings().partyWindow;
+  const win = new BrowserWindow({
+    ...restoreBounds(saved, { width: PARTY_MIN_WIDTH, height: PARTY_MIN_HEIGHT }),
+    minWidth: PARTY_MIN_WIDTH,
+    minHeight: PARTY_MIN_HEIGHT,
+    backgroundColor: '#14161a',
+    title: 'Watch party',
+    icon: appIcon(),
+    // Not a child of the main window and not always-on-top: it is a window
+    // somebody arranges for themselves, and one that floats over everything
+    // else is a window nobody can put behind their game.
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.mjs'),
+      sandbox: false,
+      // Same reason as the main window, and more pressing here: the drift
+      // correction that keeps everyone on the same second is a renderer timer,
+      // and Chromium throttles those to about one a second in a hidden window.
+      // A party window behind a game is the normal case, not an edge one.
+      backgroundThrottling: false,
+      // The player is asked to autoplay and there is no click to carry a user
+      // gesture into a freshly opened window. Without this the first video of
+      // the evening sits paused for everyone who did not press something.
+      autoplayPolicy: 'no-user-gesture-required',
+    },
+  });
+
+  if (saved.maximized) win.maximize();
+
+  partyWindow = win;
+  watchBounds(win, 'partyWindow');
+  confineToApp(win);
+
+  win.on('closed', () => {
+    if (partyWindow === win) partyWindow = null;
+    // Closing the window is putting the video away, not leaving the party --
+    // the strip in the main window still says you are in it, with a button to
+    // bring this back. Leaving is its own act, and it has its own button.
+    mainWindow?.webContents.send('party:window-closed');
+  });
+
+  loadRenderer(win, 'party');
+}
+
+function closePartyWindow() {
+  if (partyWindow && !partyWindow.isDestroyed()) partyWindow.close();
+  partyWindow = null;
 }
 
 /* --------------------------------------------------------------------- ipc */
+
+ipcMain.handle('party:open', () => {
+  createPartyWindow();
+  return true;
+});
+ipcMain.handle('party:close', () => {
+  closePartyWindow();
+  return true;
+});
+ipcMain.handle(
+  'party:is-open',
+  () => partyWindow !== null && !partyWindow.isDestroyed(),
+);
+
 
 ipcMain.handle('settings:get', () => loadSettings());
 ipcMain.handle('settings:set', (_e, patch: Partial<Settings>) => {
