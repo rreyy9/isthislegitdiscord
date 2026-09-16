@@ -1594,6 +1594,15 @@ button { font-family: inherit; cursor: pointer; }
    who it belongs to -- which the line underneath then names. */
 .pw-ctl:disabled { opacity: .38; cursor: not-allowed; }
 .pw-volume { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Sits with the volume rather than with play and skip, because it belongs to
+   the same half of the bar: the things only this viewer changes. */
+.pw-ctl.cc {
+  font-size: 11px; font-weight: 700; letter-spacing: .06em; min-width: 34px;
+  color: var(--faint);
+}
+.pw-ctl.cc.on { color: #fff; background: var(--accent-dim); border-color: var(--accent); }
+.pw-ctl.cc:hover:not(:disabled) { color: var(--text); }
+.pw-ctl.cc.on:hover { background: var(--accent-dim); color: #fff; }
 /* `.slider` has no base rule of its own -- it has only ever been used inside a
    modal, which is where its width and accent colour come from. The party
    window is not a modal, so the accent is set here rather than left to
@@ -1627,11 +1636,23 @@ button { font-family: inherit; cursor: pointer; }
 }
 .pw-rail-head .n { color: var(--dim); }
 
-.pw-queue { max-height: 240px; overflow-y: auto; padding: 6px; }
+.pw-queue { max-height: 300px; overflow-y: auto; padding: 6px; }
 .pw-queue-empty, .pw-chat-empty {
   padding: 14px 10px; text-align: center; color: var(--faint); font-size: 12.5px;
 }
-.pw-q { display: flex; gap: 8px; padding: 7px 8px; border-radius: 7px; }
+/* Aligned to the top rather than centred: a title runs to two or three lines
+   and the picture belongs beside its first one, not floating halfway down. */
+.pw-q { display: flex; gap: 9px; padding: 8px; border-radius: 7px; align-items: flex-start; }
+.pw-q-thumb {
+  width: 88px; height: 50px; flex: none; position: relative;
+  border-radius: 4px; overflow: hidden; background: var(--panel2);
+}
+.pw-q-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pw-q-len {
+  position: absolute; right: 3px; bottom: 3px; background: rgba(0, 0, 0, .82);
+  color: #fff; font-size: 9.5px; border-radius: 2px; padding: 0 3px;
+  font-variant-numeric: tabular-nums;
+}
 .pw-q:hover { background: var(--panel); }
 .pw-q.playing { background: rgba(91, 141, 239, .13); }
 .pw-q-meta { min-width: 0; flex: 1; }
@@ -1639,9 +1660,12 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 9.5px; letter-spacing: .07em; text-transform: uppercase;
   color: var(--accent); font-weight: 600;
 }
+/* Wraps to as many lines as the title needs. It used to be one line with an
+   ellipsis, which on a 320px rail cut most titles in half -- and the thing
+   somebody is choosing between queue entries by is the title. */
 .pw-q-title {
-  font-size: 12.5px; color: var(--text);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12.5px; color: var(--text); line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 .pw-q.playing .pw-q-title { font-weight: 500; }
 .pw-q-by {
@@ -1649,7 +1673,7 @@ button { font-family: inherit; cursor: pointer; }
   gap: 5px; margin-top: 2px;
 }
 .pw-q-x {
-  align-self: center; background: none; border: none; color: var(--faint);
+  align-self: flex-start; background: none; border: none; color: var(--faint);
   font-size: 13px; padding: 2px 5px; border-radius: 4px; flex: none;
 }
 .pw-q-x:hover { color: var(--bad); background: var(--panel2); }

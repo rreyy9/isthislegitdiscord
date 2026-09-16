@@ -90,8 +90,8 @@ export interface Settings {
   lastTextChannelId: string | null;
   /**
    * Where the reader had got to in each text channel, as the id of the
-   * bottom-most message they could see. `chatPositions` is merged rather than
-   * replaced by `setSettings`, so one channel may be sent on its own.
+   * bottom-most message they could see. A channel read to the end has no
+   * entry. `setSettings` replaces this map wholesale, so always send all of it.
    */
   chatPositions: Record<string, string>;
   voice: VoiceSettings;

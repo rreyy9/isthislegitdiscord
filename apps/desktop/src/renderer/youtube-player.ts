@@ -93,6 +93,13 @@ export function embedUrl(videoId: string, startSeconds: number): string {
     autoplay: '1',
     fs: '1',
     modestbranding: '1',
+    // Captions on wherever the video has them. Deliberately a fixed part of
+    // the URL rather than something the toggle writes: `src` is an attribute
+    // React keeps in step with what it is given, and changing it reloads the
+    // iframe -- which is the bug that used to restart the video every time
+    // somebody touched the volume. So the URL carries the default and the
+    // toggle goes over postMessage, where it costs nothing.
+    cc_load_policy: '1',
   });
   if (startSeconds > 0) params.set('start', String(Math.floor(startSeconds)));
 
@@ -266,6 +273,26 @@ export class YouTubePlayer {
   /** 0..100, YouTube's scale. Local only -- nobody else hears this change. */
   setVolume(percent: number) {
     this.command('setVolume', [Math.round(Math.min(100, Math.max(0, percent)))]);
+  }
+
+  /**
+   * Turn captions on or off, for this viewer only.
+   *
+   * Both module names are sent because the player has had two: `captions` is
+   * the HTML5 one and `cc` was the old Flash player's. An unknown module is
+   * ignored, so sending both costs a message and covers whichever this embed
+   * turns out to be.
+   *
+   * There is no reply and no way to read the result back -- `infoDelivery`
+   * says nothing about captions -- so the button that calls this reflects what
+   * was asked for rather than what happened. That is honest for a preference
+   * whose failure mode is "the video has no subtitles", which is not something
+   * this app could fix anyway.
+   */
+  setCaptions(on: boolean) {
+    const module = on ? 'loadModule' : 'unloadModule';
+    this.command(module, ['captions']);
+    this.command(module, ['cc']);
   }
   mute() {
     this.command('mute');

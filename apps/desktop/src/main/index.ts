@@ -719,9 +719,11 @@ ipcMain.handle('settings:set', (_e, patch: Partial<Settings>) => {
   saveSettings({
     ...current,
     ...patch,
-    // Merged, not replaced: the renderer sends one channel's reading position
-    // at a time, and it has no business forgetting the others.
-    chatPositions: { ...current.chatPositions, ...(patch.chatPositions ?? {}) },
+    // Replaced, not merged: the renderer always sends its whole map, and a
+    // channel read to the end is recorded by *removing* its entry. A merge
+    // kept the old entry on disk, so the next launch reopened the channel
+    // scrolled up to it with the jump button showing.
+    chatPositions: patch.chatPositions ?? current.chatPositions,
     // The renderer has no reason to touch geometry — main owns it — but the
     // merge keeps a partial patch from erasing the half it did not send.
     window: { ...current.window, ...(patch.window ?? {}) },

@@ -1,6 +1,6 @@
 {
   "name": "@isthislegit/console",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Operator console: starts, stops and administers the chat server.",

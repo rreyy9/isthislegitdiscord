@@ -186,6 +186,16 @@ function PartyStage({
   const [elapsed, setElapsed] = useState(0);
   const [length, setLength] = useState<number | null>(null);
   const [volume, setVolume] = useState(70);
+  /**
+   * Captions, for this viewer only -- the same kind of thing as volume, and
+   * deliberately not room state. Two people watching the same video want
+   * different answers here, and neither is the host's to decide.
+   *
+   * Starts on, matching `cc_load_policy=1` in the embed URL, and lives on this
+   * component rather than per video: somebody who turned subtitles off once
+   * meant it for the evening, not for one clip.
+   */
+  const [captionsOn, setCaptionsOn] = useState(true);
 
   /**
    * Everything the sync loop reads, kept in a ref.
@@ -210,6 +220,10 @@ function PartyStage({
     const player = new YouTubePlayer(frame, {
       onReady: () => {
         player.setVolume(volume);
+        // The URL turns captions on for every video, so this only has to do
+        // something when the viewer has since turned them off. Re-applied per
+        // video because each one is a fresh player that never heard the toggle.
+        if (!captionsOn) player.setCaptions(false);
         // Where the room is *now*, not where it was when this window opened:
         // the frame takes a moment to load and the video did not wait.
         const target = positionNow(
@@ -251,6 +265,10 @@ function PartyStage({
   useEffect(() => {
     playerRef.current?.setVolume(volume);
   }, [volume]);
+
+  useEffect(() => {
+    playerRef.current?.setCaptions(captionsOn);
+  }, [captionsOn]);
 
   /* -------------------------------------------------------------- the sync */
 
@@ -463,6 +481,18 @@ function PartyStage({
             </button>
 
             <div className="pw-volume">
+              <button
+                className={'pw-ctl cc' + (captionsOn ? ' on' : '')}
+                onClick={() => setCaptionsOn((on) => !on)}
+                title={
+                  captionsOn
+                    ? 'Subtitles on — yours only, if this video has them'
+                    : 'Subtitles off — yours only'
+                }
+                aria-pressed={captionsOn}
+              >
+                CC
+              </button>
               <span title="Your volume. Nobody else hears this change.">🔊</span>
               <input
                 className="slider"
@@ -478,8 +508,8 @@ function PartyStage({
 
           <div className="pw-note">
             {isHost
-              ? 'Play, pause, seek and skip go out to everyone. Your volume does not.'
-              : `${nameOf(state.hostId)} controls playback. Volume is yours alone.`}
+              ? 'Play, pause, seek and skip go out to everyone. Volume and subtitles are yours alone.'
+              : `${nameOf(state.hostId)} controls playback. Volume and subtitles are yours alone.`}
           </div>
         </div>
       </div>
@@ -662,11 +692,27 @@ function QueueRow({
 }) {
   return (
     <div className={'pw-q' + (playing ? ' playing' : '')}>
+      {/* `mqdefault` is 320x180 and exists for every video; `maxres` does not,
+          and a missing one is a broken picture rather than a smaller one. The
+          host serves it over https, which `img-src` already allows because the
+          message embeds draw their posters from the same place. */}
+      <div className="pw-q-thumb">
+        <img
+          src={`https://i.ytimg.com/vi/${item.videoId}/mqdefault.jpg`}
+          alt=""
+          loading="lazy"
+        />
+        {/* Only when somebody actually knows. A queued video's length is not
+            something the client is told -- see the note on `duration`. */}
+        {item.duration !== null && (
+          <span className="pw-q-len">{formatDuration(item.duration)}</span>
+        )}
+      </div>
       <div className="pw-q-meta">
         {playing && <div className="pw-q-now">Now playing</div>}
-        <div className="pw-q-title" title={item.title}>
-          {item.title}
-        </div>
+        {/* No `title` tooltip: the whole title is on screen, so there is
+            nothing for a hover to reveal. */}
+        <div className="pw-q-title">{item.title}</div>
         <div className="pw-q-by">
           <Avatar className="tiny" name={addedByName} image={addedByImage} />
           {addedByName}

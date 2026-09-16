@@ -1082,7 +1082,7 @@ the noise gate and the URL parser are: it is the part most likely to be wrong.
 | Remove their own queue entry | yes | yes |
 | Remove anybody's queue entry | yes | no |
 | Chat | yes | yes |
-| Their own volume | yes | yes |
+| Their own volume and subtitles | yes | yes |
 
 Guest controls are **dimmed, not hidden** — a control that vanishes leaves somebody
 wondering where it went, and one that is visibly not theirs says who it belongs to, which
@@ -1093,10 +1093,29 @@ in amber, so using a host's power never looks like removing your own.
 takes the controls — a rule that needs no dialog and no vote. The party ends when the last
 person leaves, because a party of nobody is a queue nothing is playing to.
 
-**Volume is per person and local.** The bar in the transport is the video's volume for you
-alone; nobody hears you change it. Per-person *voice* volume is unchanged and still lives
-in the sidebar, where it already was — see `enforceVolumes` in `voice.ts`, and note that it
-is a different mechanism entirely: LiveKit audio elements have an `el.volume` with known
+**Volume and subtitles are per person and local.** The bar in the transport is the video's
+volume for you alone, and the **CC** button beside it is your subtitles — neither is room
+state, because two people watching the same video want different answers and neither answer
+is the host's to make. Both sit on the right-hand half of the transport for that reason.
+
+Captions start **on**, via `cc_load_policy=1` in the embed URL. The toggle is deliberately
+*not* in that URL: `src` is an attribute React keeps in step with what it is given, and
+changing it reloads the iframe — the bug that used to restart the video every time somebody
+touched the volume. So the URL carries the default and the toggle goes over postMessage,
+where it costs nothing. A new video is a fresh player that never heard the toggle, so the
+preference is re-applied on each one.
+
+**There is no quality setting, and that is not an oversight.** YouTube deprecated
+`setPlaybackQuality` in the iframe API — it is advisory and the player ignores it in favour
+of its own adaptive streaming. A quality menu here would be a menu that does not do
+anything, which is worse than no menu. The only real quality control is YouTube's own
+settings gear, and that arrives with `controls=1`, which would also hand every guest a
+scrubber and a pause button the host is supposed to own. Automatic quality is the trade;
+if it ever stops being the right one, the decision to revisit is `controls`, not a
+custom menu.
+
+Per-person *voice* volume is unchanged and still lives in the sidebar, where it already
+was — a different mechanism entirely: LiveKit audio elements have an `el.volume` with known
 device-switch fragility, and a video inside an iframe has only a `setVolume` command.
 
 ### The second window
@@ -1793,6 +1812,23 @@ it removes nothing it cannot prove is its own.
   sidebar section rather than a blank message.
 - **The party window never joins LiveKit.** `identity` is the user id, and a second window
   joining the same room as the same identity evicts the first.
+- **Volume and subtitles are per viewer; playback is per room.** Two people watching one
+  video want different subtitles, and neither answer belongs to the host.
+- **No quality menu.** `setPlaybackQuality` is deprecated and ignored by the player, so one
+  would be a control that does nothing. Real quality control means `controls=1`, which also
+  hands guests a scrubber — that is the trade to revisit, not a custom menu.
+- **Nothing that changes at runtime goes in the iframe `src`.** Setting `src` reloads the
+  frame. A start position computed from `Date.now()` during render once restarted the video
+  on every keystroke of the volume slider; the captions toggle deliberately avoids the same
+  shape by going over postMessage.
+- **A fresh iframe's `contentWindow` is same-origin `about:blank`.** Posting to it with
+  YouTube's target origin throws, synchronously, out through whatever called it — which is
+  how a play button silently does nothing. The handshake waits for `load`, and `post` never
+  throws into a caller.
+- **Party membership is per person; the socket room is per socket.** They are not the same
+  question, and conflating them is why the party window once looked perfectly connected and
+  received no chat at all: its owner was already a watcher via the main window, so it
+  skipped the join that would have put *it* in the room.
 
 **Storage and updates**
 
