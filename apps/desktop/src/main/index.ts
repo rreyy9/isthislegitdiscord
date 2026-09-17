@@ -55,6 +55,12 @@ interface VoiceSettings {
    * whether to listen to them.
    */
   pushToTalk: boolean;
+  /**
+   * How long push-to-talk keeps transmitting after the key comes up, in ms.
+   * People let go on the last syllable rather than after it, and a cut on the
+   * exact keyup takes the end of every sentence with it.
+   */
+  pttReleaseDelayMs: number;
   /* --- capture constraints, handed straight to getUserMedia --- */
   echoCancellation: boolean;
   noiseSuppression: boolean;
@@ -194,6 +200,9 @@ const defaultSettings: Settings = {
     inputDeviceId: null,
     outputDeviceId: null,
     pushToTalk: false,
+    // The one default that does change an upgraded call, deliberately: the
+    // instant cut it replaces was clipping everybody's last word.
+    pttReleaseDelayMs: 250,
     // Every new option defaults to exactly what the client did before it
     // existed, so an upgrade cannot change how anyone's call sounds until
     // they go and ask for it.

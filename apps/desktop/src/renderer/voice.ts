@@ -44,6 +44,14 @@ export interface VoicePeer {
   identity: string;
   name: string;
   speaking: boolean;
+  /**
+   * Muted by choice: the button, a held push-to-mute key, or an admin. Not
+   * "the microphone is off right now" -- that is also true of everybody on
+   * push-to-talk who is not holding the key and everybody the gate has shut,
+   * and a row that says muted about them is saying they cannot be heard when
+   * they are one keypress away from it. Carried as an attribute for the same
+   * reason deafen is; see `publishVoiceState`.
+   */
   muted: boolean;
   /**
    * Not something the SFU knows. Deafen is what somebody is doing with the
@@ -130,6 +138,11 @@ export interface VoiceSettings {
    * than one binding, so it could not live here.
    */
   pushToTalk: boolean;
+  /**
+   * How long push-to-talk keeps transmitting after the last key comes up, in
+   * ms. Pressing again inside it carries straight on.
+   */
+  pttReleaseDelayMs: number;
   echoCancellation: boolean;
   noiseSuppression: boolean;
   autoGainControl: boolean;
@@ -253,6 +266,17 @@ const METER_INTERVAL_MS = 20;
  * this is here to avoid.
  */
 const MIC_SETTLE_MS = 250;
+
+/**
+ * The push-to-talk release delay as it is used, whatever settings.json says.
+ * A second is already long enough to transmit a cough nobody meant to send;
+ * past that it is not a release delay, it is a toggle with a timer.
+ */
+export const PTT_RELEASE_DELAY_MAX_MS = 1000;
+const clampReleaseDelay = (ms: unknown) =>
+  typeof ms === 'number' && Number.isFinite(ms)
+    ? Math.min(Math.max(Math.round(ms), 0), PTT_RELEASE_DELAY_MAX_MS)
+    : 250;
 const MIC_SETTLE_TICKS = Math.max(
   Math.ceil(MIC_SETTLE_MS / METER_INTERVAL_MS),
   GATE_SEED_TICKS,
@@ -315,6 +339,19 @@ export function useVoice(
     ptt: new Set(),
     pushToMute: new Set(),
   });
+  /**
+   * The push-to-talk release window, while one is running. `talking` stays true
+   * through it; see the keybind handler.
+   */
+  const pttReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (pttReleaseTimerRef.current !== null) {
+        clearTimeout(pttReleaseTimerRef.current);
+      }
+    },
+    [],
+  );
   /** Same reason as the others: applyMic runs outside React's knowledge. */
   const serverMutedRef = useRef(serverMuted);
   serverMutedRef.current = serverMuted;
@@ -552,6 +589,25 @@ export function useVoice(
 
   /* ------------------------------------------------------ derived state */
 
+  /**
+   * What the mute icon means: somebody decided this person is not to be heard.
+   * Push-to-talk and the gate are left out on purpose -- see `VoicePeer.muted`.
+   */
+  const mutedByChoice = useCallback(
+    () =>
+      mutedRef.current ||
+      pushMutedRef.current ||
+      Boolean(serverMutedRef.current) ||
+      deafenedRef.current,
+    [],
+  );
+
+  /** The last voice state told to a room, so an unchanged one is not resent. */
+  const voiceStateSentRef = useRef<{ room: Room | null; key: string }>({
+    room: null,
+    key: '',
+  });
+
   const sync = useCallback(() => {
     // First, and above the room check: this is the half that has to be true,
     // and an element left over from a room that has gone is exactly the kind
@@ -570,7 +626,14 @@ export function useVoice(
       identity: p.identity,
       name: nameOf(p),
       speaking: speakingRef.current.get(p.identity) ?? p.isSpeaking,
-      muted: !p.isMicrophoneEnabled,
+      muted:
+        p === room.localParticipant
+          ? mutedByChoice()
+          : p.attributes?.muted !== undefined
+            ? p.attributes.muted === '1'
+            : // A client from before the attribute existed says nothing, and
+              // the old reading is the best there is for it.
+              !p.isMicrophoneEnabled,
       // Ours is read from the ref rather than the attribute we just published,
       // so the icon does not wait on a round trip to the server.
       deafened:
@@ -639,7 +702,8 @@ export function useVoice(
   }, [enforceVolumes, volumeFor]);
 
   /**
-   * Tell the channel whether we can hear it.
+   * Tell the channel whether we can hear it, and whether we have chosen not to
+   * be heard.
    *
    * An attribute rather than anything of LiveKit's own, because deafen is a
    * listener state and the SFU replicates what people send. The server holds
@@ -650,12 +714,25 @@ export function useVoice(
    * Never rejects: an indicator that did not update is not worth failing a
    * join over, and the room may be gone by the time the request lands.
    */
-  const publishDeafened = useCallback(async (room: Room | null) => {
-    if (!room) return;
-    await room.localParticipant
-      .setAttributes({ deafened: deafenedRef.current ? '1' : '' })
-      .catch(() => {});
-  }, []);
+  const publishVoiceState = useCallback(
+    async (room: Room | null, force = false) => {
+      if (!room) return;
+      const attrs = {
+        deafened: deafenedRef.current ? '1' : '',
+        // '0' rather than '' when unmuted: an absent attribute is how an older
+        // client is told apart, and '' would remove it.
+        muted: mutedByChoice() ? '1' : '0',
+      };
+      const key = `${attrs.deafened}|${attrs.muted}`;
+      // Asked on every trip through applyMic, which push-to-talk makes on
+      // every press, so it only goes to the server when something changed.
+      const last = voiceStateSentRef.current;
+      if (!force && last.room === room && last.key === key) return;
+      voiceStateSentRef.current = { room, key };
+      await room.localParticipant.setAttributes(attrs).catch(() => {});
+    },
+    [mutedByChoice],
+  );
 
   /* --------------------------------------------------------- mic policy */
 
@@ -675,6 +752,13 @@ export function useVoice(
    * put the microphone back on the air while every incoming track was still
    * silenced. Stated here it holds for push-to-talk and the gate alike,
    * because both of them come through this function and `liveNow`.
+   *
+   * Push-to-talk is not one of these rules any more, and must not become one
+   * again. It used to be, so a push-to-talk user had no microphone at all until
+   * the first press -- which then had to open the device, sit out the settle
+   * window and publish before a word could go out, and ate the first half
+   * second of whatever they said. The key is a question of whether the open
+   * track transmits, which is `liveNow`'s, exactly as the gate is.
    */
   const wantsTrackNow = useCallback(
     () =>
@@ -682,8 +766,7 @@ export function useVoice(
       !listenOnlyRef.current &&
       !mutedRef.current &&
       !pushMutedRef.current &&
-      !deafenedRef.current &&
-      (!settingsRef.current.pushToTalk || talkingRef.current),
+      !deafenedRef.current,
     [],
   );
 
@@ -802,6 +885,14 @@ export function useVoice(
     const room = roomRef.current;
     if (!room || room.state !== ConnectionState.Connected) return;
 
+    // Every rule that can mute somebody by choice comes through here, so this
+    // is the one place that keeps the channel's mute icon honest. Deduplicated,
+    // so a push-to-talk press costs nothing.
+    void publishVoiceState(room);
+    // Our own row reads the refs, and a mute with no track behind it -- push-
+    // to-talk never pressed yet -- raises no LiveKit event to redraw it.
+    sync();
+
     if (!wantsTrackNow()) {
       // Mutes rather than unpublishes -- that is what setMicrophoneEnabled(false)
       // does, and it is the behaviour worth having: the device stays open, so
@@ -835,7 +926,7 @@ export function useVoice(
     const transmit = liveNow() && micSettleRef.current === 0;
     if (transmit && track.isMuted) await track.unmute().catch(() => {});
     else if (!transmit && !track.isMuted) await track.mute().catch(() => {});
-  }, [liveNow, openMic, wantsTrackNow]);
+  }, [liveNow, openMic, publishVoiceState, sync, wantsTrackNow]);
 
   /**
    * Attach the level meter to whatever microphone track is current.
@@ -1190,7 +1281,7 @@ export function useVoice(
           applyVolumes();
           // A full reconnect rebuilds the participant from the join response,
           // so anything said before it has to be said again.
-          void publishDeafened(room);
+          void publishVoiceState(room, true);
           ensureMicMeter();
           sync();
           debugTrace('reconnected');
@@ -1243,7 +1334,7 @@ export function useVoice(
         // already deafened when they moved channel would arrive looking like
         // they could hear. Sent every join rather than only when deafened,
         // because the same is true of the state having been turned off.
-        void publishDeafened(room);
+        void publishVoiceState(room, true);
         ensureMicMeter();
         sync();
         debugTrace(`joined ${channelId}`);
@@ -1271,7 +1362,7 @@ export function useVoice(
       applyVolumes,
       ensureMicMeter,
       leave,
-      publishDeafened,
+      publishVoiceState,
       sync,
       teardownAudio,
       volumeFor,
@@ -1329,14 +1420,14 @@ export function useVoice(
         // Everything setDeafened(false) would have done, because this is that
         // -- the volumes have to come back up and the channel has to be told.
         applyVolumes();
-        void publishDeafened(roomRef.current);
+        void publishVoiceState(roomRef.current);
         sync();
       }
       debugSnapshot(`mute(${next}) applied`);
       await applyMic();
       debugTrace(`mute(${next}) mic done`);
     },
-    [applyMic, applyVolumes, publishDeafened, sync, debugSnapshot, debugTrace],
+    [applyMic, applyVolumes, publishVoiceState, sync, debugSnapshot, debugTrace],
   );
 
   const setDeafened = useCallback(
@@ -1356,7 +1447,7 @@ export function useVoice(
       }
       applyVolumes();
       // Nobody else can work this out for themselves, so it has to be said.
-      void publishDeafened(roomRef.current);
+      void publishVoiceState(roomRef.current);
       // The local half of the same fact. `sync` reads the ref rather than the
       // attribute, so this does not wait on the round trip.
       sync();
@@ -1364,7 +1455,7 @@ export function useVoice(
       await applyMic();
       debugTrace(`deafen(${next}) mic done`);
     },
-    [applyVolumes, applyMic, publishDeafened, sync, debugSnapshot, debugTrace],
+    [applyVolumes, applyMic, publishVoiceState, sync, debugSnapshot, debugTrace],
   );
 
   const toggleScreenShare = useCallback(async () => {
@@ -1536,6 +1627,28 @@ export function useVoice(
           const held = rows.size > 0;
 
           if (action === 'ptt') {
+            // A press inside the release window carries on as if the key had
+            // never come up, which is what somebody re-gripping it means.
+            if (pttReleaseTimerRef.current !== null) {
+              clearTimeout(pttReleaseTimerRef.current);
+              pttReleaseTimerRef.current = null;
+            }
+            const delay = clampReleaseDelay(
+              settingsRef.current.pttReleaseDelayMs,
+            );
+            if (!held && talkingRef.current && delay > 0) {
+              // Still talking until the window runs out. People let go on the
+              // last syllable, not after it, and cutting on the keyup itself
+              // takes the end of every sentence with it.
+              pttReleaseTimerRef.current = setTimeout(() => {
+                pttReleaseTimerRef.current = null;
+                if (heldRef.current.ptt.size > 0 || !talkingRef.current) return;
+                talkingRef.current = false;
+                setState((s) => ({ ...s, talking: false }));
+                void applyMic();
+              }, delay);
+              return;
+            }
             if (held === talkingRef.current) return;
             talkingRef.current = held;
             setState((s) => ({ ...s, talking: held }));
@@ -1597,6 +1710,10 @@ export function useVoice(
    */
   useEffect(() => {
     if (settings.pushToTalk) return;
+    if (pttReleaseTimerRef.current !== null) {
+      clearTimeout(pttReleaseTimerRef.current);
+      pttReleaseTimerRef.current = null;
+    }
     heldRef.current.ptt.clear();
     if (talkingRef.current) {
       talkingRef.current = false;

@@ -145,6 +145,7 @@ export function Chat({
     inputDeviceId: null,
     outputDeviceId: null,
     pushToTalk: false,
+    pttReleaseDelayMs: 250,
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,

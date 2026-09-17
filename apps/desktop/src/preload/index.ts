@@ -37,6 +37,8 @@ export interface VoiceSettings {
    * is `Settings.keybinds`, where the action may have several bindings.
    */
   pushToTalk: boolean;
+  /** How long push-to-talk keeps transmitting after the key comes up, in ms. */
+  pttReleaseDelayMs: number;
   /* --- capture constraints, handed straight to getUserMedia --- */
   echoCancellation: boolean;
   noiseSuppression: boolean;

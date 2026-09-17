@@ -20,6 +20,7 @@ import { ProfileSettings } from './ProfileSettings';
 import {
   listAudioDevices,
   noteScreenPickerCancelled,
+  PTT_RELEASE_DELAY_MAX_MS,
   type InputLevel,
   type Voice,
   type VoiceSettings,
@@ -783,6 +784,30 @@ export function SettingsModal({
                               ? 'Nothing bound yet — nothing will transmit.'
                               : 'Works while another window has focus.'}
                           </span>
+                        </div>
+                        <label className="row-label" htmlFor="ptt-release">
+                          Release delay:{' '}
+                          {settings.pttReleaseDelayMs === 0
+                            ? 'off'
+                            : `${settings.pttReleaseDelayMs} ms`}
+                        </label>
+                        <input
+                          id="ptt-release"
+                          className="slider"
+                          type="range"
+                          min={0}
+                          max={PTT_RELEASE_DELAY_MAX_MS}
+                          step={25}
+                          value={settings.pttReleaseDelayMs}
+                          onChange={(e) =>
+                            onChange({
+                              pttReleaseDelayMs: Number(e.target.value),
+                            })
+                          }
+                        />
+                        <div className="hint">
+                          Keeps transmitting this long after you let go, so the
+                          end of what you said is not cut off.
                         </div>
                         <div className="hint">
                           While push-to-talk is on it decides everything;
