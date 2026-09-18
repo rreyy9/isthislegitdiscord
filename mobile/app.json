@@ -8,7 +8,9 @@
     "userInterfaceStyle": "dark",
     "backgroundColor": "#1a1b1e",
     "newArchEnabled": true,
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "android": {
       "package": "com.isthislegit.mobile",
       "adaptiveIcon": {
@@ -21,6 +23,16 @@
       "./plugins/with-release-signing",
       "expo-router",
       "expo-secure-store",
+      "expo-video",
+      "expo-sharing",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "isthislegit needs access to your photos so you can send them in a channel.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
       [
         "expo-splash-screen",
         {

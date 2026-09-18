@@ -181,8 +181,8 @@ function checkToolchain() {
         '\n' +
         '      winget install --id Google.AndroidCLI -e\n' +
         '      android sdk install platform-tools\n' +
-        '      android sdk install "platforms;android-35"\n' +
-        '      android sdk install "build-tools;35.0.0"\n' +
+        '      android sdk install "platforms;android-36"\n' +
+        '      android sdk install "build-tools;36.0.0"\n' +
         '\n' +
         '    Open a new shell after the winget install, or android will not\n' +
         '    be on PATH yet. That CLI exits non-zero even when it succeeds,\n' +

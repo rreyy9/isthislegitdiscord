@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -13,7 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, ApiError } from '../src/api';
 import { useSession } from '../src/session';
-import { DEFAULT_SERVER_URL, normaliseServerUrl } from '../src/store';
+import { normaliseServerUrl, store } from '../src/store';
 import { CLIENT_VERSION } from '../src/version';
 import { radius, spacing, TAP_TARGET, theme } from '../src/theme';
 
@@ -22,31 +22,74 @@ import { radius, spacing, TAP_TARGET, theme } from '../src/theme';
  *
  * The server address is a field, not a constant, because this is a
  * self-hosted application and the whole point is that somebody else can run
- * one. It is prefilled with the deployment most people will want, so the
- * common case is two fields and a button.
+ * one. It is prefilled with the last server used, falling back to the
+ * deployment most people will want, so the common case is two fields and a
+ * button -- or, once remembered, just the button.
  *
  * "Check" is separate from "Sign in" on purpose. A wrong address and a wrong
  * password fail at the same moment and look identical, and the address is the
  * one somebody has no way to verify by memory -- so there is a button that
  * asks the server whether it is there, and answers in the field that would be
  * wrong.
+ *
+ * "Remember me" keeps the username and password in the keystore so the screen
+ * comes back filled in. It is not a second way of staying signed in -- the
+ * token already does that, for thirty days -- it is what makes the day the
+ * token lapses a single tap instead of a password typed on a phone keyboard.
+ * Which is also why it survives Sign out: signing out here means "not right
+ * now", not "forget me", and there is a tick box for the second thing.
  */
 
 type Mode = 'sign-in' | 'register';
 
 export default function SignIn() {
-  const { signIn, register } = useSession();
+  const { signIn, register, serverUrl: sessionServerUrl } = useSession();
   const insets = useSafeAreaInsets();
 
   const [mode, setMode] = useState<Mode>('sign-in');
-  const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL);
+  // The address the session already loaded from the store, not the compiled-in
+  // default: after a sign-out the field should still say where you were.
+  const [serverUrl, setServerUrl] = useState(sessionServerUrl);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [inviteCode, setInviteCode] = useState('');
+  const [remember, setRemember] = useState(false);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reachable, setReachable] = useState<string | null>(null);
+
+  /**
+   * Fill the form from whatever was remembered.
+   *
+   * The guard matters: reading the keystore is a round trip, and somebody who
+   * started typing during it is signing in as somebody else. Their keystrokes
+   * win.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const saved = await store.getLogin();
+      if (!saved || cancelled) return;
+      setRemember(true);
+      setUsername((current) => (current ? current : saved.username));
+      setPassword((current) => (current ? current : saved.password));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Unticking deletes the stored password now rather than at the next sign-in,
+   * which may never come. A box that says it has forgotten something it is
+   * still holding is the one behaviour this feature must not have.
+   */
+  function toggleRemember() {
+    const next = !remember;
+    setRemember(next);
+    if (!next) void store.clearLogin();
+  }
 
   const insecure = /^http:\/\//i.test(serverUrl.trim());
 
@@ -77,6 +120,13 @@ export default function SignIn() {
           password,
           inviteCode: inviteCode.trim().toUpperCase(),
         });
+      }
+      // Only after the server has accepted them. Remembering a rejected
+      // password means a prefilled form that fails every time it is used.
+      if (remember) {
+        await store.setLogin({ username: username.trim(), password });
+      } else {
+        await store.clearLogin();
       }
       // No navigation here: the gate in _layout.tsx watches the session and
       // moves once `me` is set. Routing from both places is how you get two
@@ -170,6 +220,22 @@ export default function SignIn() {
             />
           </Field>
         )}
+
+        <Pressable
+          onPress={toggleRemember}
+          style={styles.remember}
+          hitSlop={8}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: remember }}
+          accessibilityLabel="Remember me"
+        >
+          <View style={[styles.box, remember && styles.boxChecked]}>
+            {remember && <Text style={styles.tick}>✓</Text>}
+          </View>
+          <Text style={styles.rememberLabel}>
+            Remember me on this phone
+          </Text>
+        </Pressable>
 
         {error && <Text style={styles.error}>{error}</Text>}
         {reachable && <Text style={styles.ok}>{reachable}</Text>}
@@ -272,6 +338,31 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   checkLabel: { color: theme.textMuted, fontSize: 13, fontWeight: '600' },
+  remember: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    // The row is the tap target, not the 22pt square drawn inside it.
+    minHeight: TAP_TARGET,
+  },
+  box: {
+    width: 22,
+    height: 22,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: theme.border,
+    backgroundColor: theme.surfaceAlt,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  boxChecked: { backgroundColor: theme.accent, borderColor: theme.accent },
+  tick: {
+    color: theme.accentText,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 16,
+  },
+  rememberLabel: { color: theme.text, fontSize: 14 },
   warning: {
     color: theme.warning,
     fontSize: 12,

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useState } from 'react';
 import {
   Pressable,
   RefreshControl,
@@ -9,11 +9,11 @@ import {
 } from 'react-native';
 import { useRouter, useNavigation } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useLayoutEffect } from 'react';
 import { ConnectionBanner, UpdateBanner } from '../src/components/Banners';
 import { Avatar } from '../src/components/Avatar';
+import { useDrawer } from '../src/components/Drawer';
 import { useSession } from '../src/session';
-import { channelIcon, personName } from '../src/format';
+import { channelIcon } from '../src/format';
 import { radius, spacing, TAP_TARGET, theme } from '../src/theme';
 import type { Channel } from '../src/types';
 
@@ -26,10 +26,16 @@ import type { Channel } from '../src/types';
  * desktop sidebar draws -- two clients disagreeing about the order of the
  * channel list would be immediately obvious and immediately annoying.
  *
+ * Almost everything that used to be reachable only from here now lives in the
+ * drawer, which is reachable from inside a channel too. What this screen keeps
+ * is being the place the app opens to, and the place the back gesture comes
+ * back to -- so it is worth it being the same list, rather than a home screen
+ * that shows something else.
+ *
  * Voice channels are listed but not joinable. They are drawn rather than
  * filtered out because a channel list that silently omits half the channels
- * looks like a sync bug; drawn and dimmed, it reads as "not yet", which is
- * what it is.
+ * looks like a sync bug; drawn and dimmed, it reads as "not yet", which is what
+ * it is.
  */
 
 export default function Channels() {
@@ -41,10 +47,13 @@ export default function Channels() {
     status,
     restarting,
     update,
-    signOut,
+    isUnread,
+    mentionsIn,
+    totalMentions,
   } = useSession();
   const router = useRouter();
   const navigation = useNavigation();
+  const drawer = useDrawer();
   const insets = useSafeAreaInsets();
 
   const [refreshing, setRefreshing] = useState(false);
@@ -52,13 +61,37 @@ export default function Channels() {
 
   useLayoutEffect(() => {
     navigation.setOptions({
+      headerLeft: () => (
+        <Pressable
+          onPress={drawer.open}
+          hitSlop={12}
+          style={styles.headerButton}
+          accessibilityRole="button"
+          accessibilityLabel={
+            totalMentions > 0
+              ? `Open menu, ${totalMentions} unread mentions`
+              : 'Open menu'
+          }
+        >
+          <Text style={styles.headerGlyph}>☰</Text>
+          {/* The badge is on the button rather than only inside the menu: the
+              whole point of a count is being seen without opening anything. */}
+          {totalMentions > 0 && <View style={styles.headerDot} />}
+        </Pressable>
+      ),
       headerRight: () => (
-        <Pressable onPress={signOut} hitSlop={12} style={styles.signOut}>
-          <Text style={styles.signOutLabel}>Sign out</Text>
+        <Pressable
+          onPress={() => router.push('/search')}
+          hitSlop={12}
+          style={styles.headerButton}
+          accessibilityRole="button"
+          accessibilityLabel="Search"
+        >
+          <Text style={styles.headerGlyph}>🔍</Text>
         </Pressable>
       ),
     });
-  }, [navigation, signOut]);
+  }, [navigation, drawer, router, totalMentions]);
 
   const sections = useMemo(
     () =>
@@ -69,8 +102,8 @@ export default function Channels() {
     [guilds],
   );
 
-  const onlineMembers = useMemo(
-    () => members.filter((m) => onlineIds.has(m.user.id)),
+  const onlineCount = useMemo(
+    () => members.filter((m) => onlineIds.has(m.user.id)).length,
     [members, onlineIds],
   );
 
@@ -87,7 +120,7 @@ export default function Channels() {
   const open = useCallback(
     (channel: Channel) => {
       if (channel.kind !== 'TEXT') return;
-      router.push(`/channel/${channel.id}`);
+      router.push(`/channel/${channel.id}` as never);
     },
     [router],
   );
@@ -117,23 +150,29 @@ export default function Channels() {
         }
         ListHeaderComponent={
           me ? (
-            <View style={styles.meRow}>
+            <Pressable
+              style={({ pressed }) => [styles.meRow, pressed && styles.pressed]}
+              onPress={drawer.open}
+              accessibilityRole="button"
+              accessibilityLabel="Open menu"
+            >
               <Avatar
                 userId={me.id}
                 name={me.displayName || me.username || '?'}
                 image={me.image}
                 size={36}
-                online
+                online={status === 'connected'}
               />
               <View style={styles.meText}>
                 <Text style={styles.meName} numberOfLines={1}>
                   {me.displayName || me.username}
                 </Text>
                 <Text style={styles.meMeta} numberOfLines={1}>
-                  {onlineMembers.length} online
+                  {onlineCount} online
                 </Text>
               </View>
-            </View>
+              <Text style={styles.meChevron}>›</Text>
+            </Pressable>
           ) : null
         }
         ListEmptyComponent={
@@ -148,24 +187,39 @@ export default function Channels() {
         )}
         renderItem={({ item }) => {
           const text = item.kind === 'TEXT';
+          const unread = text && isUnread(item.id);
+          const tags = text ? mentionsIn(item.id) : 0;
+
           return (
             <Pressable
               onPress={() => open(item)}
               disabled={!text}
               style={({ pressed }) => [
                 styles.channel,
-                pressed && text && styles.channelPressed,
+                pressed && text && styles.pressed,
               ]}
               accessibilityRole="button"
-              accessibilityLabel={`${item.name}${text ? '' : ', voice channel, not supported yet'}`}
+              accessibilityLabel={
+                `${item.name}${text ? '' : ', voice channel, not supported yet'}` +
+                (tags ? `, ${tags} unread mentions` : unread ? ', unread' : '')
+              }
             >
               <Text style={styles.channelIcon}>{channelIcon(item)}</Text>
               <Text
-                style={[styles.channelName, !text && styles.channelDisabled]}
+                style={[
+                  styles.channelName,
+                  !text && styles.channelDisabled,
+                  unread && styles.channelUnread,
+                ]}
                 numberOfLines={1}
               >
                 {item.name}
               </Text>
+              {tags > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>{tags > 99 ? '99+' : tags}</Text>
+                </View>
+              )}
               {!text && <Text style={styles.soon}>voice</Text>}
             </Pressable>
           );
@@ -177,6 +231,27 @@ export default function Channels() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: theme.bg },
+  pressed: { backgroundColor: theme.surfaceAlt },
+
+  headerButton: {
+    minWidth: TAP_TARGET,
+    height: TAP_TARGET,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerGlyph: { color: theme.text, fontSize: 18 },
+  headerDot: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 9,
+    height: 9,
+    borderRadius: radius.pill,
+    backgroundColor: theme.danger,
+    borderWidth: 1,
+    borderColor: theme.surface,
+  },
+
   meRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -188,6 +263,8 @@ const styles = StyleSheet.create({
   meText: { flex: 1 },
   meName: { color: theme.text, fontSize: 15, fontWeight: '600' },
   meMeta: { color: theme.textMuted, fontSize: 12 },
+  meChevron: { color: theme.textFaint, fontSize: 20 },
+
   sectionHeader: {
     color: theme.textMuted,
     fontSize: 11,
@@ -208,10 +285,22 @@ const styles = StyleSheet.create({
     marginHorizontal: spacing.sm,
     borderRadius: radius.sm,
   },
-  channelPressed: { backgroundColor: theme.surfaceAlt },
   channelIcon: { color: theme.textFaint, fontSize: 15, width: 20 },
-  channelName: { color: theme.text, fontSize: 15, flex: 1 },
+  channelName: { color: theme.textMuted, fontSize: 15, flex: 1 },
+  // Unread is weight and colour rather than a dot in the margin: the whole row
+  // is the thing being scanned, and a bold row is legible at arm's length in a
+  // way a four-pixel dot is not.
+  channelUnread: { color: theme.text, fontWeight: '700' },
   channelDisabled: { color: theme.textFaint },
+  badge: {
+    minWidth: 20,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: radius.pill,
+    backgroundColor: theme.danger,
+    alignItems: 'center',
+  },
+  badgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   soon: {
     color: theme.textFaint,
     fontSize: 10,
@@ -224,6 +313,4 @@ const styles = StyleSheet.create({
     marginTop: spacing.xl,
     fontSize: 14,
   },
-  signOut: { paddingHorizontal: spacing.sm },
-  signOutLabel: { color: theme.accent, fontSize: 14 },
 });

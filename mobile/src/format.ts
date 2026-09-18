@@ -109,57 +109,6 @@ export function describeBytes(bytes: number): string {
 
 /* ------------------------------------------------------------- mentions */
 
-/** One run of a message: ordinary text, or somebody's name. */
-export type MessagePart =
-  | { kind: 'text'; text: string }
-  | { kind: 'mention'; text: string; userId: string; isMe: boolean };
-
-/**
- * Split a message into what should be drawn plainly and what should be drawn
- * as a tag.
- *
- * Returning parts rather than a string, because on this platform a tag is a
- * differently-styled `<Text>` inside the message body rather than a class on a
- * span -- there is no stylesheet to hand it to afterwards.
- *
- * An id with no name is drawn as `@unknown` rather than left as `<@abc123>`.
- * Both are wrong, but one of them reads as a person who has left and the other
- * reads as the app being broken. It happens for real: somebody kicked from the
- * guild is still tagged in every message that tagged them.
- */
-export function splitMentions(
-  content: string,
-  nameFor: (userId: string) => string | null,
-  meId: string,
-): MessagePart[] {
-  const parts: MessagePart[] = [];
-  let last = 0;
-
-  // `matchAll` rather than `exec` in a loop: the pattern is module-level and
-  // global, so a shared `lastIndex` would make two callers interfere.
-  for (const m of content.matchAll(MENTION_RE)) {
-    const at = m.index ?? 0;
-    if (at > last) parts.push({ kind: 'text', text: content.slice(last, at) });
-
-    const userId = m[1];
-    parts.push({
-      kind: 'mention',
-      text: `@${nameFor(userId) ?? 'unknown'}`,
-      userId,
-      isMe: userId === meId,
-    });
-    last = at + m[0].length;
-  }
-
-  if (last < content.length) {
-    parts.push({ kind: 'text', text: content.slice(last) });
-  }
-  // A message that was only a tag produces no trailing text part, and one that
-  // was empty produces nothing at all -- which the caller draws as a blank
-  // line rather than crashing on `parts[0]`.
-  return parts;
-}
-
 /** Whether a message tagged this person, for the highlight behind it. */
 export function mentionsMe(
   message: { mentions?: string[]; content: string },
@@ -201,3 +150,131 @@ export function groupsWith(
     new Date(message.createdAt).getTime() - new Date(previous.createdAt).getTime();
   return gap >= 0 && gap < GROUP_WINDOW_MS;
 }
+
+/**
+ * Tags resolved to names, for somewhere there is no room to draw a pill.
+ *
+ * The reply strip, the pin board's one-line summaries, the tag notice: all
+ * three are plain strings in a `<Text numberOfLines={1}>`, and a raw `<@abc123>`
+ * sitting in one is an id shown to a human being. Somebody the client cannot
+ * identify keeps their marker rather than being blanked -- see `toPlain` in
+ * mention-utils, which does the same for the edit box and for the same reason.
+ */
+export function plainMentions(
+  content: string,
+  nameFor: (userId: string) => string | null,
+): string {
+  return content.replace(MENTION_RE, (whole, id: string) => {
+    const name = nameFor(id);
+    return name ? `@${name}` : whole;
+  });
+}
+
+/**
+ * How long a quoted message reads as one line.
+ *
+ * The desktop client cuts at 160, where the strip is the width of a window.
+ * Here it is the width of a phone, so the same 160 characters is four lines of
+ * text that will be clipped to one anyway -- and a four-thousand-character
+ * message quoted in full is four thousand characters carried around by a
+ * control that shows perhaps fifty of them.
+ */
+export const QUOTE_LINE_CHARS = 100;
+
+/**
+ * A quoted message as a single line: what a reply's strip says, what the
+ * "Replying to" bar above the composer says, and what a tag notice previews.
+ *
+ * Takes text that has already had its tags resolved -- `plainMentions` above --
+ * because this file is the one with no knowledge of who anybody is, and keeping
+ * it that way is what makes it testable without a member list.
+ *
+ * The three cases are the three things a quoted message can be. Words win when
+ * there are any. A message that was only a screenshot has to say so, or the
+ * strip is a blank space that reads as a bug. A deleted one says that instead
+ * of nothing, because a reply to nothing looks like a reply that lost its
+ * point, and the point is that somebody removed it.
+ */
+export function quoteLine(
+  plainContent: string,
+  attachmentCount: number,
+  deleted: boolean,
+  limit = QUOTE_LINE_CHARS,
+): string {
+  if (deleted) return 'Message deleted';
+  // Newlines and runs of spaces collapse: this is one line, and a quoted
+  // message with a blank line in it would otherwise be quoted as a gap.
+  const text = plainContent.replace(/\s+/g, ' ').trim();
+  if (text) {
+    return text.length > limit
+      ? `${text.slice(0, limit - 1).trimEnd()}…`
+      : text;
+  }
+  if (attachmentCount > 0) {
+    return attachmentCount === 1 ? '📎 Attachment' : `📎 ${attachmentCount} attachments`;
+  }
+  // Nothing to show and nothing removed. Reachable only for a forwarded
+  // message with neither words nor files, which the server refuses to create;
+  // a strip saying so beats one that is empty.
+  return 'Message';
+}
+
+/**
+ * One pile of reactions, as this file sees it: structurally the same type as
+ * `Reaction` in types.ts, redeclared so this module keeps its no-imports
+ * promise. TypeScript asks for nothing more.
+ */
+export interface ReactionPile {
+  emoji: string;
+  userIds: string[];
+}
+
+/**
+ * What the reaction row should look like the instant somebody taps, before the
+ * server has said anything.
+ *
+ * Pure, and here rather than inline in the handler, because the awkward cases
+ * are the ones nobody thinks to check by hand: taking back the only reaction in
+ * a pile has to remove the pile rather than leave an empty one, and adding an
+ * emoji nobody has used yet has to go at the end rather than anywhere that
+ * would make the existing piles jump under a thumb already moving towards one.
+ *
+ * The guess is replaced wholesale by the server's answer a moment later, which
+ * is why it can afford to be optimistic: the worst it can be is briefly wrong
+ * about somebody else's tap, and that corrects itself.
+ */
+export function guessReactions(
+  reactions: ReactionPile[],
+  emoji: string,
+  mine: boolean,
+  meId: string,
+): ReactionPile[] {
+  if (mine) {
+    return reactions
+      .map((r) =>
+        r.emoji === emoji
+          ? { ...r, userIds: r.userIds.filter((id) => id !== meId) }
+          : r,
+      )
+      // The last person taking theirs back takes the pile with it.
+      .filter((r) => r.userIds.length > 0);
+  }
+
+  if (reactions.some((r) => r.emoji === emoji)) {
+    return reactions.map((r) =>
+      // Guarded, because the tap that got here believed it was not mine and two
+      // devices can disagree. Adding a second copy of one id would show a count
+      // nobody can take back down.
+      r.emoji === emoji && !r.userIds.includes(meId)
+        ? { ...r, userIds: [...r.userIds, meId] }
+        : r,
+    );
+  }
+
+  // New to the message: at the end, which is where the server will put it too
+  // -- piles are ordered by when they were first added.
+  return [...reactions, { emoji, userIds: [meId] }];
+}
+
+/** "Today at 14:32", "12 March at 09:10". What a message out of order needs. */
+export const stamp = (iso: string): string => `${dayLabel(iso)} at ${timeOf(iso)}`;

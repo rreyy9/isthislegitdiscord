@@ -1,7 +1,17 @@
-import { useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Animated,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { downloadUpdate } from '../updates';
-import { spacing, theme } from '../theme';
+import { useSession } from '../session';
+import { radius, spacing, theme } from '../theme';
 import type { Status } from '../session';
 
 /**
@@ -153,4 +163,128 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.75)',
     fontSize: 15,
   },
+
+  notice: {
+    // Absolute, over whatever screen is showing. A tag can arrive while any of
+    // them is open, and a strip that pushed the conversation down would move
+    // the message somebody is in the middle of reading.
+    position: 'absolute',
+    left: spacing.sm,
+    right: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.mentionBorder,
+    // Android draws nothing for a shadow without this, and a card floating over
+    // a conversation with no separation from it reads as part of the page.
+    elevation: 8,
+  },
+  noticeBody: { flex: 1 },
+  noticeHead: {
+    color: theme.mentionBorder,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  noticeText: {
+    color: theme.text,
+    fontSize: 13,
+    marginTop: 2,
+  },
 });
+
+/* ---------------------------------------------------------- the notice */
+
+/** How long a tag notice stays before it takes itself away. */
+const NOTICE_MS = 6000;
+
+/**
+ * The strip that says somebody tagged you, in a channel you are not reading.
+ *
+ * This is the phone's answer to the desktop client's ping: a sound and a
+ * flashing taskbar entry have no equivalent here, and a real push notification
+ * needs server infrastructure that does not exist yet -- a device-token table, a
+ * registration route, and a hook in `notifyMentions`. So this only ever happens
+ * while the app is open, which is exactly when the desktop ping happens too.
+ *
+ * Tapping it goes to the message, not just the channel. Being told somebody said
+ * your name and then having to find where is the half-feature worth avoiding.
+ *
+ * It dismisses itself, and that is the difference between this and every other
+ * strip in this file. The connection banner describes a state and goes when the
+ * state does; this describes an event that has already happened, and a strip
+ * about a message from four minutes ago sitting over the conversation is
+ * clutter that has to be cleared by hand.
+ */
+export function MentionNotice() {
+  const { notice, dismissNotice } = useSession();
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const slide = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (!notice) return;
+
+    slide.setValue(0);
+    Animated.timing(slide, {
+      toValue: 1,
+      duration: 180,
+      useNativeDriver: true,
+    }).start();
+
+    const timer = setTimeout(dismissNotice, NOTICE_MS);
+    // Cleared on the way out, so a second tag arriving four seconds into the
+    // first one's life does not inherit its two remaining seconds.
+    return () => clearTimeout(timer);
+  }, [notice, dismissNotice, slide]);
+
+  if (!notice) return null;
+
+  return (
+    <Animated.View
+      style={[
+        styles.notice,
+        {
+          top: insets.top + spacing.sm,
+          opacity: slide,
+          transform: [
+            {
+              translateY: slide.interpolate({
+                inputRange: [0, 1],
+                outputRange: [-16, 0],
+              }),
+            },
+          ],
+        },
+      ]}
+    >
+      <Pressable
+        style={styles.noticeBody}
+        onPress={() => {
+          dismissNotice();
+          router.push(
+            `/channel/${notice.channelId}?jump=${encodeURIComponent(
+              notice.messageId,
+            )}` as never,
+          );
+        }}
+        accessibilityRole="button"
+        accessibilityLabel={`${notice.authorName} tagged you in ${notice.channelName}`}
+      >
+        <Text style={styles.noticeHead} numberOfLines={1}>
+          {notice.authorName} {notice.kind === 'reply' ? 'replied' : 'tagged you'} in #
+          {notice.channelName}
+        </Text>
+        <Text style={styles.noticeText} numberOfLines={2}>
+          {notice.preview}
+        </Text>
+      </Pressable>
+      <Pressable onPress={dismissNotice} hitSlop={12} style={styles.dismiss}>
+        <Text style={styles.dismissLabel}>✕</Text>
+      </Pressable>
+    </Animated.View>
+  );
+}

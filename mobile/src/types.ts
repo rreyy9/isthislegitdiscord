@@ -144,3 +144,32 @@ export interface ServerConfig {
   latestAndroidVersion?: string | null;
   latestAndroidVersionCode?: number | null;
 }
+
+/** A page of search results. Paged by message id, newest first. */
+export interface SearchPage {
+  results: Message[];
+  nextCursor: string | null;
+}
+
+/** What a send may say about other messages: an answer, or a forward. */
+export interface SendExtras {
+  /** The message being answered. Must be in the channel being sent to. */
+  replyToId?: string;
+  /**
+   * Whether the reply tags the person being answered. Omitted means yes, which
+   * is what replying is for; false is the "@ off" switch on the reply bar.
+   */
+  replyPing?: boolean;
+  /** A message from elsewhere in this guild, carried into this channel. */
+  forwardedFromId?: string;
+}
+
+/** One row of a guild's ban list. Admins only. */
+export interface Ban {
+  userId: string;
+  username: string;
+  displayName: string | null;
+  bannedBy: string | null;
+  reason: string | null;
+  createdAt: string;
+}
