@@ -5,6 +5,7 @@ import type { ServerConfig } from '@isthislegit/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { voiceAudioConfig } from '../voice/audio-config';
 import { UpdatesService } from '../updates/updates.service';
+import { AndroidUpdatesService } from '../updates/android-updates.service';
 
 /**
  * Read once, from package.json rather than npm_package_version: that variable
@@ -33,6 +34,7 @@ export class AppController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly updates: UpdatesService,
+    private readonly android: AndroidUpdatesService,
   ) {}
 
   @Get('health')
@@ -47,6 +49,10 @@ export class AppController {
    */
   @Get('config')
   async config(): Promise<ServerConfig> {
+    // One read of the Android feed rather than two: `latestVersion()` would
+    // hand back the string and then the code would need the manifest anyway,
+    // and both calls hit the same ten-second cache, so this is only tidier.
+    const androidRelease = await this.android.latest();
     return {
       livekitUrl: process.env.LIVEKIT_URL ?? 'ws://localhost:7880',
       maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES ?? 26214400),
@@ -62,6 +68,10 @@ export class AppController {
       // genuinely cannot be made compatible -- blocking ten people until each
       // notices a dialog is worse than the skew it avoids.
       minClientVersion: process.env.MIN_CLIENT_VERSION || null,
+      // Null until an APK has been published. Read by the Android client only;
+      // every desktop build ignores a field it has never heard of.
+      latestAndroidVersion: androidRelease?.manifest.version ?? null,
+      latestAndroidVersionCode: androidRelease?.manifest.versionCode ?? null,
     };
   }
 }

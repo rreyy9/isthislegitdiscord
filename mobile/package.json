@@ -1,0 +1,47 @@
+{
+  "name": "@isthislegit/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Android client for a self-hosted isthislegit server",
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "typecheck": "tsc --noEmit",
+    "prebuild": "expo prebuild --platform android",
+    "prebuild:clean": "expo prebuild --platform android --clean",
+    "apk": "node scripts/build-apk.mjs",
+    "doctor": "expo-doctor"
+  },
+  "dependencies": {
+    "expo": "~57.0.24",
+    "expo-application": "~57.0.3",
+    "expo-build-properties": "~57.0.21",
+    "expo-constants": "~57.0.19",
+    "expo-image": "~57.0.5",
+    "expo-linking": "~57.0.10",
+    "expo-router": "~57.0.22",
+    "expo-secure-store": "~57.0.4",
+    "expo-splash-screen": "~57.0.9",
+    "expo-status-bar": "~57.0.1",
+    "expo-system-ui": "~57.0.4",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "overrides": {
+    "react-dom": "19.2.3"
+  },
+  "expo": {
+    "autolinking": {
+      "//": "react-native-gesture-handler arrives as a transitive dependency of expo-router, which needs it for drawer navigation and the JavaScript stack. This app uses neither -- it is a native stack -- and the library is not in the JS bundle at all: the only two mentions of it in a release bundle's sourcemap are comments. Excluding it here stops it being linked and built natively. That is worth doing because its C++ codegen produces object-file paths around 289 characters, and the ninja shipped inside the NDK's CMake 3.22.1 refuses any path over 260 with a hard-coded check of its own -- before Windows is ever asked, so enabling long paths does not help and neither does relocating the project. Remove this entry if a drawer is ever added, and expect the path problem back with it.",
+      "exclude": ["react-native-gesture-handler"]
+    }
+  }
+}

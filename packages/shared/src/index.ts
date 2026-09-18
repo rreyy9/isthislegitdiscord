@@ -709,6 +709,24 @@ export const ServerConfig = z.object({
    * reaching for this is evidence the additive rules were not followed.
    */
   minClientVersion: z.string().nullable(),
+  /**
+   * The newest Android build published to this server, or null when none has
+   * been. Its own field rather than a reuse of `latestClientVersion` because
+   * the two version independently: the phone shipping 0.3.0 says nothing about
+   * what the desktop app is on, and a client comparing itself against the
+   * other platform's number would offer an update that does not exist.
+   *
+   * Optional so that a client older than the Android channel — which is every
+   * desktop build shipped to date — parses this object unchanged.
+   */
+  latestAndroidVersion: z.string().nullable().optional(),
+  /**
+   * Android's own monotonic integer for that build. The phone compares this
+   * with its own `versionCode`, not the semver: it is what the package manager
+   * compares, and the only number that decides whether an install is an
+   * upgrade or is refused outright.
+   */
+  latestAndroidVersionCode: z.number().int().nullable().optional(),
 });
 export type ServerConfig = z.infer<typeof ServerConfig>;
 
@@ -987,6 +1005,18 @@ export function compareVersions(a: string, b: string): number {
 
 
 /**
+ * Which build of which client. Sent on the socket handshake beside the
+ * version, and the thing that keeps the two platforms' version numbers from
+ * being compared with each other.
+ *
+ * `desktop` is the default rather than a value anyone sends: every build that
+ * existed before this field predates it, so an absent platform means the only
+ * client there was.
+ */
+export const ClientPlatform = z.enum(['desktop', 'android']);
+export type ClientPlatform = z.infer<typeof ClientPlatform>;
+
+/**
  * What one connected client says it is. Reported by the client on connect and
  * kept only in memory — this is telemetry for deciding when compatibility code
  * is safe to delete, not a record worth a table.
@@ -995,6 +1025,14 @@ export const ConnectedClient = z.object({
   userId: z.string(),
   username: z.string().nullable(),
   version: z.string().nullable(),
+  /**
+   * What it is running on. Reported so the "oldest connected build" figure can
+   * be read per platform — the Android client versions independently of the
+   * desktop one, and comparing the two numbers answers no question anybody
+   * has. A client too old to say is a desktop one, because on the day this was
+   * added that is all there was.
+   */
+  platform: ClientPlatform,
   connections: z.number().int(),
 });
 export type ConnectedClient = z.infer<typeof ConnectedClient>;

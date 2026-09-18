@@ -18,6 +18,7 @@ goes direct to the box; only signalling and the HTTP API go through the proxy.
 - [Layout](#layout) · [Requirements](#requirements)
 - [Running it](#running-it) · [The two installers](#the-two-installers)
 - [Updating the client](#updating-the-client) · [Older clients](#older-clients)
+- [The Android client](#the-android-client)
 - [Configuration](#configuration) · [Going public](#going-public) · [Database](#database) · [Backups](#backups) · [Retention](#retention)
 - [Voice quality](#voice-quality) · [AFK channels](#afk-channels) · [Watch party](#watch-party)
 - [Mentions](#mentions) · [Pinned messages](#pinned-messages)
@@ -37,6 +38,8 @@ apps/server          NestJS + Prisma + Better Auth + Socket.IO
 apps/console         Operator console: supervises the services, config and admin UI
 apps/server-app      Electron shell around the console -- the server box's app
 apps/desktop         Electron + React chat client -- what friends install
+mobile               Expo + React Native Android client. Outside the npm
+                     workspace on purpose -- see mobile/README.md
 infra/livekit        LiveKit config and start script
 infra/caddy          Caddyfile and start script: TLS for the API and signalling
 infra/installer      Builds the server installer
@@ -45,9 +48,12 @@ infra/backup.ps1     pg_dump + uploads, verified, on a schedule
 infra/restore.ps1    Puts one back -- into a scratch database by default
 infra/allow-lan.ps1  Firewall rules
 infra/publish-desktop-update.ps1  Uploads a built client to the server and publishes it
+infra/publish-android-update.ps1  The same, for an APK
 data/uploads         Uploaded images on disk, named by id
 data/updates/desktop Published client builds: latest.yml, the installer, its blockmap
 data/updates/staging An uploaded build, before it is published
+data/updates/android Published APK and its latest.json
+data/updates/android-staging  An uploaded APK, before it is published
 data/logs            server-YYYY-MM-DD.log, 30 days
 ```
 
@@ -458,6 +464,61 @@ screen instead of the app. It is unset, and the expectation is that it stays tha
 **Skew has a ceiling here anyway.** Ten friends, one server, and a notice on every launch:
 the window where somebody is behind is days, not quarters. Size the compatibility budget for
 that and not for a public API.
+
+---
+
+## The Android client
+
+`mobile/` is an Expo + React Native app: sign in, channels, history, sending, typing and
+presence. Voice, push notifications and attachments are not in it yet — the table at the top
+of [mobile/README.md](mobile/README.md) says what is missing and what each piece needs.
+
+**It is outside the npm workspace on purpose.** The root `workspaces` glob covers
+`packages/*` and `apps/*`; this is at `mobile/` and matches neither, so it keeps its own
+`node_modules` and its own lockfile. Metro resolves flat trees far more reliably than hoisted
+ones, and more importantly an `npm install` there cannot re-resolve the lockfile the server
+depends on. The cost is that it cannot import `packages/shared`, so it redeclares the DTOs it
+needs — the same trade the desktop client already makes, under the same compatibility rule.
+
+**The server gained an Android update channel**, built as its own service rather than a
+second channel inside `UpdatesService`. The two share nothing but a parent directory: the
+desktop feed is electron-updater's `latest.yml` plus a blockmap and exists to satisfy a
+library we do not control, while this one answers a client we wrote and wants three fields
+and an APK. Generalising the working feed that ten people get their client through was not
+worth the risk of not having two files.
+
+| | Desktop | Android |
+|---|---|---|
+| Feed | `/updates/desktop/:name` | `/updates/android/:name` |
+| Manifest | `latest.yml` (electron-updater) | `latest.json` |
+| Admin | `/api/admin/updates` | `/api/admin/updates/android` |
+| Socket event | `client:update-available` | `android:update-available` |
+| Publish script | `infra/publish-desktop-update.ps1` | `infra/publish-android-update.ps1` |
+
+Both feeds are unauthenticated, for the same reason: an update matters most to somebody whose
+session has lapsed, and a feed behind a token fails exactly then.
+
+**There is no Play Store in this.** The APK is built locally, uploaded to your own server and
+served from it, and the app offers it through a banner that hands the download to the phone's
+browser. Installing in-app would need `REQUEST_INSTALL_PACKAGES`, a `FileProvider` and an
+intent, to save one tap on a notification.
+
+**Two things that cannot be undone, and are worth reading before the first build you give
+anybody:** the release keystore, and the `versionCode`. Android identifies an app by package
+name *and* signing key, and `expo prebuild` signs release builds with the **debug** keystore
+by default — which is per machine, so the second build from anywhere else is refused by every
+phone that has the first. `mobile/plugins/with-release-signing.js` overrides that and the
+build script refuses to produce a publishable APK without a real keystore. Separately,
+`versionCode` is the only number Android compares when deciding whether an install is an
+upgrade; it is derived from the semver in `app.config.js` so it cannot be forgotten. Both are
+set out in [mobile/README.md](mobile/README.md).
+
+**The socket handshake now carries a platform.** `connectedClients()` keys its "oldest
+connected build" figure on person *and* platform, because the two clients version
+independently — without it a phone on 0.1.0 counts as an ancient desktop client and the
+console reports that nobody has upgraded the desktop app since it shipped, which is the one
+question that telemetry exists to answer. A client too old to say is a desktop one, because
+on the day the field was added that was all there was.
 
 ---
 
@@ -1616,6 +1677,11 @@ every signed-in member, which is exactly what rule 2 forbids for anything else.
 | POST | `/api/livekit/webhook` | Called by LiveKit, not by clients; JWT-signed |
 | — | `/api/auth/*` | Better Auth's own routes |
 | — | `/api/admin/*` | Stats, users, invites, guilds, channels, messages — ADMIN role |
+| GET | `/updates/android/:file` | `latest.json` and the APK. **No auth**, like the desktop feed |
+| GET | `/api/admin/updates/android` | What is published and what is staged |
+| PUT | `/api/admin/updates/android/staging/:file` | Upload one file. Raw body, streamed |
+| DELETE | `/api/admin/updates/android/staging` | Throw away an upload |
+| POST | `/api/admin/updates/android/publish` | Promote the upload and tell every phone |
 
 Storage, retention and updates:
 
@@ -1875,7 +1941,14 @@ it removes nothing it cannot prove is its own.
 
 **Deliberately not done**
 
-Federation, mobile clients, custom emoji, threads, video calls, a web client.
+Federation, custom emoji, threads, video calls, a web client.
+
+Mobile was on this list and came off it — see [The Android client](#the-android-client).
+What changed the arithmetic was that the server already did the three things a phone client
+needs and a browser client would not have: bearer tokens rather than cookies, a token on the
+socket handshake rather than a header, and a CORS allowlist that a native client sidesteps by
+sending no `Origin` at all. None of that was built for a phone; all of it was built for the
+`file://` desktop renderer, which had the same constraints for different reasons.
 Ten friends and one box is the whole design.
 
 ---
@@ -1884,6 +1957,20 @@ Ten friends and one box is the whole design.
 
 Kept because each one failed silently, and the next person to hit the same shape deserves
 the shortcut.
+
+**`spawnSync npx.cmd EINVAL` in the APK build.** Node 20.12 and later refuse to spawn a
+`.cmd` or `.bat` without a shell — the fix for CVE-2024-27980, where an argument could break
+out into a command through cmd.exe's parsing. On Windows `npx` *is* `npx.cmd`, so
+`execFileSync('npx.cmd', …)` fails outright, and `EINVAL` reads like a missing binary rather
+than a refused one. Passing `shell: true` satisfies the check by doing the exact thing that
+was dangerous. The fix is to skip the shim: resolve the CLI's entry with `require.resolve`
+and run it with `process.execPath`, which also starts faster. See `mobile/scripts/build-apk.mjs`.
+
+**`java -version` writes to stderr, and `execFileSync` throws it away.** It has done this for
+twenty years and exits 0 while doing it, so `execFileSync` returns an empty stdout and only
+exposes stderr on an error it never throws. A JDK check written that way reports "java is not
+on PATH" on a machine with a perfectly good JDK — a worse answer than not checking at all.
+`spawnSync` gives you both streams.
 
 **The file sweeper deleted every avatar.** An avatar is written by the same `store()` into
 the same directory as message attachments, but it is referenced only by `user.image` and

@@ -389,7 +389,7 @@
     <div class="card admin-only hidden">
       <h2>Connected clients</h2>
       <table>
-        <thead><tr><th>Account</th><th>Version</th><th>Connections</th></tr></thead>
+        <thead><tr><th>Account</th><th>Platform</th><th>Version</th><th>Connections</th></tr></thead>
         <tbody id="upd-clients"></tbody>
       </table>
       <div class="hint">
@@ -815,10 +815,14 @@ async function loadClients() {
     $('#upd-clients').innerHTML = rows.length
       ? rows.map((c) =>
           '<tr><td class="mono">' + esc(c.username || c.userId) + '</td><td>'
+          // Absent from a server older than the Android channel, where every
+          // connection was a desktop one. Same reading as the server's.
+          + '<span class="tag">' + esc(c.platform || 'desktop') + '</span>'
+          + '</td><td>'
           + (c.version ? '<span class="tag">' + esc(c.version) + '</span>'
                        : '<span class="tag bad">unknown</span>')
           + '</td><td>' + c.connections + '</td></tr>').join('')
-      : '<tr><td colspan="3" class="muted">Nobody connected.</td></tr>';
+      : '<tr><td colspan="4" class="muted">Nobody connected.</td></tr>';
   } catch { /* server down */ }
 }
 

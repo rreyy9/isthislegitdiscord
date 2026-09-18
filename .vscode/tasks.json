@@ -1,7 +1,8 @@
 {
   "version": "2.0.0",
 
-  // Two things to run, two things to compile, and the two installers.
+  // Three things to run, three things to compile, and the three things you
+  // carry to another machine: the two installers and the APK.
   //
   // The console is the launcher and the admin UI: it starts and stops the chat
   // server, LiveKit and Caddy, runs build/migrate/seed, reads out the invite
@@ -16,15 +17,28 @@
   // second task for that -- and ISTHISLEGIT_ROOT points it at this checkout,
   // which matters on a machine that also has a server installed.
   //
-  // The two "Build and package" tasks are the ones that produce something you
-  // carry to another machine. They are here because the console cannot do
-  // either: it administers the box it runs on, and both installers are built
-  // on a development machine and taken elsewhere.
+  // The "Build and package" tasks are the ones that produce something you
+  // carry to another machine. They are here because the console cannot do any
+  // of them: it administers the box it runs on, and all three are built on a
+  // development machine and taken elsewhere.
   //
-  // Set version comes before either of them. Every package in the workspace
+  // Set version comes before either installer. Every package in the workspace
   // shares one number, and the client's copy of it is what electron-builder
   // stamps into latest.yml -- which is the whole of how an installed client
   // decides whether there is anything to update to.
+  //
+  // The Android client has its own Set Android version, and that is not an
+  // oversight. mobile/ is outside the root workspaces glob on purpose -- see
+  // mobile/README.md -- so `npm version --workspaces` does not reach it, and a
+  // task that silently skipped it would leave a client whose version nothing
+  // ever moved. Its number is independent of the desktop one anyway: the two
+  // ship separately, and the server keeps their update feeds and their
+  // telemetry apart for exactly that reason.
+  //
+  // Android also needs a toolchain the rest of this does not: the Android SDK,
+  // JDK 17, and a release keystore that must never change. Expo Go covers
+  // development without any of it, which is what "Android app (dev)" is for --
+  // reach for the packaging task only when you want a real APK.
   //
   // Not covered, deliberately: `nest start --watch`. The console runs
   // apps/server/dist/main.js, so a server code change means Build then Restart
@@ -67,6 +81,22 @@
     },
 
     {
+      "label": "Android app (dev)",
+      "detail": "expo start. Prints a QR code; scan it with Expo Go on the phone and the app runs there with live reload -- no Android SDK, no Gradle, nothing to install on this machine. Point it at a server on the sign-in screen, using this machine's LAN address rather than localhost, which on a phone is the phone.",
+      "type": "shell",
+      "command": "npm start",
+      "options": { "cwd": "${workspaceFolder}/mobile" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "runOptions": { "instanceLimit": 1 }
+    },
+
+    {
       "label": "Compile server",
       "detail": "tsc for packages/shared, then nest build for apps/server. The fast inner loop, and what catches a type error. The console's Build button runs the same thing and can Restart afterwards, which this cannot.",
       "type": "shell",
@@ -86,6 +116,21 @@
       "type": "shell",
       "command": "npx tsc --noEmit -p tsconfig.json",
       "options": { "cwd": "${workspaceFolder}/apps/desktop" },
+      "group": "build",
+      "problemMatcher": ["$tsc"],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    },
+
+    {
+      "label": "Typecheck Android client",
+      "detail": "tsc --noEmit over mobile. Its own task for the reason the desktop one is: Metro strips types with Babel and never checks them, so a bundle will happily ship code that does not compile. The packaging task depends on this.",
+      "type": "shell",
+      "command": "npx tsc --noEmit",
+      "options": { "cwd": "${workspaceFolder}/mobile" },
       "group": "build",
       "problemMatcher": ["$tsc"],
       "presentation": {
@@ -137,6 +182,63 @@
         "panel": "dedicated",
         "reveal": "always"
       }
+    },
+
+    {
+      "label": "Set Android version",
+      "detail": "Asks for a version and writes it to mobile\\package.json, which app.config.js reads for both the version people see and the Android versionCode derived from it. A separate task because mobile sits outside the root workspaces glob on purpose, so the workspace-wide Set version deliberately does not reach it. Do this before packaging: publishing refuses a versionCode that has not risen, and Android refuses to install one that has not either.",
+      "type": "shell",
+      "command": "npm version ${input:androidVersion} --no-git-tag-version",
+      "options": { "cwd": "${workspaceFolder}/mobile" },
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Build and package Android client  →  mobile\\release\\isthislegit-<v>.apk",
+      "detail": "Typecheck, then scripts\\build-apk.mjs: generates mobile\\android if needed, runs gradlew assembleRelease, verifies the APK is not debug-signed, and writes the APK plus the latest.json that publishes it. Needs the Android SDK and JDK 17 -- see mobile\\README.md, which also covers the release keystore. That keystore is the one setup step here that cannot be undone: sign a later build with a different key and every phone refuses the update. Run Set Android version first. Then infra\\publish-android-update.ps1 uploads it.",
+      "type": "shell",
+      "command": "npm run apk",
+      "options": { "cwd": "${workspaceFolder}/mobile" },
+      "dependsOn": ["Typecheck Android client"],
+      "dependsOrder": "sequence",
+      "group": "build",
+      "problemMatcher": ["$tsc"],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Rebuild Android project  →  mobile\\android",
+      "detail": "expo prebuild --clean. Throws mobile\\android away and regenerates it from app.json, app.config.js and plugins\\. Needed after changing any of those three, and the thing to try when a Gradle build fails for a reason that makes no sense. The directory is generated and not committed, so nothing is lost. The packaging task creates it on its own the first time; this is only for replacing one.",
+      "type": "shell",
+      "command": "npm run prebuild:clean",
+      "options": { "cwd": "${workspaceFolder}/mobile" },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Install Android client on a plugged-in phone",
+      "detail": "adb install -r on whatever mobile\\release holds. For putting a build on your own phone without publishing it to everyone -- the phone needs developer options and USB debugging on, and adb comes from the SDK's platform-tools. -r reinstalls over an existing copy and keeps its data, which only works while the signing key stays the same.",
+      "type": "shell",
+      "command": "$apk = Get-ChildItem mobile\\release\\*.apk -ErrorAction SilentlyContinue | Select-Object -First 1; if (-not $apk) { Write-Host '  x No APK in mobile\\release. Run the packaging task first.' -ForegroundColor Red; exit 1 }; Write-Host \"  Installing $($apk.Name)...\"; adb install -r $apk.FullName",
+      "options": { "cwd": "${workspaceFolder}", "shell": { "executable": "powershell.exe", "args": ["-NoProfile", "-Command"] } },
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always"
+      }
     }
   ],
 
@@ -147,6 +249,11 @@
       "id": "version",
       "type": "promptString",
       "description": "New version for every package in the workspace, e.g. 0.2.3"
+    },
+    {
+      "id": "androidVersion",
+      "type": "promptString",
+      "description": "New version for the Android client, e.g. 0.2.3 (minor and patch stay under 100)"
     }
   ]
 }

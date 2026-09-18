@@ -14,6 +14,7 @@ import { Server, Socket } from 'socket.io';
 import { fromNodeHeaders } from 'better-auth/node';
 import { compareVersions, MAX_PARTY_CHAT } from '@isthislegit/shared';
 import type {
+  ClientPlatform,
   ConnectedClient,
   Message,
   PublicUser,
@@ -36,6 +37,12 @@ interface SocketData {
    * safe to delete, not a record worth a table.
    */
   clientVersion: string | null;
+  /**
+   * Which client. Defaults to `desktop`, which is not a guess: every build
+   * that predates this field is a desktop one, because on the day it was added
+   * that was the only client there was.
+   */
+  platform: ClientPlatform;
 }
 
 // The same allowlist the HTTP API uses. Socket.IO has its own CORS handling
@@ -136,10 +143,19 @@ export class ChatGateway
           ? claimed
           : null;
 
+      // Same treatment as the version: whatever the client says, reduced to
+      // one of the values we know. Anything else -- including nothing at all,
+      // from a build older than the field -- is a desktop client.
+      const platform: ClientPlatform =
+        (socket.handshake.auth as any)?.platform === 'android'
+          ? 'android'
+          : 'desktop';
+
       socket.data = {
         userId: session.user.id,
         username: (session.user as any).username ?? null,
         clientVersion,
+        platform,
       } satisfies SocketData;
       next();
     });
@@ -232,12 +248,21 @@ export class ChatGateway
    * unused.
    */
   connectedClients(): ConnectedClient[] {
-    const byUser = new Map<string, ConnectedClient>();
+    // Keyed by person *and* platform, so somebody at their desk with the app
+    // on their phone is two rows rather than one. Collapsing them would take
+    // the older of two version numbers that are not on the same scale: the
+    // Android client versions independently, so a phone on 0.1.0 would report
+    // as this account's build and make it look like nobody had upgraded the
+    // desktop app since the day it shipped -- which is exactly the figure this
+    // whole method exists to answer.
+    const byClient = new Map<string, ConnectedClient>();
     for (const socket of this.server?.sockets?.sockets?.values() ?? []) {
       const data = socket.data as SocketData;
       if (!data?.userId) continue;
 
-      const seen = byUser.get(data.userId);
+      const platform = data.platform ?? 'desktop';
+      const key = `${data.userId}:${platform}`;
+      const seen = byClient.get(key);
       if (seen) {
         seen.connections += 1;
         // Two windows on two builds: report the older one, since that is the
@@ -251,14 +276,15 @@ export class ChatGateway
         }
         continue;
       }
-      byUser.set(data.userId, {
+      byClient.set(key, {
         userId: data.userId,
         username: data.username,
         version: data.clientVersion,
+        platform,
         connections: 1,
       });
     }
-    return [...byUser.values()];
+    return [...byClient.values()];
   }
 
   /**
@@ -270,6 +296,27 @@ export class ChatGateway
    */
   announceUpdate(version: string): number {
     this.server.emit('client:update-available', { version });
+    return this.server?.sockets?.sockets?.size ?? 0;
+  }
+
+  /**
+   * The same, for the Android client.
+   *
+   * Its own event rather than a field on `client:update-available`, which
+   * every desktop build already listens to: adding a platform to that payload
+   * would not help, because those builds were written before there was a
+   * platform to check and would offer an Android version number as their own
+   * update. A new event is dropped by everything that predates it, which is
+   * the whole of why new features arrive this way here.
+   *
+   * `versionCode` rides along because it is what the phone actually compares
+   * against itself -- see the note on `AndroidManifest`. The count returned is
+   * every socket, not every phone: it is a line in the console saying the
+   * announcement went out, and splitting it per platform would be a second
+   * pass over the socket map for a number nobody acts on.
+   */
+  announceAndroidUpdate(version: string, versionCode: number): number {
+    this.server.emit('android:update-available', { version, versionCode });
     return this.server?.sockets?.sockets?.size ?? 0;
   }
 
