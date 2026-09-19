@@ -330,6 +330,20 @@ const bridge = {
     bytes: ArrayBuffer;
   }): Promise<string | null> => ipcRenderer.invoke('file:save', file),
 
+  /* ------------------------------------------------------------ embeds */
+
+  /**
+   * Follow a TikTok share link to the post it points at.
+   *
+   * `vm.tiktok.com/XXXX` carries no video id, so there is nothing to embed
+   * until somebody has asked TikTok. That request is made here, in main, and
+   * only when the poster has been clicked -- a link sitting in the scrollback
+   * still costs nothing. Resolves to the canonical URL, or null if it could
+   * not be followed, in which case the renderer leaves it as a plain link.
+   */
+  resolveTikTok: (shareUrl: string): Promise<string | null> =>
+    ipcRenderer.invoke('tiktok:resolve', shareUrl),
+
   /* --------------------------------------------------------- keybindings */
 
   /** False when the native hook could not load; everything else still works. */

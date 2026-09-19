@@ -4,6 +4,7 @@ import {
   URL_RE,
   VIDEO_EXT_RE,
   tiktokId,
+  tiktokShareUrl,
   youtubeId,
   youtubeStart,
 } from './link-utils';
@@ -137,9 +138,9 @@ describe('tiktokId', () => {
     );
   });
 
-  it('leaves share links alone rather than resolving them', () => {
-    // Resolving these would mean a request to TikTok for every link that
-    // scrolls past, before anyone has asked to watch anything.
+  it('has no id to give for a share link', () => {
+    // There is genuinely nothing in these to read; `tiktokShareUrl` picks them
+    // up instead, and the redirect is followed on click rather than on sight.
     expect(tiktokId('https://vm.tiktok.com/ZMabcdef/')).toBeNull();
     expect(tiktokId('https://www.tiktok.com/t/ZMabcdef/')).toBeNull();
   });
@@ -151,5 +152,76 @@ describe('tiktokId', () => {
 
   it('is not fooled by a lookalike host', () => {
     expect(tiktokId('https://tiktok.com.evil.example/@a/video/1234567890')).toBeNull();
+  });
+});
+
+describe('tiktokShareUrl', () => {
+  it('recognises the links the app itself hands out', () => {
+    expect(tiktokShareUrl('https://vm.tiktok.com/ZN86VL7xy/')).toBe(
+      'https://vm.tiktok.com/ZN86VL7xy/',
+    );
+    expect(tiktokShareUrl('https://vt.tiktok.com/ZSabc123')).toBe(
+      'https://vt.tiktok.com/ZSabc123/',
+    );
+    expect(tiktokShareUrl('https://www.tiktok.com/t/ZMabcdef/')).toBe(
+      'https://www.tiktok.com/t/ZMabcdef/',
+    );
+    expect(tiktokShareUrl('https://tiktok.com/t/ZMabcdef')).toBe(
+      'https://www.tiktok.com/t/ZMabcdef/',
+    );
+  });
+
+  it('keeps the token and drops everything hung off it', () => {
+    // Share links arrive with tracking parameters on them. They are no use to
+    // the redirect and no business of ours, so the rebuilt URL leaves them
+    // behind rather than passing them on to TikTok.
+    expect(tiktokShareUrl('https://vm.tiktok.com/ZMabcdef/?_t=abc&_r=1')).toBe(
+      'https://vm.tiktok.com/ZMabcdef/',
+    );
+    expect(tiktokShareUrl('https://vm.tiktok.com/ZMabcdef#x')).toBe(
+      'https://vm.tiktok.com/ZMabcdef/',
+    );
+  });
+
+  it('upgrades the first hop to https', () => {
+    expect(tiktokShareUrl('http://vm.tiktok.com/ZMabcdef/')).toBe(
+      'https://vm.tiktok.com/ZMabcdef/',
+    );
+  });
+
+  it('is null for a link that already carries an id', () => {
+    // Otherwise a full link would cost a redirect it does not need.
+    expect(
+      tiktokShareUrl('https://www.tiktok.com/@someone/video/1234567890123456789'),
+    ).toBeNull();
+  });
+
+  it('refuses anything that is not a bare token', () => {
+    // What comes out of here is a URL the main process will request, so the
+    // path is rebuilt from a checked token rather than passed through.
+    expect(tiktokShareUrl('https://vm.tiktok.com/')).toBeNull();
+    expect(tiktokShareUrl('https://vm.tiktok.com/ZMabc/def')).toBeNull();
+    expect(tiktokShareUrl('https://vm.tiktok.com/ZMab.cd')).toBeNull();
+    expect(tiktokShareUrl('https://www.tiktok.com/t/')).toBeNull();
+  });
+
+  it('cannot carry a traversal through into the URL it hands back', () => {
+    // `new URL` resolves the `..` away before the pattern ever sees it, and
+    // the pattern then only matches one segment -- so what comes out is a
+    // single token either way, never a path somebody steered.
+    expect(tiktokShareUrl('https://vm.tiktok.com/ZM/../evil')).toBe(
+      'https://vm.tiktok.com/evil/',
+    );
+    expect(tiktokShareUrl('https://vm.tiktok.com/ZM/../../../etc/passwd')).toBeNull();
+  });
+
+  it('is not fooled by a lookalike host', () => {
+    expect(tiktokShareUrl('https://vm.tiktok.com.evil.example/ZMabcdef/')).toBeNull();
+    expect(tiktokShareUrl('https://notvm.tiktok.com/ZMabcdef/')).toBeNull();
+  });
+
+  it('returns null rather than throwing on nonsense', () => {
+    expect(tiktokShareUrl('not a url')).toBeNull();
+    expect(tiktokShareUrl('')).toBeNull();
   });
 });

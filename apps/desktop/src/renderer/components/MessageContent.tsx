@@ -10,6 +10,7 @@ import {
   URL_RE,
   VIDEO_EXT_RE,
   tiktokId,
+  tiktokShareUrl,
   youtubeId,
   youtubeStart,
 } from '../link-utils';
@@ -66,6 +67,16 @@ function YouTube({ id, start }: { id: string; start: number | null }) {
 
 /* ------------------------------------------------------------- tiktok */
 
+/** Drawn rather than fetched, and used by both states of the poster below. */
+const TIKTOK_MARK = (
+  <svg viewBox="0 0 48 48" width="40" height="40">
+    <path
+      d="M33.5 6h-5.7v25.2a4.6 4.6 0 1 1-4.6-4.6c.4 0 .8.1 1.2.2v-5.8a10.4 10.4 0 1 0 9.1 10.3V18.6a12 12 0 0 0 7 2.2v-5.7a6.9 6.9 0 0 1-7-7z"
+      fill="currentColor"
+    />
+  </svg>
+);
+
 /**
  * A TikTok post, on the same click-to-play deal as YouTube above.
  *
@@ -74,15 +85,56 @@ function YouTube({ id, start }: { id: string; start: number | null }) {
  * call, which is a request to TikTok for every link in the channel -- exactly
  * what the poster pattern exists to avoid. So the placeholder is drawn here,
  * out of nothing, and the frame is loaded when somebody asks for it.
+ *
+ * A link shared out of the TikTok app arrives as `vm.tiktok.com/XXXX` and
+ * carries no id at all, so there is nothing to build an embed URL out of until
+ * the redirect has been followed. That happens on the same click, in main, and
+ * the bargain is unchanged: a post costs a request when somebody wants to
+ * watch it and nothing at all before. Which of the two shapes a friend
+ * happened to paste is not something worth showing anybody, so both draw the
+ * same poster and the resolving one simply takes a moment longer.
  */
-function TikTok({ id }: { id: string }) {
-  const [playing, setPlaying] = useState(false);
+function TikTok({
+  id,
+  shareUrl,
+  url,
+}: {
+  id: string | null;
+  shareUrl: string | null;
+  url: string;
+}) {
+  const [videoId, setVideoId] = useState(id);
+  const [state, setState] = useState<'poster' | 'resolving' | 'playing' | 'failed'>(
+    'poster',
+  );
 
-  if (playing) {
+  async function play() {
+    if (videoId) {
+      setState('playing');
+      return;
+    }
+    if (!shareUrl || state === 'resolving') return;
+
+    setState('resolving');
+    const resolved = await bridge.resolveTikTok(shareUrl);
+    // The id is read back out of what came back rather than trusted from it.
+    // That is a redirect target chosen by somebody else's server and it is
+    // about to be interpolated into a frame src, so it goes through the same
+    // digits-only check as a link that was pasted in full.
+    const found = resolved ? tiktokId(resolved) : null;
+    if (!found) {
+      setState('failed');
+      return;
+    }
+    setVideoId(found);
+    setState('playing');
+  }
+
+  if (state === 'playing' && videoId) {
     return (
       <div className="tt">
         <iframe
-          src={`https://www.tiktok.com/embed/v2/${id}`}
+          src={`https://www.tiktok.com/embed/v2/${videoId}`}
           allow="encrypted-media; picture-in-picture; fullscreen"
           allowFullScreen
           title="TikTok video"
@@ -91,17 +143,32 @@ function TikTok({ id }: { id: string }) {
     );
   }
 
-  return (
-    <div className="tt poster" onClick={() => setPlaying(true)} title="Play">
-      <div className="tt-mark" aria-hidden>
-        <svg viewBox="0 0 48 48" width="40" height="40">
-          <path
-            d="M33.5 6h-5.7v25.2a4.6 4.6 0 1 1-4.6-4.6c.4 0 .8.1 1.2.2v-5.8a10.4 10.4 0 1 0 9.1 10.3V18.6a12 12 0 0 0 7 2.2v-5.7a6.9 6.9 0 0 1-7-7z"
-            fill="currentColor"
-          />
-        </svg>
+  if (state === 'failed') {
+    // TikTok would not say where the link goes -- it has been taken down, or
+    // the network is having a day. There is nothing here a second click would
+    // fix, so this stops offering the player and offers the link instead. The
+    // URL itself is still in the message text above either way.
+    return (
+      <div className="tt poster failed" onClick={openExternal(url)} title={url}>
+        <div className="tt-mark" aria-hidden>
+          {TIKTOK_MARK}
+        </div>
+        <div className="tt-label">Couldn’t load this one — open on TikTok</div>
       </div>
-      <div className="tt-label">Watch on TikTok</div>
+    );
+  }
+
+  const resolving = state === 'resolving';
+  return (
+    <div
+      className={'tt poster' + (resolving ? ' loading' : '')}
+      onClick={play}
+      title={resolving ? 'Loading' : 'Play'}
+    >
+      <div className="tt-mark" aria-hidden>
+        {TIKTOK_MARK}
+      </div>
+      <div className="tt-label">{resolving ? 'Loading…' : 'Watch on TikTok'}</div>
     </div>
   );
 }
@@ -537,10 +604,17 @@ export function MessageContent({
     if (embeds.length === 0) {
       const yt = youtubeId(url);
       const tt = yt ? null : tiktokId(url);
+      // A share link has no id yet; the component goes and gets one if it is
+      // ever clicked. Either way it is the same poster.
+      const ttShare = yt || tt ? null : tiktokShareUrl(url);
       if (yt) {
         embeds.push(<YouTube key={`y${key}`} id={yt} start={youtubeStart(url)} />);
-      } else if (tt) {
-        embeds.push(<TikTok key={`t${key}`} id={tt} />);
+      } else if (tt || ttShare) {
+        // Keyed by the link as well as its position, so editing a message into
+        // a different post does not leave the old one resolved in place.
+        embeds.push(
+          <TikTok key={`t${key}:${url}`} id={tt} shareUrl={ttShare} url={url} />,
+        );
       } else if (IMAGE_EXT_RE.test(url)) {
         embeds.push(<LinkedImage key={`i${key}`} url={url} />);
       } else if (VIDEO_EXT_RE.test(url)) {

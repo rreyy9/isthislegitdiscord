@@ -853,6 +853,134 @@ ipcMain.handle(
   },
 );
 
+/* --------------------------------------------------- tiktok share links */
+
+/**
+ * Where a TikTok link, and every redirect it takes, is allowed to live.
+ *
+ * A redirect chain is a stranger's server choosing our next request, so the
+ * chain is walked one hop at a time and every hop is checked against this
+ * before it is followed. A share link that tries to send us somewhere else is
+ * dropped rather than followed -- the renderer then shows the link as a link,
+ * which is what it did before any of this existed.
+ */
+const TIKTOK_HOSTS = new Set([
+  'vm.tiktok.com',
+  'vt.tiktok.com',
+  'www.tiktok.com',
+  'tiktok.com',
+  'm.tiktok.com',
+]);
+
+function isTikTokUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && TIKTOK_HOSTS.has(u.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/** A canonical post URL, which is where the walk is trying to get to. */
+const TIKTOK_POST_RE = /\/(?:video|photo)\/\d{6,32}/;
+
+/**
+ * One request, answering only "where does this redirect to".
+ *
+ * `redirect: 'manual'` is what makes this a single hop rather than a fetch:
+ * Electron suspends the request at the redirect and hands over the Location,
+ * and the request is aborted there. Nothing downloads a page body, and the
+ * chain cannot run away on its own.
+ *
+ * HEAD, because the answer is entirely in the headers. Resolves to null for no
+ * redirect, a refusal, a timeout, or anything else going wrong -- all of which
+ * mean the same thing to the caller.
+ */
+function tiktokHop(url: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const request = net.request({ url, method: 'HEAD', redirect: 'manual' });
+    let settled = false;
+    const finish = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        request.abort();
+      } catch {
+        // Already finished or already aborted; either way there is nothing
+        // left to stop.
+      }
+      resolve(value);
+    };
+    // Somebody is waiting on a click for this, so it fails fast rather than
+    // leaving a spinner up while a request that is not coming back times out
+    // at whatever the network stack's own patience happens to be.
+    const timer = setTimeout(() => finish(null), 8000);
+
+    request.on('redirect', (_status, _method, redirectUrl) => finish(redirectUrl));
+    request.on('response', () => finish(null));
+    request.on('error', () => finish(null));
+    request.end();
+  });
+}
+
+/**
+ * Share links already resolved this session.
+ *
+ * The same post gets played more than once -- somebody scrolls back, or it is
+ * quoted -- and the cheapest request is the one not made. Capped, because a
+ * long-lived window should not accumulate a map of every link anybody posted.
+ */
+const tiktokResolved = new Map<string, string>();
+const TIKTOK_CACHE_MAX = 200;
+
+/**
+ * Turn a TikTok share link into the canonical post URL it redirects to.
+ *
+ * This is the one place in the app that talks to TikTok before a frame is
+ * loaded, and it only runs when somebody has clicked play on that specific
+ * post -- see the comment on `tiktokShareUrl` in the renderer. It is here
+ * rather than in the renderer because the renderer is a file:// page: a cross
+ * origin redirect chain is not something it can read, and main is subject to
+ * neither CORS nor an opaque origin.
+ *
+ * Returns the resolved URL, or null. The renderer does not trust it either:
+ * the id it puts in the embed URL is the one `tiktokId` reads back out of
+ * this, digits checked, exactly as for a link that was pasted in full.
+ */
+ipcMain.handle('tiktok:resolve', async (_e, shareUrl: string) => {
+  // Re-checked here rather than taken on the renderer's word. Main is the side
+  // holding the ability to make this request, so main decides what it will ask
+  // for.
+  if (typeof shareUrl !== 'string' || !isTikTokUrl(shareUrl)) return null;
+
+  const cached = tiktokResolved.get(shareUrl);
+  if (cached) return cached;
+
+  let current = shareUrl;
+  // Five is more than a share link has ever needed and few enough that a
+  // redirect loop stops being our problem quickly.
+  for (let hop = 0; hop < 5; hop++) {
+    const next = await tiktokHop(current);
+    // No redirect: this is where the link lands, for better or worse.
+    if (!next) break;
+    if (!isTikTokUrl(next)) return null;
+    current = next;
+    // The canonical post URL is the whole point of the walk; there is no
+    // reason to make another request confirming it does not redirect again.
+    if (TIKTOK_POST_RE.test(new URL(current).pathname)) break;
+  }
+  if (current === shareUrl) return null;
+
+  if (tiktokResolved.size >= TIKTOK_CACHE_MAX) {
+    // Insertion order, so this is the oldest entry.
+    const oldest = tiktokResolved.keys().next().value;
+    if (oldest !== undefined) tiktokResolved.delete(oldest);
+  }
+  tiktokResolved.set(shareUrl, current);
+  return current;
+});
+
 /** The embed origins `frame-src` in the renderer's CSP allows. */
 const EMBED_ORIGINS = [
   'https://www.youtube-nocookie.com',

@@ -105,3 +105,42 @@ export function tiktokId(url: string): string | null {
   );
   return m ? m[1] : null;
 }
+
+/**
+ * The share link TikTok's own app hands out, normalised, or null.
+ *
+ * `vm.tiktok.com/XXXX`, `vt.tiktok.com/XXXX` and `tiktok.com/t/XXXX` carry no
+ * id at all; they are redirects, and only TikTok knows what to. The rule in
+ * `tiktokId` above still holds -- nothing is asked of TikTok for a link that
+ * merely scrolls past -- but the poster is already click-to-load, so the
+ * redirect can be followed at the same moment the frame is, which is after
+ * somebody has said they want to watch this one. Until then it is still just
+ * text on screen.
+ *
+ * What comes back is rebuilt from the parts that were checked rather than
+ * handed back as it arrived: it is given to the main process to request, so it
+ * should be a string this file constructed, not a string somebody typed into a
+ * message. The scheme is https whatever was written, since these hosts redirect
+ * http to it anyway and there is no reason to make the first hop in the clear.
+ */
+export function tiktokShareUrl(url: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+
+  // The token is the app's own opaque short code -- letters and digits, no
+  // separators, and no length worth trusting beyond a sane bound.
+  if (host === 'vm.tiktok.com' || host === 'vt.tiktok.com') {
+    const m = u.pathname.match(/^\/([A-Za-z0-9]{4,32})\/?$/);
+    return m ? `https://${host}/${m[1]}/` : null;
+  }
+  if (host === 'tiktok.com' || host === 'm.tiktok.com') {
+    const m = u.pathname.match(/^\/t\/([A-Za-z0-9]{4,32})\/?$/);
+    return m ? `https://www.tiktok.com/t/${m[1]}/` : null;
+  }
+  return null;
+}
