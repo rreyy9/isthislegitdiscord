@@ -99,9 +99,10 @@ export function tiktokId(url: string): string | null {
   if (host !== 'tiktok.com') return null;
 
   // /@someone/video/123, /@someone/photo/123 (a slideshow, which the player
-  // also handles), and the embed URL somebody may paste as-is.
+  // also handles), and either frame URL somebody may paste as-is -- the card
+  // at /embed/v2 or the player at /player/v1.
   const m = u.pathname.match(
-    /^\/(?:@[^/]+\/(?:video|photo)|embed(?:\/v\d+)?)\/(\d{6,32})/,
+    /^\/(?:@[^/]+\/(?:video|photo)|(?:embed|player)(?:\/v\d+)?)\/(\d{6,32})/,
   );
   return m ? m[1] : null;
 }
@@ -143,4 +144,102 @@ export function tiktokShareUrl(url: string): string | null {
     return m ? `https://www.tiktok.com/t/${m[1]}/` : null;
   }
   return null;
+}
+
+/**
+ * The origin the player frame is loaded from.
+ *
+ * Written down once because it is used twice and the two uses have to agree:
+ * it is what the frame `src` is built on, and it is what a `message` claiming
+ * to come from that frame is checked against. A player message is read by
+ * code that then draws something, so where it came from is the first question.
+ */
+export const TIKTOK_PLAYER_ORIGIN = 'https://www.tiktok.com';
+
+/**
+ * The frame URL for a post, or null if that is not an id.
+ *
+ * TikTok publishes two embeds. `/embed/v2` is the card the Share menu hands
+ * out -- an avatar, a description, a like-comment-share rail, a promo bar, and
+ * the post somewhere in the middle -- laid out to a height of its own
+ * choosing, so a box that does not happen to match it gets a scrollbar inside
+ * a chat message. `/player/v1` is the documented embedded player: the post and
+ * its controls and nothing else, filling whatever frame it is given.
+ *
+ * https://developers.tiktok.com/doc/embed-player/
+ *
+ * The parameters are the documented ones, and each is here for a reason:
+ *
+ * - `autoplay=1`, because the poster has already been clicked. Without it that
+ *   click is followed by a second one inside the frame, which is one more than
+ *   anybody expects. A browser may still refuse to start it, and says so as
+ *   error 3002 -- which is a click away from working and is not treated as a
+ *   post that failed to load. See `tiktokPlayerError`.
+ * - `rel=0`, so what follows the post is the author's own videos rather than
+ *   whatever TikTok would like this reader to watch next. The YouTube embed
+ *   carries the same parameter for the same reason.
+ * - `music_info=0` and `description=0` are TikTok's defaults today and are
+ *   still written out. The frame is a fixed shape; a default changed on their
+ *   side would put text in it that there is no room for.
+ *
+ * The id is checked here rather than taken on trust. It is interpolated into a
+ * URL, and the ids that reach this came out of a stranger's message or out of
+ * a redirect that somebody else's server chose.
+ */
+export function tiktokPlayerUrl(id: string): string | null {
+  if (!/^\d{6,32}$/.test(id)) return null;
+  const params = 'autoplay=1&rel=0&music_info=0&description=0';
+  return `${TIKTOK_PLAYER_ORIGIN}/player/v1/${id}?${params}`;
+}
+
+/**
+ * The code out of a player error message, or null if this is not one.
+ *
+ * The player talks to whatever is hosting it by posting `{ type, value,
+ * 'x-tiktok-player': true }`, and this reads the one message worth acting on.
+ * Everything is checked rather than destructured: this runs on every `message`
+ * the window receives, most of which have nothing to do with TikTok, and the
+ * caller is about to draw what it returns.
+ *
+ * 3002 deliberately comes back as null. It means the browser refused to start
+ * the video by itself, which is what `autoplay=1` asks for and what browsers
+ * routinely decline; the post is fine and the play button works. An error card
+ * in front of a video that plays is worse than no card at all.
+ *
+ * https://developers.tiktok.com/doc/embed-player/
+ */
+export function tiktokPlayerError(data: unknown): number | null {
+  if (!data || typeof data !== 'object') return null;
+  const message = data as Record<string, unknown>;
+  if (message['x-tiktok-player'] !== true) return null;
+  if (message['type'] !== 'onPlayerError') return null;
+
+  const value = message['value'];
+  if (!value || typeof value !== 'object') return null;
+
+  const code = Number((value as Record<string, unknown>)['errorCode']);
+  if (!Number.isInteger(code)) return null;
+  // Autoplay was refused, which is not a post that will not play.
+  return code === 3002 ? null : code;
+}
+
+/**
+ * What to say about a code `tiktokPlayerError` handed back.
+ *
+ * Three of the documented codes say something a reader would want to know, and
+ * the rest -- including any TikTok adds later -- get the wording the app used
+ * before it could tell them apart. None of them mention a number: "1001" is
+ * true and no help to anybody.
+ */
+export function tiktokErrorLabel(code: number): string {
+  switch (code) {
+    case 1001:
+      return 'This post isn’t on TikTok any more';
+    case 2001:
+      return 'TikTok couldn’t serve this one';
+    case 3001:
+      return 'This one wouldn’t play';
+    default:
+      return 'Couldn’t load this one';
+  }
 }

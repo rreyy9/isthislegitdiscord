@@ -3,7 +3,10 @@ import {
   IMAGE_EXT_RE,
   URL_RE,
   VIDEO_EXT_RE,
+  tiktokErrorLabel,
   tiktokId,
+  tiktokPlayerError,
+  tiktokPlayerUrl,
   tiktokShareUrl,
   youtubeId,
   youtubeStart,
@@ -136,6 +139,11 @@ describe('tiktokId', () => {
     expect(tiktokId('https://www.tiktok.com/embed/v2/1234567890123456789')).toBe(
       '1234567890123456789',
     );
+    // The player URL this app now builds, which somebody may equally well
+    // paste back in.
+    expect(tiktokId('https://www.tiktok.com/player/v1/1234567890123456789')).toBe(
+      '1234567890123456789',
+    );
   });
 
   it('has no id to give for a share link', () => {
@@ -223,5 +231,78 @@ describe('tiktokShareUrl', () => {
   it('returns null rather than throwing on nonsense', () => {
     expect(tiktokShareUrl('not a url')).toBeNull();
     expect(tiktokShareUrl('')).toBeNull();
+  });
+});
+
+
+describe('tiktokPlayerUrl', () => {
+  it('builds the documented player URL, with the parameters the frame needs', () => {
+    expect(tiktokPlayerUrl('1234567890123456789')).toBe(
+      'https://www.tiktok.com/player/v1/1234567890123456789' +
+        '?autoplay=1&rel=0&music_info=0&description=0',
+    );
+  });
+
+  it('checks the id again rather than trusting its caller', () => {
+    // This is the last thing standing between a path segment out of somebody's
+    // message and a URL the app loads in a frame, so it asks even though
+    // `tiktokId` already did.
+    expect(tiktokPlayerUrl('notanid')).toBeNull();
+    expect(tiktokPlayerUrl('123')).toBeNull();
+    expect(tiktokPlayerUrl('1234567890?x=1')).toBeNull();
+    expect(tiktokPlayerUrl('../../evil')).toBeNull();
+    expect(tiktokPlayerUrl('')).toBeNull();
+  });
+});
+
+describe('tiktokPlayerError', () => {
+  const error = (value: unknown) => ({
+    'x-tiktok-player': true,
+    type: 'onPlayerError',
+    value,
+  });
+
+  it('reads the code out of a player error', () => {
+    expect(tiktokPlayerError(error({ errorCode: 1001, errorType: 'INVALID_VIDEO' })))
+      .toBe(1001);
+    expect(tiktokPlayerError(error({ errorCode: 2001 }))).toBe(2001);
+  });
+
+  it('says nothing about autoplay being refused', () => {
+    // 3002 is the browser declining to start the video by itself, which is
+    // what `autoplay=1` asks for and what browsers routinely decline. The post
+    // plays on the next tap, so there is nothing to put a card in front of.
+    expect(tiktokPlayerError(error({ errorCode: 3002 }))).toBeNull();
+  });
+
+  it('ignores every other message the window receives', () => {
+    // This runs on every `message` event, most of which are nobody's business
+    // here -- and a page that framed us could send anything at all.
+    // The right shape without the flag that says whose it is.
+    expect(
+      tiktokPlayerError({ type: 'onPlayerError', value: { errorCode: 1001 } }),
+    ).toBeNull();
+    expect(
+      tiktokPlayerError({ 'x-tiktok-player': true, type: 'onStateChange', value: 1 }),
+    ).toBeNull();
+    expect(tiktokPlayerError(error(undefined))).toBeNull();
+    expect(tiktokPlayerError(error({ errorCode: 'lots' }))).toBeNull();
+    expect(tiktokPlayerError(error({}))).toBeNull();
+    expect(tiktokPlayerError('onPlayerError')).toBeNull();
+    expect(tiktokPlayerError(null)).toBeNull();
+    expect(tiktokPlayerError(undefined)).toBeNull();
+  });
+});
+
+describe('tiktokErrorLabel', () => {
+  it('has words for the codes that say something worth knowing', () => {
+    expect(tiktokErrorLabel(1001)).toMatch(/any more/);
+    expect(tiktokErrorLabel(2001)).toMatch(/TikTok/);
+    expect(tiktokErrorLabel(3001)).toMatch(/play/);
+  });
+
+  it('falls back rather than showing somebody a number', () => {
+    // Including for codes TikTok has not published yet.
+    expect(tiktokErrorLabel(9999)).toBe('Couldn’t load this one');
   });
 });

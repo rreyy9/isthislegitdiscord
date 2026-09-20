@@ -8,8 +8,14 @@ import {
   View,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { WebView } from 'react-native-webview';
-import { fileNameOf, type Embed } from '../link-utils';
+import { WebView, type WebViewMessageEvent } from 'react-native-webview';
+import {
+  fileNameOf,
+  tiktokErrorLabel,
+  tiktokPlayerError,
+  tiktokPlayerUrl,
+  type Embed,
+} from '../link-utils';
 import { Player } from './Attachments';
 import { useImageViewer } from './ImageViewer';
 import { radius, spacing, theme } from '../theme';
@@ -115,6 +121,30 @@ function YouTube({
 /* -------------------------------------------------------------- tiktok */
 
 /**
+ * Carry the player's own error messages out of the WebView.
+ *
+ * Inside a WebView the player page is the top document, so the message it
+ * posts to whatever is hosting it goes to itself. This listens for it there
+ * and hands it to the native side, which is the only channel a WebView has.
+ * Nothing else is forwarded: the frame only ever loads TikTok -- see
+ * `onShouldStartLoadWithRequest` on `Frame` -- and this passes on the one
+ * message shape that is worth drawing something about.
+ *
+ * https://developers.tiktok.com/doc/embed-player/
+ */
+const TIKTOK_ERROR_BRIDGE = `
+(function () {
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || typeof d !== 'object' || d['x-tiktok-player'] !== true) return;
+    if (d.type !== 'onPlayerError') return;
+    window.ReactNativeWebView.postMessage(JSON.stringify(d));
+  });
+})();
+true;
+`;
+
+/**
  * A TikTok post, on the same deal.
  *
  * There is no still to show first. YouTube publishes a thumbnail at a URL
@@ -122,6 +152,12 @@ function YouTube({
  * call, which is a request to TikTok for every link in the channel -- exactly
  * what the poster pattern exists to avoid. So the placeholder is drawn out of
  * nothing, and the frame is loaded when somebody asks for it.
+ *
+ * What gets framed is the embedded player rather than the share card the
+ * desktop client used to frame -- see `tiktokPlayerUrl`. On a phone that
+ * mattered twice over: the card is laid out to a height of its own choosing
+ * and scrolls inside itself when it does not get one, and the room a phone has
+ * for an embed is not that height.
  */
 function TikTok({
   id,
@@ -133,16 +169,50 @@ function TikTok({
   autoplay: boolean;
 }) {
   const [playing, setPlaying] = useState(autoplay);
+  const [failure, setFailure] = useState<string | null>(null);
+  const uri = tiktokPlayerUrl(id);
 
-  if (playing) {
+  // The player said it cannot play this one -- taken down, most likely, in the
+  // time between being sent and being tapped. A frame with nothing in it is
+  // worse than a card that says so and opens the app.
+  if (failure) {
+    return (
+      <Pressable
+        style={[styles.embed, styles.ttPoster]}
+        onPress={() => void Linking.openURL(url)}
+        accessibilityRole="button"
+        accessibilityLabel={`${failure}. Open on TikTok`}
+      >
+        <Text style={styles.ttMark}>♪</Text>
+        <Text style={[styles.ttLabel, styles.ttFailedLabel]}>
+          {failure} — open on TikTok
+        </Text>
+      </Pressable>
+    );
+  }
+
+  if (playing && uri) {
     return (
       <Frame
-        uri={`https://www.tiktok.com/embed/v2/${id}`}
-        // Portrait, which is what the format is, capped so one post is not the
-        // entire screen on a tall phone.
+        uri={uri}
+        // Portrait, which is what the format is. The player letterboxes a post
+        // that is not, against the same black the frame already is.
         ratio={9 / 16}
         maxHeight={PLAYER_MAX_HEIGHT}
-        label="TikTok video"
+        label="TikTok post"
+        injectedJavaScript={TIKTOK_ERROR_BRIDGE}
+        onMessage={(data) => {
+          let message: unknown;
+          try {
+            message = JSON.parse(data);
+          } catch {
+            // Not ours, or not JSON. Either way there is nothing to do with it.
+            return;
+          }
+          const code = tiktokPlayerError(message);
+          if (code === null) return;
+          setFailure(tiktokErrorLabel(code));
+        }}
       />
     );
   }
@@ -153,7 +223,7 @@ function TikTok({
       onPress={() => setPlaying(true)}
       onLongPress={() => void Linking.openURL(url)}
       accessibilityRole="button"
-      accessibilityLabel="Play TikTok video"
+      accessibilityLabel="Play TikTok post"
     >
       <Text style={styles.ttMark}>♪</Text>
       <Text style={styles.ttLabel}>Watch on TikTok</Text>
@@ -175,27 +245,46 @@ function TikTok({
  *   message, with no address bar and no way back.
  * - No file access and no third-party cookies. A player needs neither, and this
  *   is a frame loading a URL out of a stranger's message.
+ *
+ * `injectedJavaScript` and `onMessage` are how a caller hears from the page it
+ * framed -- the TikTok player reports that it cannot play something, and that
+ * is worth drawing. What arrives is a string the page chose, so the caller
+ * parses it defensively rather than believing it.
  */
 function Frame({
   uri,
   ratio,
   maxHeight,
   label,
+  injectedJavaScript,
+  onMessage,
 }: {
   uri: string;
   ratio: number;
   maxHeight?: number;
   label: string;
+  injectedJavaScript?: string;
+  onMessage?: (data: string) => void;
 }) {
   const [loading, setLoading] = useState(true);
   const host = hostOf(uri);
+
+  // Always handed to the `WebView`, because that prop is what puts
+  // `ReactNativeWebView.postMessage` in the page at all -- a frame with no
+  // caller listening simply has nothing injected that would call it.
+  function handleMessage(event: WebViewMessageEvent) {
+    onMessage?.(event.nativeEvent.data);
+  }
 
   return (
     <View
       style={[
         styles.embed,
         { aspectRatio: ratio },
-        maxHeight ? { maxHeight, aspectRatio: undefined, height: maxHeight } : null,
+        // The cap goes on the width and lets the height follow from the ratio.
+        // Fixing the height instead left the frame as wide as the column, which
+        // for a portrait post is a narrow video between two wide black bars.
+        maxHeight ? { maxWidth: Math.round(maxHeight * ratio) } : null,
       ]}
     >
       <WebView
@@ -209,6 +298,8 @@ function Frame({
         allowFileAccess={false}
         allowUniversalAccessFromFileURLs={false}
         thirdPartyCookiesEnabled={false}
+        injectedJavaScript={injectedJavaScript}
+        onMessage={handleMessage}
         onLoadEnd={() => setLoading(false)}
         accessibilityLabel={label}
         onShouldStartLoadWithRequest={(request) => {
@@ -355,6 +446,9 @@ const styles = StyleSheet.create({
   },
   ttMark: { color: theme.text, fontSize: 30 },
   ttLabel: { color: theme.textMuted, fontSize: 12, fontWeight: '600' },
+  // The failure wording is a sentence rather than two words, so it needs room
+  // to wrap and somewhere to wrap to.
+  ttFailedLabel: { textAlign: 'center', paddingHorizontal: spacing.lg },
   linkedImage: {
     width: '100%',
     // A fixed frame rather than the picture's own shape. The height of a linked

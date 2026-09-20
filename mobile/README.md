@@ -38,7 +38,7 @@ On top of that, the chat itself is at parity with the desktop client:
 |---|---|
 | **A hamburger menu** | Channels and the member roster in one panel, reachable from inside a channel. Not `expo-router`'s drawer — see [The drawer](#the-drawer). |
 | **Who is online** | The roster, online first, with last-seen under anybody who is away. Tap somebody for their handle and status. |
-| **Link embeds** | YouTube and TikTok play inline, click-to-play. Linked pictures and `.mp4`/`.webm`/`.m4v` too. Same `link-utils.ts` rules as the desktop client. |
+| **Link embeds** | YouTube and TikTok play inline, click-to-play. TikTok is the documented `/player/v1` frame rather than the share card, so a post is a post and not a card that scrolls inside itself. Linked pictures and `.mp4`/`.webm`/`.m4v` too. Same `link-utils.ts` rules as the desktop client. |
 | **Composing mentions** | `@` opens a picker; the draft holds names and `toMarkup` converts them to `<@id>` on the way out. The desktop client's longest-match rules, ported whole. |
 | **Attachments** | Send photos, videos and files. Incoming pictures draw inline, videos stream with the bearer token, everything else is a card with a Save button that goes to the share sheet. |
 | **Reactions** | Six quick ones plus a short picker, under a long press. Optimistic, reconciled by the server's answer. |

@@ -1732,7 +1732,7 @@ been wrong.
 
 | Module | What it pins down |
 |---|---|
-| `link-utils.ts` | That a URL does not swallow the full stop after it, and that only `http(s)` ever becomes an href — `javascript:` and `data:` must never match. YouTube and TikTok ids are checked against lookalike hosts, because both get interpolated into an embed URL. |
+| `link-utils.ts` | That a URL does not swallow the full stop after it, and that only `http(s)` ever becomes an href — `javascript:` and `data:` must never match. YouTube and TikTok ids are checked against lookalike hosts, because both get interpolated into a frame URL, and `tiktokPlayerUrl` checks the id a second time on the way in. Also `tiktokPlayerError`, which runs on every `message` the window receives and has to say no to nearly all of them — and which treats 3002, autoplay being refused, as no error at all. |
 | `audio-levels.ts` | Silence floors at −100 rather than −Infinity; the gate stays shut while it measures the room, holds through the gaps between words, and takes less to stay open than to open. |
 | `chat-format.ts` | Byte sizes worded the way the server words them, "Yesterday" decided by the calendar and not by elapsed hours, `lastSeenLabel` refusing to go negative when a clock is a few seconds ahead, and `guessReactions` removing a pile when the last person leaves it rather than drawing "👍 0". Also `channelIcon`: an AFK channel gets a different character from one people talk in, and a text channel gets a hash whatever the flag says. |
 | `emoji-utils.ts` | That a colon in `12:30`, in `note: this` and in every URL does not open the picker, that `:joy::joy:` is two emoji and not one and a leftover, that an unknown `:name:` is left exactly as it was typed rather than silently deleted, and that ❤️ keeps its variation selector — without it the server refuses the reaction outright. |
@@ -1842,7 +1842,16 @@ it removes nothing it cannot prove is its own.
 - **Links open in the real browser**, via `setWindowOpenHandler` — never in an Electron
   window, which has no address bar and is a good way to be phished.
 - **YouTube embeds are a still image until clicked**, so scrolling past a link loads no
-  third-party frame.
+  third-party frame. TikTok has no thumbnail to show without asking TikTok for one, so it
+  draws a placeholder instead and the bargain is the same.
+- **TikTok is framed as `/player/v1`, not as the share card.** The card at `/embed/v2` is a
+  post wrapped in an avatar, a description, a like-comment-share rail and a promo bar, and
+  it lays itself out to a height of its own choosing — 738px at the 325px the message
+  column gives it, which is why it used to scroll inside the message. The
+  [documented player](https://developers.tiktok.com/doc/embed-player/) is the post and its
+  controls, and it fills whatever frame it is handed. Same origin, so `frame-src` did not
+  change. It also reports why it cannot play something, and a post taken down between
+  being sent and being clicked now says so rather than leaving an empty frame.
 - **The token is stored with `safeStorage`** (DPAPI on Windows) through an IPC bridge, never
   in plaintext.
 - **`backgroundThrottling: false`.** Chromium throttles timers to ~1/sec in a hidden window,

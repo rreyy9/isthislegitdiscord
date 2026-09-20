@@ -699,12 +699,14 @@ button { font-family: inherit; cursor: pointer; }
 }
 .yt.poster:hover .yt-play { opacity: 1; }
 
-/* TikTok is portrait, and the embed carries its own header and caption on top
-   of the video -- 325 wide is the narrowest the player lays out at, and the
-   height is what it needs before it starts scrolling itself. */
+/* TikTok is portrait, and the box is the shape of the format rather than a
+   height measured off TikTok's share card. The embedded player fills whatever
+   frame it is given and letterboxes what does not fit; the card it replaced
+   laid itself out to a height of its own and put a scrollbar inside the
+   message whenever the box was shorter, which it always was. */
 .tt {
   margin-top: 6px; position: relative; width: 100%; max-width: 325px;
-  aspect-ratio: 325 / 580; border-radius: 8px; overflow: hidden;
+  aspect-ratio: 9 / 16; border-radius: 8px; overflow: hidden;
   background: #000;
 }
 .tt iframe { width: 100%; height: 100%; border: 0; display: block; }

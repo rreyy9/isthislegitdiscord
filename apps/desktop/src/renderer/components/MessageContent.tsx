@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   attachmentUrl,
   fetchAttachmentBytes,
@@ -7,9 +7,13 @@ import {
 import { bridge } from '../bridge';
 import {
   IMAGE_EXT_RE,
+  TIKTOK_PLAYER_ORIGIN,
   URL_RE,
   VIDEO_EXT_RE,
+  tiktokErrorLabel,
   tiktokId,
+  tiktokPlayerError,
+  tiktokPlayerUrl,
   tiktokShareUrl,
   youtubeId,
   youtubeStart,
@@ -67,7 +71,7 @@ function YouTube({ id, start }: { id: string; start: number | null }) {
 
 /* ------------------------------------------------------------- tiktok */
 
-/** Drawn rather than fetched, and used by both states of the poster below. */
+/** Drawn rather than fetched, and used by every state of the poster below. */
 const TIKTOK_MARK = (
   <svg viewBox="0 0 48 48" width="40" height="40">
     <path
@@ -87,12 +91,18 @@ const TIKTOK_MARK = (
  * out of nothing, and the frame is loaded when somebody asks for it.
  *
  * A link shared out of the TikTok app arrives as `vm.tiktok.com/XXXX` and
- * carries no id at all, so there is nothing to build an embed URL out of until
+ * carries no id at all, so there is nothing to build a frame URL out of until
  * the redirect has been followed. That happens on the same click, in main, and
  * the bargain is unchanged: a post costs a request when somebody wants to
  * watch it and nothing at all before. Which of the two shapes a friend
  * happened to paste is not something worth showing anybody, so both draw the
  * same poster and the resolving one simply takes a moment longer.
+ *
+ * What gets framed is the embedded player rather than the share card -- see
+ * `tiktokPlayerUrl` for which and why. The player also talks back, and the one
+ * thing it says that is worth acting on is that it cannot play this: a post
+ * taken down between being sent and being clicked used to leave a frame
+ * sitting there with nothing in it and no way to tell why.
  */
 function TikTok({
   id,
@@ -103,13 +113,42 @@ function TikTok({
   shareUrl: string | null;
   url: string;
 }) {
-  const [videoId, setVideoId] = useState(id);
+  const [src, setSrc] = useState(() => (id ? tiktokPlayerUrl(id) : null));
   const [state, setState] = useState<'poster' | 'resolving' | 'playing' | 'failed'>(
     'poster',
   );
+  const [failure, setFailure] = useState('Couldn’t load this one');
+  const frame = useRef<HTMLIFrameElement>(null);
+
+  /**
+   * What the player has to say for itself.
+   *
+   * Only while a frame is up, because there is nothing to hear otherwise, and
+   * only for this frame: `message` arrives on the window, so every player in
+   * the channel hears every other player. The origin is checked first and the
+   * sending window second -- anything inside the message that named which post
+   * it was about would be a claim, and `source` is not.
+   */
+  useEffect(() => {
+    if (state !== 'playing') return;
+
+    function onMessage(e: MessageEvent) {
+      if (e.origin !== TIKTOK_PLAYER_ORIGIN) return;
+      if (!frame.current || e.source !== frame.current.contentWindow) return;
+
+      const code = tiktokPlayerError(e.data);
+      if (code === null) return;
+
+      setFailure(tiktokErrorLabel(code));
+      setState('failed');
+    }
+
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [state]);
 
   async function play() {
-    if (videoId) {
+    if (src) {
       setState('playing');
       return;
     }
@@ -120,40 +159,47 @@ function TikTok({
     // The id is read back out of what came back rather than trusted from it.
     // That is a redirect target chosen by somebody else's server and it is
     // about to be interpolated into a frame src, so it goes through the same
-    // digits-only check as a link that was pasted in full.
+    // digits-only check as a link that was pasted in full -- twice, in fact,
+    // since `tiktokPlayerUrl` asks again before building the URL.
     const found = resolved ? tiktokId(resolved) : null;
-    if (!found) {
+    const next = found ? tiktokPlayerUrl(found) : null;
+    if (!next) {
       setState('failed');
       return;
     }
-    setVideoId(found);
+    setSrc(next);
     setState('playing');
   }
 
-  if (state === 'playing' && videoId) {
+  if (state === 'playing' && src) {
     return (
       <div className="tt">
         <iframe
-          src={`https://www.tiktok.com/embed/v2/${videoId}`}
-          allow="encrypted-media; picture-in-picture; fullscreen"
+          ref={frame}
+          src={src}
+          // `autoplay` is in the list because the URL asks for it. Without the
+          // permission the frame is refused the one thing it was told to do,
+          // and the click that loaded it does not start anything.
+          allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
           allowFullScreen
-          title="TikTok video"
+          title="TikTok post"
         />
       </div>
     );
   }
 
   if (state === 'failed') {
-    // TikTok would not say where the link goes -- it has been taken down, or
-    // the network is having a day. There is nothing here a second click would
-    // fix, so this stops offering the player and offers the link instead. The
-    // URL itself is still in the message text above either way.
+    // Either TikTok would not say where the share link goes, or the player
+    // said it could not play this one. Both mean there is nothing here a
+    // second click would fix, so this stops offering the player and offers the
+    // link instead. The URL itself is still in the message text above either
+    // way.
     return (
       <div className="tt poster failed" onClick={openExternal(url)} title={url}>
         <div className="tt-mark" aria-hidden>
           {TIKTOK_MARK}
         </div>
-        <div className="tt-label">Couldn’t load this one — open on TikTok</div>
+        <div className="tt-label">{failure} — open on TikTok</div>
       </div>
     );
   }
