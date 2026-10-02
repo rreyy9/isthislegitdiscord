@@ -47,6 +47,8 @@ export default function Channels() {
     status,
     restarting,
     update,
+    dismissedUpdate,
+    dismissUpdate,
     isUnread,
     mentionsIn,
     totalMentions,
@@ -57,7 +59,6 @@ export default function Channels() {
   const insets = useSafeAreaInsets();
 
   const [refreshing, setRefreshing] = useState(false);
-  const [dismissedUpdate, setDismissedUpdate] = useState<number | null>(null);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -125,15 +126,26 @@ export default function Channels() {
     [router],
   );
 
-  const showUpdate = update && dismissedUpdate !== update.versionCode;
+  /**
+   * Whether to interrupt somebody with the banner.
+   *
+   * Greater-than and not inequality, so dismissing 403 stays dismissed when
+   * 403 is re-announced on every reconnect, and stops applying the moment 404
+   * is published. `undefined` is the dismissal not having been read back yet,
+   * and draws nothing for the frame or two that takes -- a banner that appears
+   * and then removes itself is worse than one that arrives a moment late.
+   *
+   * Dismissing hides only this; Settings goes on offering the download.
+   */
+  const showUpdate =
+    update !== null &&
+    dismissedUpdate !== undefined &&
+    update.versionCode > (dismissedUpdate ?? 0);
 
   return (
     <View style={styles.flex}>
       {showUpdate && (
-        <UpdateBanner
-          version={update.version}
-          onDismiss={() => setDismissedUpdate(update.versionCode)}
-        />
+        <UpdateBanner version={update.version} onDismiss={dismissUpdate} />
       )}
       <ConnectionBanner status={status} restarting={restarting} />
 

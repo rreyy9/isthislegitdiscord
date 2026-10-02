@@ -71,6 +71,22 @@ interface SessionValue {
 
   /** A published APK newer than this build, or null. */
   update: { version: string; versionCode: number } | null;
+  /**
+   * The newest build somebody has dismissed the banner for.
+   *
+   * `undefined` while the stored value is still being read, which is not the
+   * same as `null` and the banner has to tell them apart: `null` means nothing
+   * was ever dismissed and the banner should draw, `undefined` means the
+   * answer is not in yet and drawing would risk a banner that appears and then
+   * vanishes.
+   *
+   * Separate from `update` rather than folded into it because Settings shows
+   * the update too, and must go on showing it after the banner is gone. A
+   * dismissal silences the interruption; it does not withdraw the offer.
+   */
+  dismissedUpdate: number | null | undefined;
+  /** Silence the banner for the version currently on offer. Persists. */
+  dismissUpdate: () => void;
 
   signIn: (
     serverUrl: string,
@@ -174,6 +190,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<Status>('disconnected');
   const [restarting, setRestarting] = useState(false);
   const [update, setUpdate] = useState<SessionValue['update']>(null);
+  const [dismissedUpdate, setDismissedUpdate] =
+    useState<SessionValue['dismissedUpdate']>(undefined);
   const [reconnectCount, setReconnectCount] = useState(0);
 
   /**
@@ -241,6 +259,39 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, []);
+
+  /**
+   * The dismissed versionCode, read once at launch beside the preferences.
+   *
+   * Read even before there is an update to compare it to, because the banner
+   * draws off the first `config` response -- which can land before a
+   * SecureStore read that started earlier, over a fast connection. Holding
+   * `undefined` until this resolves is what stops the banner flashing up and
+   * then disappearing on somebody who already dismissed it.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void store.getDismissedUpdate().then((code) => {
+      if (!cancelled) setDismissedUpdate(code);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Wave away the banner for the build on offer.
+   *
+   * The versionCode is taken from `update` here rather than passed in by the
+   * banner, so what gets written is the version that was actually being
+   * offered at the moment of the tap -- not one the caller read a render ago.
+   */
+  const dismissUpdate = useCallback(() => {
+    const code = update?.versionCode;
+    if (typeof code !== 'number') return;
+    setDismissedUpdate(code);
+    void store.setDismissedUpdate(code);
+  }, [update]);
 
   /**
    * The preferences, again, as a ref.
@@ -827,6 +878,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       status,
       restarting,
       update,
+      dismissedUpdate,
+      dismissUpdate,
       signIn,
       register,
       signOut,
@@ -859,6 +912,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       status,
       restarting,
       update,
+      dismissedUpdate,
+      dismissUpdate,
       signIn,
       register,
       signOut,

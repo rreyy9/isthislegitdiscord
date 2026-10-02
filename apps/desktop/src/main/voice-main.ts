@@ -3,6 +3,7 @@ import type { Streams } from 'electron';
 import { appendFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  BindingCapture,
   matchesDown,
   matchesUp,
   MOD_ALT,
@@ -158,24 +159,13 @@ type Uiohook = typeof import('uiohook-napi');
  */
 const MOUSE_LEFT = 1;
 
-/**
- * The modifier keys themselves, which cannot be the main key of a binding —
- * "Ctrl" alone is not a shortcut, and accepting it would produce a binding
- * that fired as a side effect of every other one.
- */
-const MODIFIER_KEYCODES = new Set([
-  29, 3613, // Ctrl, CtrlRight
-  56, 3640, // Alt, AltRight
-  42, 54, // Shift, ShiftRight
-  3675, 3676, // Meta, MetaRight
-]);
-
 let uiohook: Uiohook | null = null;
 let hookRunning = false;
 let keybinds: Keybind[] = [];
 /** Row ids currently down, so a repeat does not re-fire and a release can. */
 const heldRows = new Set<string>();
 let captureResolve: ((binding: Binding | null) => void) | null = null;
+let capture = new BindingCapture();
 
 /**
  * A native module, so it can simply fail to load — a machine without the
@@ -245,13 +235,9 @@ export function registerKeybinds(getWindow: () => BrowserWindow | null) {
       // Left click drives the UI, so it is not offered as a binding; the
       // capture stays open rather than being cancelled by it.
       if (type === 'mouse' && code === MOUSE_LEFT) return;
-      // Likewise a bare modifier: the user is part-way through a combination,
-      // and taking Ctrl as the binding would end the capture before they had
-      // pressed the key they were reaching for.
-      if (type === 'key' && MODIFIER_KEYCODES.has(code)) return;
-      const resolve = captureResolve;
-      captureResolve = null;
-      resolve({ type, code, mods });
+      // A modifier is undecided until it is released -- see BindingCapture.
+      const binding = capture.down({ type, code, mods });
+      if (binding) finishCapture(binding);
       return;
     }
 
@@ -265,7 +251,20 @@ export function registerKeybinds(getWindow: () => BrowserWindow | null) {
     }
   }
 
+  function finishCapture(binding: Binding) {
+    const resolve = captureResolve;
+    captureResolve = null;
+    resolve?.(binding);
+  }
+
   function onUp(type: 'key' | 'mouse', code: number) {
+    // No early return: a binding held when the capture began still needs its
+    // release, or it stays held.
+    if (captureResolve) {
+      const binding = capture.up(type, code);
+      if (binding) finishCapture(binding);
+    }
+
     for (const row of keybinds) {
       if (!heldRows.has(row.id)) continue;
       if (!matchesUp(row.binding, type, code)) continue;
@@ -362,6 +361,7 @@ export function registerKeybinds(getWindow: () => BrowserWindow | null) {
   ipcMain.handle('keybind:capture', async () => {
     if (!ensureHook()) return null;
     const binding = await new Promise<Binding | null>((resolve) => {
+      capture = new BindingCapture();
       captureResolve = resolve;
       setTimeout(() => {
         if (captureResolve) {

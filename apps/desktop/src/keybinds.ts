@@ -24,6 +24,26 @@ export const MOD_SHIFT = 4;
 export const MOD_META = 8;
 
 /**
+ * The modifier keys by uiohook keycode, and the bit each one sets while held.
+ * Left and right are separate keys with the same bit.
+ */
+const MODIFIER_BITS: ReadonlyMap<number, number> = new Map([
+  [29, MOD_CTRL],
+  [3613, MOD_CTRL], // CtrlRight
+  [56, MOD_ALT],
+  [3640, MOD_ALT], // AltRight
+  [42, MOD_SHIFT],
+  [54, MOD_SHIFT], // ShiftRight
+  [3675, MOD_META],
+  [3676, MOD_META], // MetaRight
+]);
+
+/** The modifier bit a binding's own key sets, or 0 if it is not a modifier. */
+function modifierBit(binding: { type: 'key' | 'mouse'; code: number }): number {
+  return binding.type === 'key' ? (MODIFIER_BITS.get(binding.code) ?? 0) : 0;
+}
+
+/**
  * What has to be held. Keyboard keys are uiohook keycodes; mouse buttons are
  * uiohook's own numbering (1 left, 2 right, 3 middle, then whatever else the
  * mouse has). The two spaces overlap — keycode 2 is the "1" key — so the kind
@@ -122,7 +142,11 @@ export function matchesUp(
  * on bare M fires when Ctrl+M is pressed, but not the other way round.
  */
 export function shadows(a: Binding, b: Binding): boolean {
-  return matchesDown(a, b);
+  if (matchesDown(a, b)) return true;
+  // A modifier bound on its own fires on the way into every combination that
+  // holds it: Alt goes down before the V of Alt+V does.
+  const bit = modifierBit(a);
+  return bit !== 0 && (b.mods & bit) !== 0 && (a.mods & b.mods) === a.mods;
 }
 
 /**
@@ -141,4 +165,43 @@ export function conflictsFor(row: Keybind, rows: Keybind[]): Keybind[] {
       (shadows(other.binding, row.binding) ||
         shadows(row.binding, other.binding)),
   );
+}
+
+/**
+ * Turns what is pressed while the settings page says "Press a key…" into a
+ * binding.
+ *
+ * Any key is bindable, the modifiers on their own included -- bare Alt is a
+ * popular push-to-talk key. The catch is that a modifier cannot decide the
+ * binding when it goes down, because it might be the start of Ctrl+X. So it is
+ * held as a candidate, and becomes the binding if it comes back up with
+ * nothing else pressed in between. Everything else decides on its press, with
+ * whatever modifiers are held at the time.
+ *
+ * One per capture: a fresh capture starts with nothing pending.
+ */
+export class BindingCapture {
+  private pending: Binding | null = null;
+
+  /** The binding, once this press decides it; null while still undecided. */
+  down(event: InputEvent): Binding | null {
+    const bit = modifierBit(event);
+    if (bit !== 0) {
+      // Its own bit off, so bare Alt is Alt rather than Alt + Alt. A
+      // modifier pressed after another one becomes the candidate in its place,
+      // carrying the first as its modifier.
+      this.pending = { type: 'key', code: event.code, mods: event.mods & ~bit };
+      return null;
+    }
+    this.pending = null;
+    return { type: event.type, code: event.code, mods: event.mods };
+  }
+
+  /** The candidate modifier, if this is it being let go. */
+  up(type: 'key' | 'mouse', code: number): Binding | null {
+    const pending = this.pending;
+    if (!pending || !matchesUp(pending, type, code)) return null;
+    this.pending = null;
+    return pending;
+  }
 }

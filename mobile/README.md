@@ -80,7 +80,9 @@ so `npm start` and the QR code still work for everything above. An APK is only
 needed for a real installed app, as before.
 
 **`npm run apk -- --clean` after pulling this**, because `app.json` gained
-three plugins and `android/` is generated from it.
+three plugins and `android/` is generated from it. (An ordinary `npm run apk`
+now re-runs the prebuild too, so a version bump alone no longer needs
+`--clean`; a fresh set of plugins still does.)
 
 ---
 
@@ -299,6 +301,13 @@ One consequence: a prerelease suffix is ignored, so `0.2.0-beta.1` and `0.2.0`
 produce the same code. Don't hand out a beta and then the release without a
 patch bump.
 
+Having one home for the number is necessary and was not sufficient: it also has
+to reach the build. `npm version` moves it in `package.json`, `app.config.js`
+derives the code from there, and `expo prebuild` is what writes both into
+`android/app/build.gradle` — which is the file Gradle actually compiles. Miss
+that last step and the version has a single home *and* ships wrong. See
+[Building an APK](#building-an-apk).
+
 ---
 
 ## Building an APK
@@ -308,16 +317,33 @@ cd mobile
 npm run apk
 ```
 
-Generates `android/` if absent, runs `gradlew assembleRelease`, verifies the
-signature, and writes to `mobile/release/`:
+Runs `expo prebuild` (every time — see below), then `gradlew assembleRelease`,
+then verifies both the signature and the version the finished APK declares.
+Writes to `mobile/release/`:
 
 - `isthislegit-<version>.apk`
 - `latest.json` — version, versionCode, sha256, size
 
-Use `npm run apk -- --clean` after changing `app.json`, `app.config.js`,
-`package.json`'s `expo` block, or anything in `plugins/` — that regenerates
-`android/` from scratch. The first build takes ~10 minutes (Gradle, the NDK and
-the C++ toolchain all download); later ones are a couple of minutes.
+**The prebuild is not conditional, and that is the point.** It is the step that
+copies `version` and `versionCode` out of the config and into
+`android/app/build.gradle`, which is the only thing Gradle reads. It used to be
+skipped whenever `android/` already existed, and so every release from 0.1.1 to
+0.4.3 shipped an APK compiled from a `build.gradle` still saying `versionCode
+100` / `versionName "0.1.0"`. The manifest beside it was correct, the file was
+named after the right version, and the only visible symptom was on the phones:
+Settings reporting 0.1.0 and an update banner that came back after every
+install, because Android compares `versionCode` and theirs had never moved.
+
+`build-apk.mjs` now also reads the version back off the built APK with `aapt2`
+and refuses to continue if it disagrees with the config — the same belt-and-
+braces as the debug-signing check, and for the same reason: it looks at the
+artefact rather than at the intent.
+
+`npm run apk -- --clean` throws `android/` away first. Still worth it when
+Gradle misbehaves, or after a change to `plugins/`, but it is no longer needed
+merely to pick up a version bump. The first build takes ~10 minutes (Gradle,
+the NDK and the C++ toolchain all download); later ones are a couple of
+minutes.
 
 `android/` is **not** committed. It is derived from the config, and committing
 it would mean every config change had to be made in two places — the second of
@@ -398,6 +424,12 @@ That uploads `latest.json` and the APK to staging, then publishes. On publish
 the server emits `android:update-available`, and every connected phone shows a
 banner. The banner opens the APK's URL in the browser; the person taps the
 finished download to install.
+
+Dismissing the banner writes that versionCode to SecureStore, so it stays
+dismissed across launches — and stops being dismissed the moment a higher one
+is published, because the comparison is greater-than. Settings goes on offering
+the download either way: waving away an interruption is not the same as
+declining the update.
 
 `-StageOnly` uploads without publishing. Nothing reaches any phone until a
 publish.
@@ -577,6 +609,15 @@ written that way reports "java is not on PATH" on a machine with a good JDK.
 
 - **Updates compare `versionCode`, not the semver.** It is what Android
   compares, and what the server guarantees rises with every build.
+
+- **The build verifies the version it just produced.** Deriving `versionCode`
+  from one stored semver made it impossible to typo and did nothing about the
+  step that carries it into the build: a conditional `expo prebuild` let six
+  releases go out declaring 0.1.0 inside, and the failure was invisible until
+  it was on somebody's phone. `build-apk.mjs` now prebuilds unconditionally
+  *and* reads the version back off the APK with `aapt2`. Two checks for one
+  number is right when a wrong answer is silent at every point where anybody
+  would look.
 
 - **"Remember me" stores the real password, opt-in, and survives Sign out.**
   The token already keeps somebody signed in for thirty days; the tick box is

@@ -30,6 +30,7 @@ import * as SecureStore from 'expo-secure-store';
 const TOKEN = 'isthislegit.token';
 const SERVER = 'isthislegit.serverUrl';
 const LOGIN = 'isthislegit.login';
+const DISMISSED_UPDATE = 'isthislegit.dismissedUpdate';
 
 /**
  * The address the app talks to when nothing has been chosen yet.
@@ -119,4 +120,29 @@ export const store = {
   },
   setLogin: (login: SavedLogin) => write(LOGIN, JSON.stringify(login)),
   clearLogin: () => clear(LOGIN),
+
+  /**
+   * The highest versionCode somebody has waved away, or null.
+   *
+   * Here rather than in `prefs` because it is not a setting -- nothing in
+   * Settings shows it and nobody turns it back on. It is a note about one
+   * build, and the banner is the only thing that reads it.
+   *
+   * Deliberately not cleared by `signOut`. Which build is installed is a fact
+   * about the phone, not about the account, and re-showing a dismissed banner
+   * because somebody signed out and back in would be the same nagging the
+   * dismissal exists to stop. It is also the one value here that a *newer*
+   * build makes irrelevant on its own: the comparison is greater-than, so the
+   * next release clears it by being newer.
+   */
+  async getDismissedUpdate(): Promise<number | null> {
+    const raw = await read(DISMISSED_UPDATE);
+    if (!raw) return null;
+    const parsed = Number.parseInt(raw, 10);
+    // Anything unparseable is nothing dismissed, which shows the banner. The
+    // failure worth avoiding is the other one: a bad value that hides it.
+    return Number.isFinite(parsed) ? parsed : null;
+  },
+  setDismissedUpdate: (versionCode: number) =>
+    write(DISMISSED_UPDATE, String(versionCode)),
 };

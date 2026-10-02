@@ -7,8 +7,12 @@
  * versionCode Android compares, the file, and the sha256 of its bytes.
  *
  *   node scripts/build-apk.mjs              build, sign, write the manifest
- *   node scripts/build-apk.mjs --clean      regenerate android/ first
+ *   node scripts/build-apk.mjs --clean      throw android/ away and rebuild it
  *   node scripts/build-apk.mjs --allow-debug-signing
+ *
+ * `expo prebuild` runs every time, and the APK's own declared version is read
+ * back off the finished file and checked against the config. Both are here
+ * because of the same incident -- see the notes on each.
  *
  * Output lands in `mobile/release/`. Upload it with
  * `infra/publish-android-update.ps1`.
@@ -26,6 +30,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -275,6 +280,108 @@ function assertNotDebugSigned(apk) {
   }
 }
 
+/* --------------------------------------------------- the version, read back */
+
+/**
+ * `aapt2` from the newest build-tools installed, or null.
+ *
+ * Part of the SDK that Gradle already required, so on any machine that can
+ * reach this line it is almost certainly there. Almost, because build-tools is
+ * a separate SDK package from platform-tools and somebody could have a
+ * platform without one.
+ */
+function findAapt2(sdk) {
+  const dir = path.join(sdk, 'build-tools');
+  if (!existsSync(dir)) return null;
+
+  const exe = process.platform === 'win32' ? 'aapt2.exe' : 'aapt2';
+  // Compared as numbers and not as strings, or "9.0.0" sorts above "36.0.0".
+  const order = (v) => v.split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const newestFirst = (a, b) => {
+    const [x, y] = [order(b), order(a)];
+    for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+      const d = (x[i] ?? 0) - (y[i] ?? 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  };
+
+  const found = readdirSync(dir)
+    .filter((name) => existsSync(path.join(dir, name, exe)))
+    .sort(newestFirst);
+  return found.length ? path.join(dir, found[0], exe) : null;
+}
+
+/** What an APK declares about itself, or null if aapt2 could not say. */
+function declaredVersion(apk, sdk) {
+  const aapt2 = findAapt2(sdk);
+  if (aapt2 === null) return null;
+
+  let badging;
+  try {
+    badging = execFileSync(aapt2, ['dump', 'badging', apk], {
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
+
+  const code = /versionCode='(\d+)'/.exec(badging);
+  const name = /versionName='([^']*)'/.exec(badging);
+  if (!code || !name) return null;
+  return { versionCode: Number(code[1]), versionName: name[1] };
+}
+
+/**
+ * Check the APK against the config that was supposed to produce it.
+ *
+ * The same shape of check as `assertNotDebugSigned`, for the same reason: it
+ * reads the artefact rather than the intent. The prebuild above should make
+ * this impossible, and it was equally impossible before -- the version had one
+ * home, it was derived rather than stored, and it still shipped wrong for six
+ * releases because a step that propagates it was conditional. A check that
+ * looks at the finished bytes does not care which step went missing.
+ *
+ * It matters more than it looks: `versionCode` is the only number Android
+ * compares, so an APK that declares a stale one installs perfectly and then
+ * misreports itself forever. There is no symptom at build time, and the
+ * symptom on the phone -- an update banner that will not go away -- does not
+ * point anywhere near here.
+ */
+function assertVersion(apk, sdk, version, versionCode) {
+  const declared = declaredVersion(apk, sdk);
+  if (declared === null) {
+    warn(
+      'aapt2 could not read the APK, so its declared version was not ' +
+        'verified. It ships in the build-tools package of the SDK.',
+    );
+    return;
+  }
+
+  if (
+    declared.versionName === version &&
+    declared.versionCode === versionCode
+  ) {
+    say(
+      `APK declares ${declared.versionName} ` +
+        `(versionCode ${declared.versionCode})`,
+    );
+    return;
+  }
+
+  die(
+    `That APK declares version ${declared.versionName} (versionCode ` +
+      `${declared.versionCode}), but the config says ${version} ` +
+      `(versionCode ${versionCode}).\n` +
+      '    Publishing it would hand out a build that misreports itself: the\n' +
+      '    manifest would say one version and the phones another. A phone\n' +
+      '    whose versionCode did not rise is then offered the update it has\n' +
+      '    just installed, every time it connects, forever.\n' +
+      '    android/ is stale. Rebuild it with:  npm run apk -- --clean',
+  );
+}
+
 /* ------------------------------------------------------------------ main */
 
 const config = resolvedConfig();
@@ -306,10 +413,34 @@ if (!signed) {
 
 /* ------------------------------------------------------------- prebuild */
 
-if (clean || !existsSync(ANDROID_DIR)) {
-  say(clean ? 'Regenerating android/ ...' : 'No android/ yet - generating it ...');
-  expo(['prebuild', '--platform', 'android', ...(clean ? ['--clean'] : [])]);
-}
+/**
+ * Every build, and not only when `android/` is missing or `--clean` was asked
+ * for.
+ *
+ * `expo prebuild` is what writes `version` and `versionCode` into
+ * `android/app/build.gradle`, and Gradle compiles what that file says -- not
+ * what `expo config` resolved twenty lines above. Skipping the prebuild
+ * because the directory happened to exist meant the two could disagree, and
+ * for six releases they did: every APK from 0.1.1 to 0.4.3 was compiled from a
+ * build.gradle still reading `versionCode 100` / `versionName "0.1.0"`, left
+ * behind by the one prebuild that ever ran. The file was named after the
+ * version it was supposed to be and the manifest beside it said 403, so
+ * nothing downstream noticed -- while every phone that installed it kept
+ * reporting 0.1.0 in Settings and kept being offered the update it had just
+ * installed, because its versionCode had never moved.
+ *
+ * A warm prebuild costs a few seconds. That is the entire price of this not
+ * happening again, and the failure it buys off is invisible until somebody
+ * else is holding the phone.
+ */
+say(
+  clean
+    ? 'Regenerating android/ ...'
+    : existsSync(ANDROID_DIR)
+      ? 'Syncing android/ with the config ...'
+      : 'No android/ yet - generating it ...',
+);
+expo(['prebuild', '--platform', 'android', ...(clean ? ['--clean'] : [])]);
 
 /* -------------------------------------------------------------- gradle */
 
@@ -354,6 +485,7 @@ if (!existsSync(built)) {
   die(`Gradle finished but there is no APK at ${built}.`);
 }
 
+assertVersion(built, sdkPath, version, versionCode);
 if (!allowDebugSigning) assertNotDebugSigned(built);
 
 /* ------------------------------------------------------ name and hash it */

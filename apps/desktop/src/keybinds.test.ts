@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BindingCapture,
   conflictsFor,
   matchesDown,
   matchesUp,
@@ -143,5 +144,63 @@ describe('conflictsFor', () => {
       row('c', 'disconnect', mouse(5)),
     ];
     for (const r of rows) expect(conflictsFor(r, rows)).toEqual([]);
+  });
+});
+
+describe('BindingCapture', () => {
+  const ALT = 56;
+  const CTRL = 29;
+  const press = (code: number, mods = 0) => ({ type: 'key' as const, code, mods });
+
+  it('binds an ordinary key on its press', () => {
+    const c = new BindingCapture();
+    expect(c.down(press(V))).toEqual(key(V));
+  });
+
+  it('binds bare Alt when it is released alone', () => {
+    const c = new BindingCapture();
+    // uiohook may report Alt's own bit on its own keydown; it is not a modifier
+    // of itself.
+    expect(c.down(press(ALT, MOD_ALT))).toBeNull();
+    expect(c.up('key', ALT)).toEqual(key(ALT));
+  });
+
+  it('binds the combination when a key follows the modifier', () => {
+    const c = new BindingCapture();
+    expect(c.down(press(ALT, MOD_ALT))).toBeNull();
+    expect(c.down(press(V, MOD_ALT))).toEqual(key(V, MOD_ALT));
+    expect(c.up('key', ALT)).toBeNull();
+  });
+
+  it('binds a modifier pair on the release of the second', () => {
+    const c = new BindingCapture();
+    c.down(press(CTRL, MOD_CTRL));
+    expect(c.down(press(ALT, MOD_CTRL | MOD_ALT))).toBeNull();
+    expect(c.up('key', CTRL)).toBeNull();
+    expect(c.up('key', ALT)).toEqual(key(ALT, MOD_CTRL));
+  });
+
+  it('binds a mouse button with the modifiers held', () => {
+    const c = new BindingCapture();
+    c.down(press(ALT, MOD_ALT));
+    expect(c.down({ type: 'mouse', code: 4, mods: MOD_ALT })).toEqual(
+      mouse(4, MOD_ALT),
+    );
+  });
+});
+
+describe('bare modifier bindings', () => {
+  const ALT = 56;
+
+  it('fire on their own keydown', () => {
+    expect(matchesDown(key(ALT), { type: 'key', code: ALT, mods: MOD_ALT })).toBe(
+      true,
+    );
+  });
+
+  it('are reported as shadowing every combination that holds them', () => {
+    expect(shadows(key(ALT), key(V, MOD_ALT))).toBe(true);
+    expect(shadows(key(ALT), key(V, MOD_CTRL))).toBe(false);
+    expect(shadows(key(ALT), key(V))).toBe(false);
   });
 });

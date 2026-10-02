@@ -5,6 +5,7 @@ import {
   ClipboardItem,
   dialog,
   ipcMain,
+  Menu,
   nativeImage,
   net,
   safeStorage,
@@ -578,6 +579,7 @@ function createWindow() {
   // navigating the renderer away from our own page. Both windows get both:
   // see `confineToApp`.
   confineToApp(win);
+  devShortcuts(win);
 
   loadRenderer(win);
   if (isDev && process.env['ELECTRON_RENDERER_URL']) win.webContents.openDevTools();
@@ -640,6 +642,32 @@ function confineToApp(win: BrowserWindow) {
 }
 
 /**
+ * The two shortcuts kept from Electron's default menu, which is gone.
+ *
+ * The menu went because Alt belongs to it on Windows: pressing Alt focused the
+ * menu bar, and whatever came next went to File/Edit/View rather than the app
+ * -- which broke any keybinding with Alt in it. Its shortcuts went with it, so
+ * the ones worth having are put back by hand. Deliberately not plain Ctrl+R:
+ * a reload drops a voice call, and that combination is too easy to hit.
+ *
+ * Packaged builds too: the dev console is how anybody looks at a problem on a
+ * real install, and force reload is how they get out of one.
+ */
+function devShortcuts(win: BrowserWindow) {
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    const ctrlShift = input.control && input.shift && !input.alt;
+    if (input.key === 'F12' || (ctrlShift && input.code === 'KeyI')) {
+      event.preventDefault();
+      win.webContents.toggleDevTools();
+    } else if (ctrlShift && input.code === 'KeyR') {
+      event.preventDefault();
+      win.webContents.reloadIgnoringCache();
+    }
+  });
+}
+
+/**
  * The watch party window.
  *
  * A second window rather than a panel in the main one, because that is the
@@ -689,6 +717,7 @@ function createPartyWindow() {
   partyWindow = win;
   watchBounds(win, 'partyWindow');
   confineToApp(win);
+  devShortcuts(win);
 
   win.on('closed', () => {
     if (partyWindow === win) partyWindow = null;
@@ -1034,6 +1063,11 @@ function allowEmbedReferrers() {
 }
 
 app.whenReady().then(() => {
+  // No menu at all, rather than a hidden one: a hidden menu still owns its
+  // accelerators, and with a visible one Alt focuses the bar. The shortcuts
+  // worth keeping are in `devShortcuts`.
+  Menu.setApplicationMenu(null);
+
   // Microphone and screen capture, and nothing else. Without this the renderer
   // gets whatever Electron's default happens to be; being explicit means a
   // future dependency cannot quietly ask for geolocation or notifications.

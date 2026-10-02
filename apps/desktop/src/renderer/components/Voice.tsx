@@ -465,8 +465,9 @@ function KeybindSettings({
             {waiting && (
               <div className="hint">
                 Press any key or mouse button, with modifiers if you want them.
-                Left click and the modifier keys on their own are skipped, so
-                this panel stays usable. Ten seconds, then it gives up.
+                A modifier on its own (Alt, Ctrl, Shift) binds when you let go
+                of it. Left click is skipped, so this panel stays usable. Ten
+                seconds, then it gives up.
               </div>
             )}
 
