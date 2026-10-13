@@ -183,6 +183,20 @@
         "reveal": "always"
       }
     },
+    {
+      "label": "Deploy desktop client  →  https://isthislegit.duckdns.org",
+      "detail": "infra\\publish-desktop-update.ps1. Asks for an admin username, then the script asks for the password in the terminal -- typed there rather than into a VS Code prompt so it never lands on a command line. Uploads whatever apps\\desktop\\release holds and publishes it; does not build, so run Build and package client first. Every connected client is told about the new version.",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File infra\\publish-desktop-update.ps1 -ServerUrl https://isthislegit.duckdns.org -Username \"${input:adminUsername}\"",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always",
+        "focus": true
+      }
+    },
 
     {
       "label": "Set Android version",
@@ -211,6 +225,20 @@
         "group": "isthislegit",
         "panel": "dedicated",
         "reveal": "always"
+      }
+    },
+    {
+      "label": "Deploy Android client  →  https://isthislegit.duckdns.org",
+      "detail": "infra\\publish-android-update.ps1. Asks for an admin username, then the script asks for the password in the terminal -- typed there rather than into a VS Code prompt so it never lands on a command line. Uploads whatever mobile\\release holds and publishes it; does not build, so run Build and package Android client first. Every connected phone is told about the new version.",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File infra\\publish-android-update.ps1 -ServerUrl https://isthislegit.duckdns.org -Username \"${input:adminUsername}\"",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": {
+        "group": "isthislegit",
+        "panel": "dedicated",
+        "reveal": "always",
+        "focus": true
       }
     },
     {
@@ -254,6 +282,13 @@
       "id": "androidVersion",
       "type": "promptString",
       "description": "New version for the Android client, e.g. 0.2.3 (minor and patch stay under 100)"
+    },
+    // Only the username. The password is read by the publish script itself
+    // with Read-Host -AsSecureString, in the task terminal.
+    {
+      "id": "adminUsername",
+      "type": "promptString",
+      "description": "Admin username on the server"
     }
   ]
 }

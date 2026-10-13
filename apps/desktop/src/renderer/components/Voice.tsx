@@ -16,6 +16,7 @@ import {
 import type { Updates } from '../updates';
 import { bridge } from '../bridge';
 import { channelIcon } from './chat-format';
+import { PhoneAppSettings } from './PhoneApp';
 import { ProfileSettings } from './ProfileSettings';
 import {
   listAudioDevices,
@@ -563,6 +564,7 @@ type Section =
   | 'keybinds'
   | 'notifications'
   | 'behaviour'
+  | 'phone'
   | 'about';
 
 /**
@@ -600,6 +602,11 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
     id: 'behaviour',
     label: 'Behaviour',
     blurb: 'What the app does on its own when you open it.',
+  },
+  {
+    id: 'phone',
+    label: 'Phone app',
+    blurb: 'Put isthislegit on an Android phone. Scan the code, install, and sign in with the same account.',
   },
   {
     id: 'about',
@@ -689,6 +696,8 @@ export function SettingsModal({
             {section === 'profile' && (
               <ProfileSettings me={me} onSaved={onProfileSaved} />
             )}
+
+            {section === 'phone' && <PhoneAppSettings />}
 
             {section === 'about' && <AboutSettings updates={updates} />}
 

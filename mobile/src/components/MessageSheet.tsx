@@ -5,6 +5,7 @@ import { EMOJI_GROUPS, QUICK_REACTIONS } from '../emoji';
 import { plainMentions, quoteLine } from '../format';
 import { radius, spacing, theme } from '../theme';
 import type { Message } from '../types';
+import { Icon } from './Icon';
 import { Sheet, SheetDivider, SheetRow } from './Sheet';
 
 /**
@@ -124,24 +125,24 @@ export function MessageSheet({
               accessibilityRole="button"
               accessibilityLabel="More reactions"
             >
-              <Text style={styles.quickMore}>＋</Text>
+              <Icon name="emoticon-plus-outline" size={22} color={theme.textMuted} />
             </Pressable>
           </View>
 
           <SheetDivider />
 
           <SheetRow
-            icon="↩"
+            icon="reply"
             label="Reply"
             onPress={() => run(() => onReply(target))}
           />
           <SheetRow
-            icon="↪"
+            icon="share"
             label="Forward"
             onPress={() => run(() => onForward(target))}
           />
           <SheetRow
-            icon="⧉"
+            icon="content-copy"
             label={copied ? 'Copied' : 'Copy text'}
             // Not closed on press, unlike everything else: the label turning to
             // "Copied" is the only confirmation there is, and a sheet that
@@ -157,7 +158,7 @@ export function MessageSheet({
 
           {mine && (
             <SheetRow
-              icon="✎"
+              icon="pencil-outline"
               label="Edit"
               onPress={() => run(() => onEdit(target))}
             />
@@ -165,7 +166,7 @@ export function MessageSheet({
 
           {iAmAdmin && (
             <SheetRow
-              icon="📌"
+              icon={pinned ? 'pin-off-outline' : 'pin-outline'}
               label={pinned ? 'Unpin' : 'Pin to channel'}
               onPress={() => run(() => onPin(target, pinned))}
             />
@@ -175,7 +176,7 @@ export function MessageSheet({
             <>
               <SheetDivider />
               <SheetRow
-                icon="🗑"
+                icon="trash-can-outline"
                 label="Delete"
                 danger
                 hint={
@@ -210,7 +211,8 @@ function EmojiGrid({
   return (
     <>
       <Pressable onPress={onBack} hitSlop={8} style={styles.back}>
-        <Text style={styles.backLabel}>‹ Back</Text>
+        <Icon name="chevron-left" size={20} color={theme.accent} />
+        <Text style={styles.backLabel}>Back</Text>
       </Pressable>
       <ScrollView
         style={styles.grid}
@@ -267,8 +269,14 @@ const styles = StyleSheet.create({
   quickMine: { backgroundColor: '#2b2f5e', borderWidth: 1, borderColor: theme.accent },
   quickPressed: { opacity: 0.6 },
   quickGlyph: { fontSize: 22 },
-  quickMore: { color: theme.textMuted, fontSize: 20, fontWeight: '700' },
-  back: { paddingHorizontal: spacing.lg, paddingBottom: spacing.sm },
+  back: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    paddingLeft: spacing.md,
+    paddingRight: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
   backLabel: { color: theme.accent, fontSize: 14, fontWeight: '600' },
   grid: { flex: 1 },
   gridContent: { paddingHorizontal: spacing.md, paddingBottom: spacing.lg },

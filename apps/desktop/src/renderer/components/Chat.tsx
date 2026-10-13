@@ -631,6 +631,17 @@ export function Chat({
     [guilds],
   );
 
+  /** Which voice channel somebody is sitting in, by name, for their card. */
+  const voiceChannelOf = useCallback(
+    (userId: string): string | null => {
+      const entry = Object.entries(voiceByChannel).find(([, ids]) =>
+        ids.includes(userId),
+      );
+      return entry ? channelNameOf(entry[0]) : null;
+    },
+    [voiceByChannel, channelNameOf],
+  );
+
   /** One tagged id back to the person, for turning markers into names. */
   const lookupUser = useCallback(
     (id: string): MentionUser | null =>
@@ -1034,18 +1045,35 @@ export function Chat({
         }, 250);
       },
       onUserUpdated: applyUserUpdate,
-      onPresence: ({ userId, online, lastSeenAt }) => {
+      onPresence: (p) => {
+        const { userId, online, lastSeenAt } = p;
         // Applied here rather than waited for: the dot and the duration under
-        // a name are the whole of what this event changes, and both are in
-        // the payload, so neither has to sit wrong for a round trip.
+        // a name are the whole of what this event changes, and all of it is in
+        // the payload, so none of it has to sit wrong for a round trip. The
+        // away fields only when present -- a server older than them sends
+        // none, and leaving them alone is what an absent feature looks like.
         setMembers((prev) =>
           prev.map((m) =>
-            m.user.id === userId ? { ...m, online, lastSeenAt } : m,
+            m.user.id === userId
+              ? {
+                  ...m,
+                  online,
+                  lastSeenAt,
+                  ...('away' in p && { away: p.away }),
+                  ...('onlineSince' in p && { onlineSince: p.onlineSince }),
+                  ...('lastActiveAt' in p && { lastActiveAt: p.lastActiveAt }),
+                }
+              : m,
           ),
         );
-        // Still refetched, because presence is also the first thing heard
-        // about somebody who has joined the server since this list was built.
-        void loadMembers();
+        // Refetched only for somebody this list has never heard of: presence
+        // is also the first thing heard about a person who has joined the
+        // server since it was built. Everybody else's change was in the
+        // payload, and away and back now arrive often enough that a full
+        // member list per transition would be most of the traffic.
+        if (!membersRef.current.some((m) => m.user.id === userId)) {
+          void loadMembers();
+        }
       },
       // Forwarded to the update banner, which lives above this component.
       onUpdateAvailable: ({ version }) => noteUpdateAvailable(version),
@@ -3569,6 +3597,7 @@ export function Chat({
         }
         onKick={askKick}
         onBan={askBan}
+        voiceChannelOf={voiceChannelOf}
       />
       <ScreenPicker />
       {startingParty && (

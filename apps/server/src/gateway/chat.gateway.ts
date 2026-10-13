@@ -12,7 +12,11 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { fromNodeHeaders } from 'better-auth/node';
-import { compareVersions, MAX_PARTY_CHAT } from '@isthislegit/shared';
+import {
+  AWAY_AFTER_MS,
+  compareVersions,
+  MAX_PARTY_CHAT,
+} from '@isthislegit/shared';
 import type {
   ClientPlatform,
   ConnectedClient,
@@ -78,6 +82,35 @@ export class ChatGateway
    * offline while they are still typing.
    */
   private readonly connections = new Map<string, number>();
+
+  /**
+   * Presence beyond the dot, for everyone connected right now. In memory only:
+   * `lastActiveAt` reaches the database when their last connection closes,
+   * and the rest means nothing once they have gone.
+   *
+   * `onlineSince` is the start of the current session. `lastActiveAt` moves
+   * with every message, reaction, keystroke and sentence said in voice -- far
+   * too often to write. `awayTimer` fires `AWAY_AFTER_MS` after the last of
+   * those and is replaced by each new one.
+   */
+  private readonly sessions = new Map<
+    string,
+    {
+      onlineSince: Date;
+      lastActiveAt: Date;
+      away: boolean;
+      awayTimer: NodeJS.Timeout;
+      /** When a voice report was last accepted; see `voiceActivity`. */
+      lastVoiceReport: number;
+    }
+  >();
+
+  /**
+   * Who is in which voice channel, as last told to everyone. Kept here as well
+   * as in VoiceService, which depends on this class and so cannot be asked:
+   * it is what lets a voice report be checked, and a join be noticed.
+   */
+  private readonly voiceRooms = new Map<string, string[]>();
 
   constructor(
     @Inject(AUTH) private readonly auth: Auth,
@@ -173,10 +206,24 @@ export class ChatGateway
     socket.join(`user:${data.userId}`);
 
     if (next === 1) {
+      // Opening the app counts as doing something. Without it, somebody who
+      // has just signed in would show as having last been active whenever
+      // they last spoke yesterday.
+      const now = new Date();
+      this.sessions.set(data.userId, {
+        onlineSince: now,
+        lastActiveAt: now,
+        away: false,
+        awayTimer: this.awayTimer(data.userId),
+        lastVoiceReport: 0,
+      });
       this.server.emit('presence:changed', {
         userId: data.userId,
         online: true,
         lastSeenAt: this.touchLastSeen(data.userId),
+        away: false,
+        onlineSince: now.toISOString(),
+        lastActiveAt: now.toISOString(),
       });
     }
     this.log.log(`connected ${data.username ?? data.userId} (${next} session(s))`);
@@ -194,12 +241,19 @@ export class ChatGateway
       // sockets -- the main window and the party window -- and closing the
       // party window is putting the video away, not leaving.
       this.dropFromParties(data.userId);
+      const session = this.sessions.get(data.userId);
+      if (session) clearTimeout(session.awayTimer);
+      this.sessions.delete(data.userId);
+      const lastActiveAt = session?.lastActiveAt ?? null;
       this.server.emit('presence:changed', {
         userId: data.userId,
         online: false,
         // The mark that matters: this is the instant the member list will be
         // counting from for as long as they stay away.
-        lastSeenAt: this.touchLastSeen(data.userId),
+        lastSeenAt: this.touchLastSeen(data.userId, lastActiveAt),
+        away: false,
+        onlineSince: null,
+        lastActiveAt: lastActiveAt?.toISOString() ?? null,
       });
     } else {
       this.connections.set(data.userId, next);
@@ -221,14 +275,20 @@ export class ChatGateway
    * write is deliberately not awaited for the same reason: a slow database
    * must not hold up presence, and a failed one costs a stale duration under
    * somebody's name, which is not worth refusing the connection over.
+   *
+   * `lastActiveAt` rides along on the way out, which is the only time it is
+   * written: the same statement, so recording it costs nothing extra.
    */
-  private touchLastSeen(userId: string): string {
+  private touchLastSeen(userId: string, lastActiveAt: Date | null = null): string {
     const at = new Date();
     // updateMany, not update: the column lives on the membership, so somebody
     // who belongs to two guilds has two rows, and one statement keeps them
     // from ever disagreeing.
     this.prisma.guildMember
-      .updateMany({ where: { userId }, data: { lastSeenAt: at } })
+      .updateMany({
+        where: { userId },
+        data: lastActiveAt ? { lastSeenAt: at, lastActiveAt } : { lastSeenAt: at },
+      })
       .catch((err: Error) =>
         this.log.warn(`could not record last seen for ${userId}: ${err.message}`),
       );
@@ -237,6 +297,89 @@ export class ChatGateway
 
   onlineUserIds(): string[] {
     return [...this.connections.keys()];
+  }
+
+  /* ------------------------------------------------------------ activity */
+
+  /** The timer that marks somebody away if nothing replaces it first. */
+  private awayTimer(userId: string): NodeJS.Timeout {
+    const timer = setTimeout(() => this.goAway(userId), AWAY_AFTER_MS);
+    // A pending away mark is no reason to keep the process alive on shutdown.
+    timer.unref();
+    return timer;
+  }
+
+  private goAway(userId: string) {
+    const session = this.sessions.get(userId);
+    if (!session || session.away) return;
+    session.away = true;
+    this.server.emit('presence:changed', {
+      userId,
+      online: true,
+      lastSeenAt: session.onlineSince.toISOString(),
+      away: true,
+      onlineSince: session.onlineSince.toISOString(),
+      lastActiveAt: session.lastActiveAt.toISOString(),
+    });
+  }
+
+  /**
+   * They did something. Called by the controllers for messages and reactions,
+   * and from here for typing, voice joins and voice reports.
+   *
+   * Cheap on purpose -- a date and a timer, nothing written, nothing sent --
+   * because it runs on every keystroke that starts a typing indicator. The
+   * only time it says anything is when it brings somebody back from away.
+   *
+   * Somebody with no connection (a message posted by a script, say) has no
+   * session to update; their activity is written straight to the database
+   * instead, since there will be no disconnect to carry it there later.
+   */
+  markActive(userId: string) {
+    const now = new Date();
+    const session = this.sessions.get(userId);
+    if (!session) {
+      this.prisma.guildMember
+        .updateMany({ where: { userId }, data: { lastActiveAt: now } })
+        .catch((err: Error) =>
+          this.log.warn(`could not record activity for ${userId}: ${err.message}`),
+        );
+      return;
+    }
+
+    session.lastActiveAt = now;
+    clearTimeout(session.awayTimer);
+    session.awayTimer = this.awayTimer(userId);
+
+    if (session.away) {
+      session.away = false;
+      this.server.emit('presence:changed', {
+        userId,
+        online: true,
+        lastSeenAt: session.onlineSince.toISOString(),
+        away: false,
+        onlineSince: session.onlineSince.toISOString(),
+        lastActiveAt: now.toISOString(),
+      });
+    }
+  }
+
+  /**
+   * The live half of somebody's presence, or null when they are not connected
+   * -- in which case the database's `lastActiveAt` is the answer.
+   */
+  presenceOf(userId: string): {
+    away: boolean;
+    onlineSince: string;
+    lastActiveAt: string;
+  } | null {
+    const session = this.sessions.get(userId);
+    if (!session) return null;
+    return {
+      away: session.away,
+      onlineSince: session.onlineSince.toISOString(),
+      lastActiveAt: session.lastActiveAt.toISOString(),
+    };
   }
 
   /**
@@ -364,6 +507,7 @@ export class ChatGateway
     @MessageBody() body: { channelId: string },
   ) {
     const { userId } = socket.data as SocketData;
+    this.markActive(userId);
     socket.to(`channel:${body.channelId}`).emit('typing:changed', {
       channelId: body.channelId,
       userId,
@@ -382,6 +526,47 @@ export class ChatGateway
       userId,
       typing: false,
     });
+  }
+
+  /**
+   * The speaker's client saying they are talking. See `activity:voice` in
+   * shared for why it has to come from them.
+   *
+   * Believed only as far as the server can check it: they must be in a voice
+   * channel right now, it must not be a listen-only one, and their microphone
+   * must not be taken away. Somebody failing any of those cannot be heard, so
+   * a report from them is not activity. Past that it is taken on trust -- the
+   * worst a forged one does is keep a dot green.
+   *
+   * Reports inside the same half-minute are dropped before the database is
+   * asked, so a client that sends more often than it should costs nothing.
+   */
+  @SubscribeMessage('activity:voice')
+  async voiceActivity(@ConnectedSocket() socket: Socket) {
+    const { userId } = socket.data as SocketData;
+    const session = this.sessions.get(userId);
+    if (!session) return;
+    const now = Date.now();
+    if (now - session.lastVoiceReport < 30_000) return;
+    session.lastVoiceReport = now;
+
+    const channelId = [...this.voiceRooms.entries()].find(([, ids]) =>
+      ids.includes(userId),
+    )?.[0];
+    if (!channelId) return;
+
+    const channel = await this.prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { guildId: true, listenOnly: true },
+    });
+    if (!channel || channel.listenOnly) return;
+    const member = await this.prisma.guildMember.findUnique({
+      where: { guildId_userId: { guildId: channel.guildId, userId } },
+      select: { mutedUntil: true },
+    });
+    if (!member || (member.mutedUntil && member.mutedUntil > new Date())) return;
+
+    this.markActive(userId);
   }
 
   /* ------------------------------------------------------- watch parties */
@@ -776,7 +961,24 @@ export class ChatGateway
     this.server.emit('guild:changed', { guildId });
   }
 
+  /**
+   * Also where a voice join counts as activity. VoiceService only calls this
+   * when the list for a channel has changed, so anybody in the new list who
+   * was not in the old one has just walked in.
+   *
+   * Only for somebody connected. The first read after a restart reports every
+   * call already in progress as new, and that is the server waking up, not
+   * anybody walking in -- writing it to the database for people whose sockets
+   * have not come back yet would stamp them all active at the same instant.
+   */
   broadcastVoiceParticipants(channelId: string, userIds: string[]) {
+    const before = this.voiceRooms.get(channelId) ?? [];
+    for (const id of userIds) {
+      if (!before.includes(id) && this.sessions.has(id)) this.markActive(id);
+    }
+    if (userIds.length) this.voiceRooms.set(channelId, userIds);
+    else this.voiceRooms.delete(channelId);
+
     this.server.emit('voice:participants', { channelId, userIds });
   }
 }

@@ -11,6 +11,8 @@ import {
   Alert,
   FlatList,
   KeyboardAvoidingView,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Platform,
   Pressable,
   StyleSheet,
@@ -34,11 +36,13 @@ import {
   type StagedFile,
 } from '../../src/components/Composer';
 import { ConnectionBanner } from '../../src/components/Banners';
-import { useDrawer } from '../../src/components/Drawer';
+import { useDrawer, useSwipeToOpenDrawer } from '../../src/components/Drawer';
+import { Icon } from '../../src/components/Icon';
 import { MessageRow } from '../../src/components/MessageRow';
 import { MessageSheet } from '../../src/components/MessageSheet';
 import { PinsSheet } from '../../src/components/PinsSheet';
 import { Sheet, SheetRow } from '../../src/components/Sheet';
+import { TypingIndicator } from '../../src/components/TypingIndicator';
 import {
   dayLabel,
   groupsWith,
@@ -50,7 +54,7 @@ import {
   sameDay,
 } from '../../src/format';
 import { toPlain, type MentionUser } from '../../src/mention-utils';
-import { spacing, TAP_TARGET, theme } from '../../src/theme';
+import { radius, spacing, TAP_TARGET, theme } from '../../src/theme';
 import type { Message, MessageRef } from '../../src/types';
 
 /**
@@ -73,6 +77,14 @@ const PAGE = 50;
 /** How long a jumped-to message stays lit. Long enough to find, short enough
  *  not to look like a selection that has to be dismissed. */
 const FLASH_MS = 1800;
+
+/**
+ * How far up from the live end, in points, before the "jump to latest" button
+ * appears. About a screenful: less and it flickers in during an ordinary
+ * scroll to reread the last few messages; more and somebody has already had
+ * to fling their way back down by the time it would have helped.
+ */
+const AWAY_FROM_LIVE = 600;
 
 /** A message this client has sent and the server has not yet confirmed. */
 interface Pending {
@@ -99,6 +111,7 @@ export default function ChannelScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const drawer = useDrawer();
+  const swipe = useSwipeToOpenDrawer();
 
   const {
     me,
@@ -115,6 +128,9 @@ export default function ChannelScreen() {
     markRead,
     reconnectCount,
     guilds,
+    onlineIds,
+    totalMentions,
+    lastReadIn,
   } = useSession();
 
   const channel = channelById(channelId);
@@ -135,6 +151,33 @@ export default function ChannelScreen() {
   const [showPins, setShowPins] = useState(false);
   const [flashing, setFlashing] = useState<string | null>(null);
 
+  /**
+   * Where "new" started when this channel was opened: the last message read
+   * before arriving, or null for nothing to mark.
+   *
+   * Captured once per channel rather than read live, because reaching the
+   * bottom marks everything read a moment after arriving -- and a live read
+   * would take the divider away in the same instant it was meant to be seen.
+   * Cleared when the reader says something, which is the point at which they
+   * have plainly caught up.
+   */
+  const [newSince, setNewSince] = useState<string | null>(null);
+  const readMarkFor = useRef<string | null>(null);
+  if (readMarkFor.current !== channelId) {
+    readMarkFor.current = channelId;
+    const mark = lastReadIn(channelId);
+    if (mark !== newSince) setNewSince(mark);
+  }
+
+  /**
+   * Whether the reader has scrolled away from the live end, and how many
+   * messages from other people have arrived since. A ref for the socket's sake
+   * -- the message sink is registered once -- and state for the button.
+   */
+  const [away, setAway] = useState(false);
+  const awayRef = useRef(false);
+  const [missed, setMissed] = useState(0);
+
   const list = useRef<FlatList<Row> | null>(null);
 
   /**
@@ -148,39 +191,79 @@ export default function ChannelScreen() {
   const newestId = useRef<string | null>(null);
   const lastMarkedRead = useRef<string | null>(null);
 
+  /** Who you are, for the sink below -- registered once, so a ref. */
+  const meIdRef = useRef<string | null>(null);
+  meIdRef.current = me?.id ?? null;
+
   /* ---------------------------------------------------------- the header */
+
+  const onlineCount = useMemo(
+    () => members.filter((m) => onlineIds.has(m.user.id)).length,
+    [members, onlineIds],
+  );
 
   useLayoutEffect(() => {
     navigation.setOptions({
-      title: channel ? `#${channel.name}` : '',
+      headerTitle: () => (
+        <View style={styles.title}>
+          <Icon name="pound" size={20} color={theme.textMuted} />
+          <View style={styles.titleText}>
+            <Text style={styles.titleName} numberOfLines={1}>
+              {channel?.name ?? ''}
+            </Text>
+            <Text style={styles.titleMeta} numberOfLines={1}>
+              {onlineCount} online
+            </Text>
+          </View>
+        </View>
+      ),
       // The hamburger replaces the back arrow rather than sitting beside it.
       // Going back to the channel list and in again is two screens of animation
       // to do the thing the drawer does in one tap, and the back gesture still
       // works for anybody who reaches for it.
       headerLeft: () => (
         <Pressable
-          onPress={drawer.open}
+          onPress={() => drawer.open('channels')}
           hitSlop={12}
           style={styles.headerButton}
           accessibilityRole="button"
-          accessibilityLabel="Open menu"
+          accessibilityLabel={
+            totalMentions > 0
+              ? `Open menu, ${totalMentions} unread mentions`
+              : 'Open menu'
+          }
         >
-          <Text style={styles.headerGlyph}>☰</Text>
+          <Icon name="menu" size={24} color={theme.text} />
+          {/* Tags elsewhere, seen from in here. Without it the only way to
+              find out somebody wanted you in another channel is to open the
+              menu on the off chance. */}
+          {totalMentions > 0 && <View style={styles.headerDot} />}
         </Pressable>
       ),
       headerRight: () => (
-        <Pressable
-          onPress={() => setShowPins(true)}
-          hitSlop={12}
-          style={styles.headerButton}
-          accessibilityRole="button"
-          accessibilityLabel="Pinned messages"
-        >
-          <Text style={styles.headerGlyph}>📌</Text>
-        </Pressable>
+        <View style={styles.headerRight}>
+          <Pressable
+            onPress={() => setShowPins(true)}
+            hitSlop={8}
+            style={styles.headerButton}
+            accessibilityRole="button"
+            accessibilityLabel="Pinned messages"
+          >
+            <Icon name="pin-outline" size={22} color={theme.text} />
+          </Pressable>
+          <Pressable
+            onPress={() => drawer.open('people')}
+            hitSlop={8}
+            style={styles.headerButton}
+            accessibilityRole="button"
+            accessibilityLabel="People"
+          >
+            <Icon name="account-multiple-outline" size={24} color={theme.text} />
+          </Pressable>
+        </View>
       ),
     });
-  }, [navigation, channel, drawer]);
+  }, [navigation, channel, drawer, onlineCount, totalMentions]);
 
   /* ------------------------------------------------------ message state */
 
@@ -232,6 +315,9 @@ export default function ChannelScreen() {
     setError(null);
     setReply(null);
     setEdit(null);
+    setMissed(0);
+    setAway(false);
+    awayRef.current = false;
 
     (async () => {
       try {
@@ -269,7 +355,14 @@ export default function ChannelScreen() {
   useEffect(() => {
     setMessageSink({
       channelId,
-      onMessage: upsert,
+      onMessage: (m) => {
+        upsert(m);
+        // Counted only while scrolled away, and never your own: the button is
+        // for "something happened down there", and you know what you said.
+        if (awayRef.current && m.author.id !== meIdRef.current) {
+          setMissed((n) => n + 1);
+        }
+      },
       onUpdated: upsert,
       onDeleted: remove,
       onTyping: (userId, typing) => {
@@ -360,6 +453,50 @@ export default function ChannelScreen() {
     }
   }, [channelId, newerCursor, upsert]);
 
+  /**
+   * Back to the newest message, from wherever the reader is.
+   *
+   * At the live end that is a scroll. After a jump into history the newest
+   * messages are not in the list at all, and walking forward a page at a time
+   * would be several round trips to get somewhere one fetch can go -- so the
+   * live page is loaded fresh in place of the window that was there.
+   */
+  const goLive = useCallback(async () => {
+    setMissed(0);
+    if (!newerCursor) {
+      list.current?.scrollToOffset({ offset: 0, animated: true });
+      return;
+    }
+    try {
+      const page = await api.history(channelId, undefined, PAGE);
+      const newestFirst = [...page.messages].reverse();
+      setMessages(newestFirst);
+      setOlderCursor(page.nextCursor);
+      setNewerCursor(null);
+      newestId.current = newestFirst[0]?.id ?? null;
+      list.current?.scrollToOffset({ offset: 0, animated: false });
+    } catch {
+      // Left where it was. The button is still there to try again.
+    }
+  }, [channelId, newerCursor]);
+
+  /**
+   * Whether the list is far enough from the live end to offer the way back.
+   *
+   * The list is inverted, so an offset of zero is the newest message and the
+   * number grows as the reader scrolls up into history.
+   */
+  const onScroll = useCallback(
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const isAway = e.nativeEvent.contentOffset.y > AWAY_FROM_LIVE;
+      if (isAway === awayRef.current) return;
+      awayRef.current = isAway;
+      setAway(isAway);
+      if (!isAway) setMissed(0);
+    },
+    [],
+  );
+
   /* ------------------------------------------------------------ sending */
 
   /** The request itself, shared by the first attempt and by a retry. */
@@ -442,10 +579,18 @@ export default function ChannelScreen() {
         ...p,
       ]);
       setReply(null);
+      setNewSince(null);
+      // Saying something means wanting to see it. Only at the live end, though:
+      // after a jump into history the optimistic copy is not on this page, and
+      // scrolling to the top of a page that does not hold it would look like
+      // the message went nowhere.
+      if (!newerCursor) {
+        list.current?.scrollToOffset({ offset: 0, animated: true });
+      }
 
       await deliver(nonce, { content, files, replyToId, replyPing });
     },
-    [channelId, me, reply, deliver],
+    [channelId, me, reply, deliver, newerCursor],
   );
 
   const retry = useCallback(
@@ -796,103 +941,144 @@ export default function ChannelScreen() {
       style={styles.flex}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={insets.top + 44}
+      {...swipe}
     >
       <ConnectionBanner status={status} restarting={restarting} />
 
-      <FlatList
-        ref={list}
-        inverted
-        data={rows}
-        keyExtractor={(row) => row.message.id}
-        style={styles.list}
-        // The list is inverted, so "the end" is the *oldest* message and this is
-        // what pages backwards through history.
-        onEndReached={loadOlder}
-        onEndReachedThreshold={0.6}
-        // And the *start* is the live end, which only has anything to fetch
-        // after a jump landed in the middle of the channel.
-        onStartReached={loadNewer}
-        onStartReachedThreshold={0.4}
-        keyboardDismissMode="interactive"
-        // A jump asks for an index the list has not measured yet whenever the
-        // target is far off screen. Without this that throws; with it the list
-        // scrolls as close as it can and the second attempt lands.
-        onScrollToIndexFailed={(info) => {
-          list.current?.scrollToOffset({
-            offset: info.averageItemLength * info.index,
-            animated: false,
-          });
-          setTimeout(
-            () =>
-              list.current?.scrollToIndex({
-                index: info.index,
-                animated: false,
-                viewPosition: 0.5,
-              }),
-            80,
-          );
-        }}
-        ListFooterComponent={
-          loadingOlder ? (
-            <ActivityIndicator style={styles.older} color={theme.textMuted} />
-          ) : !olderCursor && messages.length > 0 ? (
-            <Text style={styles.start}>
-              This is the beginning of #{channel?.name ?? 'the channel'}.
+      <View style={styles.listWrap}>
+        <FlatList
+          ref={list}
+          inverted
+          data={rows}
+          keyExtractor={(row) => row.message.id}
+          style={styles.list}
+          // The list is inverted, so "the end" is the *oldest* message and this is
+          // what pages backwards through history.
+          onEndReached={loadOlder}
+          onEndReachedThreshold={0.6}
+          // And the *start* is the live end, which only has anything to fetch
+          // after a jump landed in the middle of the channel.
+          onStartReached={loadNewer}
+          onStartReachedThreshold={0.4}
+          keyboardDismissMode="interactive"
+          onScroll={onScroll}
+          scrollEventThrottle={100}
+          // A jump asks for an index the list has not measured yet whenever the
+          // target is far off screen. Without this that throws; with it the list
+          // scrolls as close as it can and the second attempt lands.
+          onScrollToIndexFailed={(info) => {
+            list.current?.scrollToOffset({
+              offset: info.averageItemLength * info.index,
+              animated: false,
+            });
+            setTimeout(
+              () =>
+                list.current?.scrollToIndex({
+                  index: info.index,
+                  animated: false,
+                  viewPosition: 0.5,
+                }),
+              80,
+            );
+          }}
+          ListFooterComponent={
+            loadingOlder ? (
+              <ActivityIndicator style={styles.older} color={theme.textMuted} />
+            ) : !olderCursor && messages.length > 0 ? (
+              <Text style={styles.start}>
+                This is the beginning of #{channel?.name ?? 'the channel'}.
+              </Text>
+            ) : null
+          }
+          ListEmptyComponent={
+            <Text style={styles.empty}>Nothing here yet. Say something.</Text>
+          }
+          renderItem={({ item, index }) => {
+            // `rows` is newest-first, so the message *above* this one on screen is
+            // the next index, not the previous one. Getting this backwards groups
+            // a message with the one that follows it, which looks almost right and
+            // is why it is worth saying out loud.
+            const above = rows[index + 1]?.message;
+            const grouped = above ? groupsWith(above, item.message) : false;
+            const needsDay =
+              !above || !sameDay(above.createdAt, item.message.createdAt);
+            // The first message after the last one read, and only when there is
+            // a confirmed message above it that *was* read -- otherwise the line
+            // would sit on top of a page that is entirely new, which says nothing.
+            const firstNew =
+              newSince !== null &&
+              !item.pendingState &&
+              item.message.id > newSince &&
+              above !== undefined &&
+              above.id <= newSince &&
+              item.message.author.id !== me?.id;
+
+            return (
+              <View>
+                {/* First in the cell, not last. `inverted` reverses the order of
+                    the cells but flips each one back, so layout *inside* a cell is
+                    ordinary top-to-bottom -- and the top of this cell is the gap
+                    between this message and the older one above it, which is where
+                    a day separator belongs. */}
+                {needsDay && (
+                  <View style={styles.day}>
+                    <View style={styles.dayLine} />
+                    <Text style={styles.dayLabel}>
+                      {dayLabel(item.message.createdAt)}
+                    </Text>
+                    <View style={styles.dayLine} />
+                  </View>
+                )}
+                {firstNew && (
+                  <View
+                    style={styles.newLine}
+                    accessible
+                    accessibilityLabel="New messages start here"
+                  >
+                    <View style={styles.newRule} />
+                    <Text style={styles.newLabel}>New</Text>
+                  </View>
+                )}
+                <MessageRow
+                  message={item.message}
+                  grouped={grouped && !needsDay}
+                  highlighted={me ? mentionsMe(item.message, me.id) : false}
+                  pending={Boolean(item.pendingState && !item.pendingState.failed)}
+                  failed={item.pendingState?.failed}
+                  progress={item.pendingState?.progress ?? null}
+                  flashing={flashing === item.message.id}
+                  meId={me?.id ?? ''}
+                  nameFor={nameFor}
+                  showEmbeds={prefs.showEmbeds}
+                  autoplayEmbeds={prefs.autoplayEmbeds}
+                  onLongPress={openSheet}
+                  onToggleReaction={toggleReaction}
+                  onJumpToRef={jumpToRef}
+                  onRetry={retry}
+                />
+              </View>
+            );
+          }}
+        />
+
+        {(away || newerCursor) && (
+          <Pressable
+            onPress={() => void goLive()}
+            style={({ pressed }) => [styles.jump, pressed && styles.jumpPressed]}
+            accessibilityRole="button"
+            accessibilityLabel={
+              missed > 0 ? `Jump to latest, ${missed} new messages` : 'Jump to latest'
+            }
+          >
+            <Icon name="arrow-down" size={16} color={theme.accentText} />
+            <Text style={styles.jumpText}>
+              {missed > 0 ? `${missed > 99 ? '99+' : missed} new` : 'Latest'}
             </Text>
-          ) : null
-        }
-        ListEmptyComponent={
-          <Text style={styles.empty}>Nothing here yet. Say something.</Text>
-        }
-        renderItem={({ item, index }) => {
-          // `rows` is newest-first, so the message *above* this one on screen is
-          // the next index, not the previous one. Getting this backwards groups
-          // a message with the one that follows it, which looks almost right and
-          // is why it is worth saying out loud.
-          const above = rows[index + 1]?.message;
-          const grouped = above ? groupsWith(above, item.message) : false;
-          const needsDay =
-            !above || !sameDay(above.createdAt, item.message.createdAt);
+          </Pressable>
+        )}
+      </View>
 
-          return (
-            <View>
-              {/* First in the cell, not last. `inverted` reverses the order of
-                  the cells but flips each one back, so layout *inside* a cell is
-                  ordinary top-to-bottom -- and the top of this cell is the gap
-                  between this message and the older one above it, which is where
-                  a day separator belongs. */}
-              {needsDay && (
-                <View style={styles.day}>
-                  <View style={styles.dayLine} />
-                  <Text style={styles.dayLabel}>
-                    {dayLabel(item.message.createdAt)}
-                  </Text>
-                  <View style={styles.dayLine} />
-                </View>
-              )}
-              <MessageRow
-                message={item.message}
-                grouped={grouped && !needsDay}
-                highlighted={me ? mentionsMe(item.message, me.id) : false}
-                pending={Boolean(item.pendingState && !item.pendingState.failed)}
-                failed={item.pendingState?.failed}
-                progress={item.pendingState?.progress ?? null}
-                flashing={flashing === item.message.id}
-                meId={me?.id ?? ''}
-                nameFor={nameFor}
-                showEmbeds={prefs.showEmbeds}
-                autoplayEmbeds={prefs.autoplayEmbeds}
-                onLongPress={openSheet}
-                onToggleReaction={toggleReaction}
-                onJumpToRef={jumpToRef}
-                onRetry={retry}
-              />
-            </View>
-          );
-        }}
-      />
-
-      {typingLabel && <Text style={styles.typing}>{typingLabel}</Text>}
+      <TypingIndicator label={typingLabel} />
 
       <Composer
         channelName={channel?.name ?? 'channel'}
@@ -946,7 +1132,7 @@ export default function ChannelScreen() {
         {forwardTargets.map((c) => (
           <SheetRow
             key={c.id}
-            icon="#"
+            icon="pound"
             label={c.name}
             onPress={() => forwarding && void forward(forwarding, c.id)}
           />
@@ -970,6 +1156,7 @@ interface Row {
 
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: theme.bg },
+  listWrap: { flex: 1 },
   list: { flex: 1 },
   centre: {
     flex: 1,
@@ -985,7 +1172,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerGlyph: { color: theme.text, fontSize: 18 },
+  headerRight: { flexDirection: 'row', alignItems: 'center' },
+  headerDot: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 9,
+    height: 9,
+    borderRadius: radius.pill,
+    backgroundColor: theme.danger,
+    borderWidth: 1,
+    borderColor: theme.surface,
+  },
+  title: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+  titleText: { flexShrink: 1 },
+  titleName: { color: theme.text, fontSize: 16, fontWeight: '700' },
+  titleMeta: { color: theme.textMuted, fontSize: 12 },
   // No `scaleY: -1` on these, which is the tempting fix and the wrong one.
   // VirtualizedList already composes its inversion transform onto the header,
   // the footer and the empty component; adding another here would either
@@ -1018,11 +1220,37 @@ const styles = StyleSheet.create({
     backgroundColor: theme.border,
   },
   dayLabel: { color: theme.textMuted, fontSize: 11, fontWeight: '600' },
-  typing: {
-    color: theme.textMuted,
-    fontSize: 12,
-    fontStyle: 'italic',
-    paddingHorizontal: spacing.md,
-    paddingBottom: spacing.xs,
+  newLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingLeft: spacing.md,
+    paddingRight: spacing.md,
+    paddingTop: spacing.sm,
   },
+  newRule: { flex: 1, height: 1, backgroundColor: theme.danger },
+  newLabel: {
+    color: theme.danger,
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  // Floats over the bottom of the list rather than taking a row of its own, so
+  // appearing and disappearing never moves the conversation under the reader.
+  jump: {
+    position: 'absolute',
+    right: spacing.md,
+    bottom: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    height: 34,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.pill,
+    backgroundColor: theme.accent,
+    elevation: 4,
+  },
+  jumpPressed: { opacity: 0.85 },
+  jumpText: { color: theme.accentText, fontSize: 13, fontWeight: '700' },
 });

@@ -24,6 +24,8 @@ import {
 } from '../mention-utils';
 import { radius, spacing, TAP_TARGET, theme } from '../theme';
 import { Avatar } from './Avatar';
+import { Icon, type IconName } from './Icon';
+import { Sheet } from './Sheet';
 
 /**
  * The box at the bottom, and everything attached to it.
@@ -113,6 +115,7 @@ export function Composer({
   const [caret, setCaret] = useState(0);
   const [files, setFiles] = useState<StagedFile[]>([]);
   const [picking, setPicking] = useState(false);
+  const [attachOpen, setAttachOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState<MentionQuery | null>(null);
 
@@ -307,6 +310,33 @@ export function Composer({
     }
   }
 
+  /**
+   * Run something from the attach sheet once the sheet has gone.
+   *
+   * The sheet is a `Modal`, and the photo and file pickers are activities of
+   * their own. Launching one while the modal is still being torn down leaves
+   * Android deciding which window gets focus back afterwards, and on some builds
+   * it picks the dead modal -- the picker returns and the app ignores taps until
+   * the back button is pressed. A short wait past the dismissal avoids the race.
+   */
+  function fromSheet(action: () => void) {
+    setAttachOpen(false);
+    setTimeout(action, 220);
+  }
+
+  /** "@" at the caret, with a space before it if it would touch a word. */
+  function startMention() {
+    const before = text.slice(0, caret);
+    const glue = before.length > 0 && !/\s$/.test(before) ? ' ' : '';
+    const next = `${before}${glue}@${text.slice(caret)}`;
+    const at = caret + glue.length + 1;
+    setText(next);
+    setCaret(at);
+    input.current?.focus();
+    input.current?.setNativeProps({ selection: { start: at, end: at } });
+    syncPicker(next, at);
+  }
+
   function unstage(key: string) {
     setFiles((current) => current.filter((f) => f.key !== key));
   }
@@ -383,8 +413,14 @@ export function Composer({
           <Text style={styles.barLabel} numberOfLines={1}>
             Editing message
           </Text>
-          <Pressable onPress={onCancelEdit} hitSlop={10} style={styles.barX}>
-            <Text style={styles.barXLabel}>✕</Text>
+          <Pressable
+            onPress={onCancelEdit}
+            hitSlop={10}
+            style={styles.barX}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel edit"
+          >
+            <Icon name="close" size={18} />
           </Pressable>
         </View>
       ) : reply ? (
@@ -409,8 +445,14 @@ export function Composer({
               @
             </Text>
           </Pressable>
-          <Pressable onPress={onCancelReply} hitSlop={10} style={styles.barX}>
-            <Text style={styles.barXLabel}>✕</Text>
+          <Pressable
+            onPress={onCancelReply}
+            hitSlop={10}
+            style={styles.barX}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel reply"
+          >
+            <Icon name="close" size={18} />
           </Pressable>
         </View>
       ) : null}
@@ -433,7 +475,7 @@ export function Composer({
                 />
               ) : (
                 <View style={styles.chipFile}>
-                  <Text style={styles.chipGlyph}>▤</Text>
+                  <Icon name="file-outline" size={22} />
                   <Text style={styles.chipName} numberOfLines={2}>
                     {file.name}
                   </Text>
@@ -446,7 +488,7 @@ export function Composer({
                 accessibilityRole="button"
                 accessibilityLabel={`Remove ${file.name}`}
               >
-                <Text style={styles.chipXLabel}>✕</Text>
+                <Icon name="close" size={14} color="#fff" />
               </Pressable>
             </View>
           ))}
@@ -463,32 +505,24 @@ export function Composer({
       {/* ---------------------------------------------------------- box */}
       <View style={styles.row}>
         {!edit && (
-          <>
-            <Pressable
-              onPress={pickMedia}
-              disabled={picking || disabled}
-              hitSlop={6}
-              style={styles.iconButton}
-              accessibilityRole="button"
-              accessibilityLabel="Add a photo or video"
-            >
-              {picking ? (
-                <ActivityIndicator size="small" color={theme.textMuted} />
-              ) : (
-                <Text style={styles.icon}>🖼</Text>
-              )}
-            </Pressable>
-            <Pressable
-              onPress={pickFile}
-              disabled={picking || disabled}
-              hitSlop={6}
-              style={styles.iconButton}
-              accessibilityRole="button"
-              accessibilityLabel="Attach a file"
-            >
-              <Text style={styles.icon}>＋</Text>
-            </Pressable>
-          </>
+          <Pressable
+            onPress={() => setAttachOpen(true)}
+            disabled={picking || disabled}
+            hitSlop={6}
+            style={({ pressed }) => [
+              styles.plus,
+              (picking || disabled) && styles.plusDisabled,
+              pressed && styles.pressed,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Add a photo, file or mention"
+          >
+            {picking ? (
+              <ActivityIndicator size="small" color={theme.textMuted} />
+            ) : (
+              <Icon name="plus" size={24} color={theme.text} />
+            )}
+          </Pressable>
         )}
 
         <TextInput
@@ -538,10 +572,62 @@ export function Composer({
           accessibilityRole="button"
           accessibilityLabel={edit ? 'Save edit' : 'Send message'}
         >
-          <Text style={styles.sendLabel}>{edit ? '✓' : '↑'}</Text>
+          <Icon
+            name={edit ? 'check' : 'send'}
+            size={20}
+            color={(edit ? !text.trim() : !canSend) ? theme.textFaint : theme.accentText}
+          />
         </Pressable>
       </View>
+
+      {/* -------------------------------------------------- attach sheet */}
+      <Sheet visible={attachOpen} onClose={() => setAttachOpen(false)}>
+        <View style={styles.tiles}>
+          <Tile
+            icon="image-multiple-outline"
+            label="Photos and videos"
+            onPress={() => fromSheet(() => void pickMedia())}
+          />
+          <Tile
+            icon="file-outline"
+            label="File"
+            onPress={() => fromSheet(() => void pickFile())}
+          />
+          <Tile
+            icon="at"
+            label="Mention someone"
+            onPress={() => fromSheet(startMention)}
+          />
+        </View>
+      </Sheet>
     </View>
+  );
+}
+
+/** One of the big square buttons in the attach sheet. */
+function Tile({
+  icon,
+  label,
+  onPress,
+}: {
+  icon: IconName;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.tile, pressed && styles.pressed]}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      <View style={styles.tileIcon}>
+        <Icon name={icon} size={26} color={theme.text} />
+      </View>
+      <Text style={styles.tileLabel} numberOfLines={2}>
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -612,7 +698,6 @@ const styles = StyleSheet.create({
   barLabel: { color: theme.textFaint, fontSize: 12, flex: 1 },
   barWho: { color: theme.textMuted, fontWeight: '600' },
   barX: { paddingHorizontal: spacing.xs },
-  barXLabel: { color: theme.textMuted, fontSize: 14 },
   pingToggle: {
     width: 26,
     height: 26,
@@ -642,7 +727,6 @@ const styles = StyleSheet.create({
     padding: spacing.xs,
     gap: 2,
   },
-  chipGlyph: { color: theme.textMuted, fontSize: 18 },
   chipName: { color: theme.textFaint, fontSize: 9, textAlign: 'center' },
   chipX: {
     position: 'absolute',
@@ -655,7 +739,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  chipXLabel: { color: '#fff', fontSize: 11, fontWeight: '700' },
 
   error: {
     color: theme.danger,
@@ -667,43 +750,71 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    padding: spacing.sm,
-    gap: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    gap: spacing.sm,
   },
-  iconButton: {
-    width: TAP_TARGET,
-    height: TAP_TARGET,
+  // The round buttons either side are a little smaller than the box between
+  // them, and `hitSlop` makes up the difference to a full tap target. Drawn
+  // at 44 they crowd the box; drawn at 40 with slop they read as part of it.
+  plus: {
+    width: 40,
+    height: 40,
+    marginBottom: 2,
+    borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: theme.surfaceAlt,
   },
-  icon: { color: theme.textMuted, fontSize: 18 },
+  plusDisabled: { opacity: 0.5 },
   input: {
     flex: 1,
     minHeight: TAP_TARGET,
     // Four lines, then it scrolls. Enough for a paragraph without the keyboard
     // and the box between them swallowing the conversation.
     maxHeight: 120,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.lg,
+    paddingHorizontal: spacing.lg,
+    paddingTop: 11,
+    paddingBottom: 11,
+    // Half the single-line height: a pill while it is one line, and a rounded
+    // box rather than a lozenge once it grows.
+    borderRadius: TAP_TARGET / 2,
     backgroundColor: theme.surfaceAlt,
     color: theme.text,
     fontSize: 15,
   },
   send: {
-    width: TAP_TARGET,
-    height: TAP_TARGET,
+    width: 40,
+    height: 40,
+    marginBottom: 2,
     borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: theme.accent,
-    marginLeft: spacing.xs,
   },
   sendDisabled: { backgroundColor: theme.surfaceAlt },
-  sendLabel: {
-    color: theme.accentText,
-    fontSize: 20,
-    fontWeight: '700',
-    lineHeight: 22,
+
+  tiles: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.md,
   },
+  tile: {
+    flex: 1,
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.md,
+    borderRadius: radius.md,
+  },
+  tileIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: radius.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.surfaceAlt,
+  },
+  tileLabel: { color: theme.text, fontSize: 13, textAlign: 'center' },
 });

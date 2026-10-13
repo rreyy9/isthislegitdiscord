@@ -16,6 +16,7 @@ import { useSession } from '../src/session';
 import { normaliseServerUrl, store } from '../src/store';
 import { CLIENT_VERSION } from '../src/version';
 import { radius, spacing, TAP_TARGET, theme } from '../src/theme';
+import { Icon } from '../src/components/Icon';
 
 /**
  * Sign in, or redeem an invite.
@@ -230,7 +231,7 @@ export default function SignIn() {
           accessibilityLabel="Remember me"
         >
           <View style={[styles.box, remember && styles.boxChecked]}>
-            {remember && <Text style={styles.tick}>✓</Text>}
+            {remember && <Icon name="check" size={16} color={theme.accentText} />}
           </View>
           <Text style={styles.rememberLabel}>
             Remember me on this phone
@@ -356,12 +357,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   boxChecked: { backgroundColor: theme.accent, borderColor: theme.accent },
-  tick: {
-    color: theme.accentText,
-    fontSize: 14,
-    fontWeight: '700',
-    lineHeight: 16,
-  },
   rememberLabel: { color: theme.text, fontSize: 14 },
   warning: {
     color: theme.warning,

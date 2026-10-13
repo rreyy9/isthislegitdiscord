@@ -15,6 +15,7 @@ import {
 } from 'livekit-client';
 import { api, type VoiceAudioDto } from './api';
 import { bridge } from './bridge';
+import { reportVoiceActivity } from './socket';
 import type { Keybind } from '../preload';
 import {
   GATE_SEED_TICKS,
@@ -1010,6 +1011,9 @@ export function useVoice(
           micSettleRef.current === 0 &&
           (s.pushToTalk ? talkingRef.current : s.gateMode === 'off' || open);
         setSpeaking(roomRef.current?.localParticipant.identity, loud && live);
+        // Talking keeps you from going away. Same rule as the light: being
+        // loud while nothing is going out is not talking to anybody.
+        if (loud && live) reportVoiceActivity();
       },
       // Essential, not an optimisation: see TrackMeter.
       { clone: true },

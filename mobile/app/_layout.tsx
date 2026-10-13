@@ -2,8 +2,10 @@ import { useEffect } from 'react';
 import { ActivityIndicator, View, StyleSheet } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useFonts } from 'expo-font';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { DrawerProvider } from '../src/components/Drawer';
+import { ICON_FONT } from '../src/components/Icon';
 import { ImageViewerProvider } from '../src/components/ImageViewer';
 import { MentionNotice } from '../src/components/Banners';
 import { SessionProvider, useSession } from '../src/session';
@@ -35,6 +37,15 @@ function Gate() {
   const segments = useSegments();
   const router = useRouter();
 
+  // The icon font, before anything that draws an icon. It is a bundled asset,
+  // so this is a disk read measured in milliseconds -- and waiting for it is
+  // what stops every button in the app flashing up empty on a cold start. A
+  // failure lets the app through rather than holding it on a spinner forever;
+  // buttons without glyphs still have their labels for a screen reader and
+  // still work.
+  const [fontReady, fontError] = useFonts(ICON_FONT);
+  const iconsSettled = fontReady || Boolean(fontError);
+
   useEffect(() => {
     // Nothing is decided until the stored token has been read and checked.
     // Redirecting during that window flashes the sign-in screen at somebody who
@@ -47,7 +58,7 @@ function Gate() {
     else if (me && onSignIn) router.replace('/');
   }, [me, loading, segments, router]);
 
-  if (loading) {
+  if (loading || !iconsSettled) {
     return (
       <View style={styles.loading}>
         <ActivityIndicator size="large" color={theme.accent} />

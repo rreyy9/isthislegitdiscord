@@ -1,0 +1,12 @@
+-- When a member last did something -- a message, a reaction, typing, speaking
+-- in voice, joining a voice channel, or opening the app.
+--
+-- Kept in memory by the gateway while they are connected and written here only
+-- when their last connection closes, alongside lastSeenAt. On GuildMember for
+-- the same reason lastSeenAt is: the member list already reads these rows, and
+-- one UPDATE keyed on userId keeps every copy in step.
+--
+-- Nullable with no default: an account that has not disconnected since this
+-- shipped has no recorded activity, which is not the same as having been
+-- active at the moment of the migration.
+ALTER TABLE "GuildMember" ADD COLUMN "lastActiveAt" TIMESTAMP(3);

@@ -140,6 +140,24 @@ export function lastSeenLabel(iso: string, now: number): string {
 }
 
 /**
+ * How long since an instant, as a length of time: "45m", "2h 5m", "3d 4h".
+ *
+ * For "online since", where the figure is a session still in progress, so it
+ * reads as a duration rather than as "ago" -- and is precise to the minute for
+ * longer than `lastSeenLabel`, because the difference between one hour and two
+ * in a session is the thing people are looking at it for. Two units at most.
+ */
+export function durationLabel(iso: string, now: number): string {
+  const minutes = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 60000));
+  if (minutes < 1) return '<1m';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours}h ${minutes % 60}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return hours % 24 ? `${days}d ${hours % 24}h` : `${days}d`;
+}
+
+/**
  * How long a quoted message reads as one line.
  *
  * The strip above a reply is one line high whatever is in it, so the CSS would

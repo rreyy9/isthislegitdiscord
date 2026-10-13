@@ -12,6 +12,7 @@ import { useNavigation, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, ApiError } from '../src/api';
 import { Avatar } from '../src/components/Avatar';
+import { Icon } from '../src/components/Icon';
 import { MessageContent } from '../src/components/MessageContent';
 import { personName, stamp } from '../src/format';
 import { useSession } from '../src/session';
@@ -160,7 +161,9 @@ export default function Search() {
               <Text style={styles.bad}>{error}</Text>
             ) : text.trim().length < MIN_QUERY ? (
               <>
-                <Text style={styles.emptyMark}>🔍</Text>
+                <View style={styles.emptyMark}>
+                  <Icon name="magnify" size={40} color={theme.textFaint} />
+                </View>
                 <Text style={styles.empty}>Type at least two characters.</Text>
                 <Text style={styles.hint}>
                   Whole words. Quote a phrase to keep it together, and put a minus
@@ -169,7 +172,9 @@ export default function Search() {
               </>
             ) : busy ? null : results ? (
               <>
-                <Text style={styles.emptyMark}>🔍</Text>
+                <View style={styles.emptyMark}>
+                  <Icon name="magnify" size={40} color={theme.textFaint} />
+                </View>
                 <Text style={styles.empty}>Nothing matched “{text.trim()}”.</Text>
               </>
             ) : null}
@@ -250,7 +255,7 @@ const styles = StyleSheet.create({
   where: { color: theme.accent, fontSize: 12 },
   when: { color: theme.textFaint, fontSize: 11, marginBottom: 2 },
   emptyBox: { alignItems: 'center', paddingTop: spacing.xl * 2, paddingHorizontal: spacing.xl },
-  emptyMark: { fontSize: 32, marginBottom: spacing.sm },
+  emptyMark: { marginBottom: spacing.sm },
   empty: { color: theme.textMuted, fontSize: 15, textAlign: 'center' },
   hint: {
     color: theme.textFaint,

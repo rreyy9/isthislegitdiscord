@@ -99,6 +99,14 @@ interface SessionValue {
   ) => Promise<void>;
   signOut: () => Promise<void>;
 
+  /**
+   * Who is in each voice channel, keyed by channel id. A channel with nobody in
+   * it is absent rather than an empty list.
+   */
+  voiceByChannel: Record<string, string[]>;
+  /** How many people are in voice anywhere, for the header. */
+  inVoiceCount: number;
+
   /** Name for a user id, from the member list. Null when nobody matches. */
   nameFor: (userId: string) => string | null;
   userFor: (userId: string) => PublicUser | null;
@@ -130,6 +138,12 @@ interface SessionValue {
   totalMentions: number;
   /** Any channel at all holding something unread. */
   anyUnread: boolean;
+  /**
+   * The last message this account had read in a channel, or null. What the
+   * channel screen reads on the way in to know where "new" starts -- once, at
+   * open, because the moment it is on screen this moves.
+   */
+  lastReadIn: (channelId: string) => string | null;
   /** Told by the open channel screen when the reader reaches the live end. */
   markRead: (channelId: string, messageId: string) => void;
 
@@ -211,6 +225,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [reads, setReads] = useState<Record<string, string>>({});
   const [latest, setLatest] = useState<Record<string, string>>({});
   const [mentionCounts, setMentionCounts] = useState<Record<string, number>>({});
+  const [voiceByChannel, setVoiceByChannel] = useState<Record<string, string[]>>({});
 
   const [prefs, setPrefsState] = useState<Prefs>(DEFAULT_PREFS);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -464,6 +479,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  /**
+   * Who is in voice, from scratch. At sign-in and after every reconnect,
+   * because `voice:participants` only says what changed while this socket was
+   * listening -- a phone that slept through somebody leaving would otherwise
+   * go on showing them in the call.
+   */
+  const refreshVoice = useCallback(async () => {
+    try {
+      const rows = await api.voiceState();
+      setVoiceByChannel(
+        Object.fromEntries(
+          rows.filter((r) => r.userIds.length > 0).map((r) => [r.channelId, r.userIds]),
+        ),
+      );
+    } catch {
+      // Who is in a call is cosmetic here. A failure must not touch chat.
+    }
+  }, []);
+
   const refreshConfig = useCallback(async () => {
     try {
       const next = await api.config();
@@ -493,7 +527,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     void refreshMembers();
     void refreshConfig();
     void refreshUnread();
-  }, [me, refreshGuilds, refreshMembers, refreshConfig, refreshUnread]);
+    void refreshVoice();
+  }, [me, refreshGuilds, refreshMembers, refreshConfig, refreshUnread, refreshVoice]);
 
   /**
    * The heads, once the channel list is in.
@@ -556,6 +591,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setReads({});
     setLatest({});
     setMentionCounts({});
+    setVoiceByChannel({});
     setNotice(null);
   }, []);
 
@@ -592,6 +628,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       return !seen || newest > seen;
     },
     [latest, reads],
+  );
+
+  const lastReadIn = useCallback(
+    (channelId: string) => reads[channelId] ?? null,
+    [reads],
   );
 
   const mentionsIn = useCallback(
@@ -649,6 +690,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         void refreshMembers();
         void refreshConfig();
         void refreshUnread();
+        void refreshVoice();
         // Throttled: a phone reconnects every time the screen goes off.
         void refreshHeads();
       },
@@ -770,6 +812,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       onAndroidUpdate: ({ version, versionCode }) => {
         if (versionCode > CLIENT_VERSION_CODE) setUpdate({ version, versionCode });
       },
+      onVoiceParticipants: ({ channelId, userIds }) =>
+        setVoiceByChannel((current) => {
+          if (userIds.length === 0) {
+            if (!(channelId in current)) return current;
+            const { [channelId]: _gone, ...rest } = current;
+            return rest;
+          }
+          return { ...current, [channelId]: userIds };
+        }),
     });
 
     return () => disconnectSocket();
@@ -780,6 +831,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     refreshConfig,
     refreshUnread,
     refreshHeads,
+    refreshVoice,
     signOut,
   ]);
 
@@ -866,6 +918,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [members, me],
   );
 
+  /**
+   * The voice map, narrowed to channels this account was actually given.
+   *
+   * `voice:participants` goes to every socket, including for channels this
+   * account cannot read. The guild list is the server's answer to what may be
+   * seen, so it is the filter -- and it also drops a channel that was deleted
+   * while people were still in it.
+   */
+  const visibleVoice = useMemo(() => {
+    const known = new Set(guilds.flatMap((g) => g.channels.map((c) => c.id)));
+    const out: Record<string, string[]> = {};
+    for (const [id, users] of Object.entries(voiceByChannel)) {
+      if (known.has(id)) out[id] = users;
+    }
+    return out;
+  }, [guilds, voiceByChannel]);
+
+  const inVoiceCount = useMemo(
+    () => new Set(Object.values(visibleVoice).flat()).size,
+    [visibleVoice],
+  );
+
   const value = useMemo<SessionValue>(
     () => ({
       me,
@@ -883,6 +957,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       signIn,
       register,
       signOut,
+      voiceByChannel: visibleVoice,
+      inVoiceCount,
       nameFor,
       userFor,
       channelById,
@@ -894,6 +970,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       mentionsIn,
       totalMentions,
       anyUnread,
+      lastReadIn,
       markRead,
       prefs,
       setPrefs,
@@ -917,6 +994,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       signIn,
       register,
       signOut,
+      visibleVoice,
+      inVoiceCount,
       nameFor,
       userFor,
       channelById,
@@ -928,6 +1007,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       mentionsIn,
       totalMentions,
       anyUnread,
+      lastReadIn,
       markRead,
       prefs,
       setPrefs,

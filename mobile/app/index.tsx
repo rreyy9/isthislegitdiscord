@@ -10,32 +10,32 @@ import {
 import { useRouter, useNavigation } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ConnectionBanner, UpdateBanner } from '../src/components/Banners';
-import { Avatar } from '../src/components/Avatar';
-import { useDrawer } from '../src/components/Drawer';
+import {
+  ChannelRow,
+  SectionHeader,
+  useChannelSections,
+} from '../src/components/ChannelList';
+import { useDrawer, useSwipeToOpenDrawer } from '../src/components/Drawer';
+import { Icon } from '../src/components/Icon';
+import { ServerMark, UserBar, useServerName } from '../src/components/Identity';
+import { VoiceSheet } from '../src/components/VoiceSheet';
 import { useSession } from '../src/session';
-import { channelIcon } from '../src/format';
 import { radius, spacing, TAP_TARGET, theme } from '../src/theme';
 import type { Channel } from '../src/types';
 
 /**
  * The channel list: this app's home.
  *
- * A `SectionList` keyed by guild, because a guild with its channels is exactly
- * what `GET /api/guilds` hands back and exactly how people think about it.
- * Sorted by `position`, which is the server's ordering and the same one the
- * desktop sidebar draws -- two clients disagreeing about the order of the
- * channel list would be immediately obvious and immediately annoying.
- *
  * Almost everything that used to be reachable only from here now lives in the
  * drawer, which is reachable from inside a channel too. What this screen keeps
  * is being the place the app opens to, and the place the back gesture comes
  * back to -- so it is worth it being the same list, rather than a home screen
- * that shows something else.
+ * that shows something else. Both draw it through `ChannelList`, so the two
+ * cannot disagree about what is unread.
  *
- * Voice channels are listed but not joinable. They are drawn rather than
- * filtered out because a channel list that silently omits half the channels
- * looks like a sync bug; drawn and dimmed, it reads as "not yet", which is what
- * it is.
+ * Voice channels show who is in them, one person per line. Tapping one opens a
+ * sheet with the same people bigger; nothing joins a call from a phone, and
+ * the sheet says where calls happen instead of offering a button that cannot.
  */
 
 export default function Channels() {
@@ -43,28 +43,53 @@ export default function Channels() {
     guilds,
     members,
     onlineIds,
-    me,
     status,
     restarting,
     update,
     dismissedUpdate,
     dismissUpdate,
-    isUnread,
-    mentionsIn,
     totalMentions,
+    inVoiceCount,
   } = useSession();
   const router = useRouter();
   const navigation = useNavigation();
   const drawer = useDrawer();
+  const swipe = useSwipeToOpenDrawer();
   const insets = useSafeAreaInsets();
+  const serverName = useServerName();
+  const sections = useChannelSections();
 
   const [refreshing, setRefreshing] = useState(false);
+  const [voiceFor, setVoiceFor] = useState<Channel | null>(null);
+
+  const onlineCount = useMemo(
+    () => members.filter((m) => onlineIds.has(m.user.id)).length,
+    [members, onlineIds],
+  );
 
   useLayoutEffect(() => {
     navigation.setOptions({
+      headerTitle: () => (
+        <View style={styles.title}>
+          {guilds.length === 1 && <ServerMark name={serverName} size={30} />}
+          <View style={styles.titleText}>
+            <Text style={styles.titleName} numberOfLines={1}>
+              {serverName}
+            </Text>
+            <Text style={styles.titleMeta} numberOfLines={1}>
+              {status === 'connected'
+                ? `${onlineCount} online` +
+                  (inVoiceCount > 0 ? ` · ${inVoiceCount} in voice` : '')
+                : status === 'connecting'
+                  ? 'Connecting…'
+                  : 'Offline'}
+            </Text>
+          </View>
+        </View>
+      ),
       headerLeft: () => (
         <Pressable
-          onPress={drawer.open}
+          onPress={() => drawer.open()}
           hitSlop={12}
           style={styles.headerButton}
           accessibilityRole="button"
@@ -74,7 +99,7 @@ export default function Channels() {
               : 'Open menu'
           }
         >
-          <Text style={styles.headerGlyph}>☰</Text>
+          <Icon name="menu" size={24} color={theme.text} />
           {/* The badge is on the button rather than only inside the menu: the
               whole point of a count is being seen without opening anything. */}
           {totalMentions > 0 && <View style={styles.headerDot} />}
@@ -88,25 +113,21 @@ export default function Channels() {
           accessibilityRole="button"
           accessibilityLabel="Search"
         >
-          <Text style={styles.headerGlyph}>🔍</Text>
+          <Icon name="magnify" size={24} color={theme.text} />
         </Pressable>
       ),
     });
-  }, [navigation, drawer, router, totalMentions]);
-
-  const sections = useMemo(
-    () =>
-      guilds.map((guild) => ({
-        title: guild.name,
-        data: [...guild.channels].sort((a, b) => a.position - b.position),
-      })),
-    [guilds],
-  );
-
-  const onlineCount = useMemo(
-    () => members.filter((m) => onlineIds.has(m.user.id)).length,
-    [members, onlineIds],
-  );
+  }, [
+    navigation,
+    drawer,
+    router,
+    totalMentions,
+    guilds.length,
+    serverName,
+    status,
+    onlineCount,
+    inVoiceCount,
+  ]);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -120,7 +141,10 @@ export default function Channels() {
 
   const open = useCallback(
     (channel: Channel) => {
-      if (channel.kind !== 'TEXT') return;
+      if (channel.kind === 'VOICE') {
+        setVoiceFor(channel);
+        return;
+      }
       router.push(`/channel/${channel.id}` as never);
     },
     [router],
@@ -143,7 +167,7 @@ export default function Channels() {
     update.versionCode > (dismissedUpdate ?? 0);
 
   return (
-    <View style={styles.flex}>
+    <View style={styles.flex} {...swipe}>
       {showUpdate && (
         <UpdateBanner version={update.version} onDismiss={dismissUpdate} />
       )}
@@ -152,40 +176,14 @@ export default function Channels() {
       <SectionList
         sections={sections}
         keyExtractor={(channel) => channel.id}
-        contentContainerStyle={{ paddingBottom: insets.bottom + spacing.xl }}
+        stickySectionHeadersEnabled={false}
+        contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
             onRefresh={refresh}
             tintColor={theme.textMuted}
           />
-        }
-        ListHeaderComponent={
-          me ? (
-            <Pressable
-              style={({ pressed }) => [styles.meRow, pressed && styles.pressed]}
-              onPress={drawer.open}
-              accessibilityRole="button"
-              accessibilityLabel="Open menu"
-            >
-              <Avatar
-                userId={me.id}
-                name={me.displayName || me.username || '?'}
-                image={me.image}
-                size={36}
-                online={status === 'connected'}
-              />
-              <View style={styles.meText}>
-                <Text style={styles.meName} numberOfLines={1}>
-                  {me.displayName || me.username}
-                </Text>
-                <Text style={styles.meMeta} numberOfLines={1}>
-                  {onlineCount} online
-                </Text>
-              </View>
-              <Text style={styles.meChevron}>›</Text>
-            </Pressable>
-          ) : null
         }
         ListEmptyComponent={
           <Text style={styles.empty}>
@@ -194,56 +192,36 @@ export default function Channels() {
               : 'Waiting for the server…'}
           </Text>
         }
-        renderSectionHeader={({ section }) => (
-          <Text style={styles.sectionHeader}>{section.title}</Text>
+        renderSectionHeader={({ section }) => <SectionHeader title={section.title} />}
+        renderItem={({ item }) => (
+          <ChannelRow
+            channel={item}
+            occupants="list"
+            surface={theme.bg}
+            onOpen={open}
+          />
         )}
-        renderItem={({ item }) => {
-          const text = item.kind === 'TEXT';
-          const unread = text && isUnread(item.id);
-          const tags = text ? mentionsIn(item.id) : 0;
-
-          return (
-            <Pressable
-              onPress={() => open(item)}
-              disabled={!text}
-              style={({ pressed }) => [
-                styles.channel,
-                pressed && text && styles.pressed,
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel={
-                `${item.name}${text ? '' : ', voice channel, not supported yet'}` +
-                (tags ? `, ${tags} unread mentions` : unread ? ', unread' : '')
-              }
-            >
-              <Text style={styles.channelIcon}>{channelIcon(item)}</Text>
-              <Text
-                style={[
-                  styles.channelName,
-                  !text && styles.channelDisabled,
-                  unread && styles.channelUnread,
-                ]}
-                numberOfLines={1}
-              >
-                {item.name}
-              </Text>
-              {tags > 0 && (
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{tags > 99 ? '99+' : tags}</Text>
-                </View>
-              )}
-              {!text && <Text style={styles.soon}>voice</Text>}
-            </Pressable>
-          );
-        }}
       />
+
+      <UserBar
+        onPress={() => router.push('/settings')}
+        surface={theme.surface}
+        bottomInset={insets.bottom}
+      />
+
+      <VoiceSheet channel={voiceFor} onClose={() => setVoiceFor(null)} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: theme.bg },
-  pressed: { backgroundColor: theme.surfaceAlt },
+  listContent: { paddingBottom: spacing.lg },
+
+  title: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  titleText: { flexShrink: 1 },
+  titleName: { color: theme.text, fontSize: 16, fontWeight: '700' },
+  titleMeta: { color: theme.textMuted, fontSize: 12 },
 
   headerButton: {
     minWidth: TAP_TARGET,
@@ -251,7 +229,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerGlyph: { color: theme.text, fontSize: 18 },
   headerDot: {
     position: 'absolute',
     top: 8,
@@ -264,61 +241,6 @@ const styles = StyleSheet.create({
     borderColor: theme.surface,
   },
 
-  meRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-    backgroundColor: theme.surface,
-  },
-  meText: { flex: 1 },
-  meName: { color: theme.text, fontSize: 15, fontWeight: '600' },
-  meMeta: { color: theme.textMuted, fontSize: 12 },
-  meChevron: { color: theme.textFaint, fontSize: 20 },
-
-  sectionHeader: {
-    color: theme.textMuted,
-    fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.xs,
-    backgroundColor: theme.bg,
-  },
-  channel: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    minHeight: TAP_TARGET,
-    paddingHorizontal: spacing.md,
-    marginHorizontal: spacing.sm,
-    borderRadius: radius.sm,
-  },
-  channelIcon: { color: theme.textFaint, fontSize: 15, width: 20 },
-  channelName: { color: theme.textMuted, fontSize: 15, flex: 1 },
-  // Unread is weight and colour rather than a dot in the margin: the whole row
-  // is the thing being scanned, and a bold row is legible at arm's length in a
-  // way a four-pixel dot is not.
-  channelUnread: { color: theme.text, fontWeight: '700' },
-  channelDisabled: { color: theme.textFaint },
-  badge: {
-    minWidth: 20,
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    borderRadius: radius.pill,
-    backgroundColor: theme.danger,
-    alignItems: 'center',
-  },
-  badgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
-  soon: {
-    color: theme.textFaint,
-    fontSize: 10,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
   empty: {
     color: theme.textMuted,
     textAlign: 'center',

@@ -15,6 +15,7 @@ import type {
   Reaction,
   SearchPage,
   SendExtras,
+  VoiceChannelState,
   ServerConfig,
 } from './types';
 
@@ -310,6 +311,13 @@ export const api = {
   reads: () => request<ChannelRead[]>('/api/reads'),
 
   mentions: () => request<ChannelMentions[]>('/api/mentions'),
+
+  /**
+   * Who is in which voice channel, right now. Only channels with somebody in
+   * them are listed, and only ones this account can read. The socket's
+   * `voice:participants` keeps it current from here on.
+   */
+  voiceState: () => request<VoiceChannelState[]>('/api/voice/state'),
 
   markRead: (channelId: string, lastReadMessageId: string) =>
     request<ChannelRead>(`/api/channels/${channelId}/read`, {

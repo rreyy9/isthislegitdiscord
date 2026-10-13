@@ -12,6 +12,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { downloadUpdate } from '../updates';
 import { useSession } from '../session';
 import { radius, spacing, theme } from '../theme';
+import { Icon } from './Icon';
 import type { Status } from '../session';
 
 /**
@@ -102,7 +103,7 @@ export function UpdateBanner({
       </Pressable>
 
       <Pressable onPress={onDismiss} hitSlop={12} style={styles.dismiss}>
-        <Text style={styles.dismissLabel}>✕</Text>
+        <Icon name="close" size={18} color="rgba(255,255,255,0.75)" />
       </Pressable>
     </View>
   );
@@ -158,10 +159,6 @@ const styles = StyleSheet.create({
   },
   dismiss: {
     paddingHorizontal: spacing.xs,
-  },
-  dismissLabel: {
-    color: 'rgba(255,255,255,0.75)',
-    fontSize: 15,
   },
 
   notice: {
@@ -283,7 +280,7 @@ export function MentionNotice() {
         </Text>
       </Pressable>
       <Pressable onPress={dismissNotice} hitSlop={12} style={styles.dismiss}>
-        <Text style={styles.dismissLabel}>✕</Text>
+        <Icon name="close" size={18} color="rgba(255,255,255,0.75)" />
       </Pressable>
     </Animated.View>
   );

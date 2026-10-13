@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { radius, spacing, TAP_TARGET, theme } from '../theme';
+import { Icon, type IconName } from './Icon';
 
 /**
  * A panel that comes up from the bottom.
@@ -114,8 +115,8 @@ export function Sheet({ visible, onClose, title, children, tall }: SheetProps) {
 
 export interface SheetRowProps {
   label: string;
-  /** One character drawn in the gutter. Keeps every row the same height. */
-  icon?: string;
+  /** Drawn in the gutter. Keeps every row's label on the same line. */
+  icon?: IconName;
   onPress: () => void;
   /** Red, for the ones that remove something. */
   danger?: boolean;
@@ -144,7 +145,11 @@ export function SheetRow({
       accessibilityRole="button"
       accessibilityLabel={label}
     >
-      {icon && <Text style={styles.rowIcon}>{icon}</Text>}
+      {icon && (
+        <View style={styles.rowIcon}>
+          <Icon name={icon} size={20} color={danger ? theme.danger : theme.textMuted} />
+        </View>
+      )}
       <View style={styles.rowText}>
         <Text style={[styles.rowLabel, danger && styles.rowDanger]}>{label}</Text>
         {hint && <Text style={styles.rowHint}>{hint}</Text>}
@@ -201,7 +206,7 @@ const styles = StyleSheet.create({
   },
   rowPressed: { backgroundColor: theme.surfaceAlt },
   rowDisabled: { opacity: 0.4 },
-  rowIcon: { fontSize: 16, width: 22, textAlign: 'center' },
+  rowIcon: { width: 22, alignItems: 'center' },
   rowText: { flex: 1 },
   rowLabel: { color: theme.text, fontSize: 15 },
   rowDanger: { color: theme.danger },

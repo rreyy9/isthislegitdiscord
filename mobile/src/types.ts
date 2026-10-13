@@ -145,6 +145,16 @@ export interface ServerConfig {
   latestAndroidVersionCode?: number | null;
 }
 
+/**
+ * The people in one voice channel. The phone cannot join a call, but it can
+ * say who is in one -- which is most of what anybody opens the app to find out
+ * before they go to their desk.
+ */
+export interface VoiceChannelState {
+  channelId: string;
+  userIds: string[];
+}
+
 /** A page of search results. Paged by message id, newest first. */
 export interface SearchPage {
   results: Message[];

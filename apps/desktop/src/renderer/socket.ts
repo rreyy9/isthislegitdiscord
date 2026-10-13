@@ -102,11 +102,17 @@ export interface SocketEvents {
    * Somebody came online or went offline. `lastSeenAt` rides along so the
    * member list can put a duration under a name the moment it dims, instead
    * of leaving the space blank until the next fetch answers.
+   *
+   * Also arrives, with `online` still true, when somebody goes away or comes
+   * back. The last three fields are absent from a server older than away.
    */
   onPresence: (p: {
     userId: string;
     online: boolean;
     lastSeenAt: string | null;
+    away?: boolean;
+    onlineSince?: string | null;
+    lastActiveAt?: string | null;
   }) => void;
   onTyping: (p: { channelId: string; userId: string; typing: boolean }) => void;
   onVoiceParticipants: (p: { channelId: string; userIds: string[] }) => void;
@@ -229,6 +235,24 @@ export function typingStart(channelId: string) {
 }
 export function typingStop(channelId: string) {
   socket?.emit('typing:stop', { channelId });
+}
+
+/** How often, at most, talking in voice is reported as activity. */
+const VOICE_ACTIVITY_EVERY_MS = 60_000;
+let lastVoiceActivity = 0;
+
+/**
+ * I am talking. Called on every meter tick that hears you, and throttled here
+ * so the caller does not have to care: the server only needs to know you are
+ * still around within its half-hour away window, and once a minute is plenty.
+ *
+ * Only the speaker's own client sends this -- see `activity:voice` in shared.
+ */
+export function reportVoiceActivity() {
+  const now = Date.now();
+  if (!socket?.connected || now - lastVoiceActivity < VOICE_ACTIVITY_EVERY_MS) return;
+  lastVoiceActivity = now;
+  socket.emit('activity:voice');
 }
 
 /**

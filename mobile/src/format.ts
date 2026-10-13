@@ -50,15 +50,16 @@ export const sameDay = (a: string, b: string): boolean =>
   new Date(a).toDateString() === new Date(b).toDateString();
 
 /**
- * The character in front of a channel's name. Structurally typed rather than
- * taking a Channel, so this file keeps its no-imports promise.
+ * The icon in front of a channel's name, as a name from the icon font.
+ * Structurally typed, and returning plain string literals rather than the
+ * font's own type, so this file keeps its no-imports promise.
  */
 export function channelIcon(channel: {
   kind: 'TEXT' | 'VOICE';
   listenOnly?: boolean;
-}): string {
-  if (channel.kind !== 'VOICE') return '#';
-  return channel.listenOnly ? '🔇' : '🔊';
+}): 'pound' | 'volume-high' | 'volume-off' {
+  if (channel.kind !== 'VOICE') return 'pound';
+  return channel.listenOnly ? 'volume-off' : 'volume-high';
 }
 
 /** What a person is called. Display name if they set one, handle otherwise. */

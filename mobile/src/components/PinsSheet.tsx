@@ -5,6 +5,7 @@ import { personName, stamp } from '../format';
 import { spacing, theme } from '../theme';
 import type { Message } from '../types';
 import { Avatar } from './Avatar';
+import { Icon } from './Icon';
 import { MessageContent } from './MessageContent';
 import { Sheet } from './Sheet';
 
@@ -94,7 +95,9 @@ export function PinsSheet({
 
         {pins?.length === 0 && (
           <View style={styles.emptyBox}>
-            <Text style={styles.emptyMark}>📌</Text>
+            <View style={styles.emptyMark}>
+              <Icon name="pin-outline" size={36} color={theme.textFaint} />
+            </View>
             <Text style={styles.empty}>Nothing is pinned in #{channelName} yet.</Text>
             {canPin && (
               <Text style={styles.hint}>
@@ -155,7 +158,7 @@ export function PinsSheet({
                 accessibilityRole="button"
                 accessibilityLabel="Unpin"
               >
-                <Text style={styles.unpinLabel}>✕</Text>
+                <Icon name="close" size={18} />
               </Pressable>
             )}
           </Pressable>
@@ -170,7 +173,7 @@ const styles = StyleSheet.create({
   error: { color: theme.danger, fontSize: 13, padding: spacing.md },
   hint: { color: theme.textFaint, fontSize: 12, padding: spacing.md, textAlign: 'center' },
   emptyBox: { alignItems: 'center', paddingVertical: spacing.xl },
-  emptyMark: { fontSize: 30, marginBottom: spacing.sm },
+  emptyMark: { marginBottom: spacing.sm },
   empty: { color: theme.textMuted, fontSize: 14, textAlign: 'center' },
   row: {
     flexDirection: 'row',
@@ -185,5 +188,4 @@ const styles = StyleSheet.create({
   rowAuthor: { color: theme.text, fontSize: 14, fontWeight: '600', flexShrink: 1 },
   rowTime: { color: theme.textFaint, fontSize: 11 },
   unpin: { paddingHorizontal: spacing.xs, paddingTop: spacing.xs },
-  unpinLabel: { color: theme.textMuted, fontSize: 14 },
 });

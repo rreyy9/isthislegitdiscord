@@ -753,9 +753,55 @@ export const GuildMemberDto = z.object({
    * now it is the start of the session they are still in, which nothing draws.
    */
   lastSeenAt: z.string().nullable(),
+  /**
+   * Online but has not done anything for `AWAY_AFTER_MS`: no message, no
+   * reaction, no typing, nothing said in voice. Always false while offline.
+   */
+  away: z.boolean(),
+  /**
+   * When their current session started, or null while offline. A separate
+   * field from `lastSeenAt` even though the two hold the same instant while
+   * somebody is connected, so that nothing has to know that to draw it.
+   */
+  onlineSince: z.string().nullable(),
+  /**
+   * When they last did something -- see `MemberActivity`. As of the moment
+   * this list was built; the hover card asks for a fresh one.
+   */
+  lastActiveAt: z.string().nullable(),
+  /** When they joined this guild. */
+  joinedAt: z.string(),
   user: PublicUser,
 });
 export type GuildMemberDto = z.infer<typeof GuildMemberDto>;
+
+/**
+ * How long somebody can go without doing anything before they show as away.
+ *
+ * Fixed rather than a setting: half an hour with no message, no reaction and
+ * nothing said in voice is away, whatever else they have open.
+ */
+export const AWAY_AFTER_MS = 30 * 60 * 1000;
+
+/**
+ * One person's presence as of right now, for the profile card.
+ *
+ * Asked for when the card opens rather than pushed as it changes: activity
+ * moves every time anybody types, and nothing but an open card draws it, so
+ * broadcasting it would be a stream of events with nobody listening.
+ *
+ * "Active" means a message sent, edited or reacted to, typing, speaking in
+ * voice, joining a voice channel, or opening the app. Reading does not count.
+ */
+export const MemberActivity = z.object({
+  userId: z.string(),
+  online: z.boolean(),
+  away: z.boolean(),
+  onlineSince: z.string().nullable(),
+  lastSeenAt: z.string().nullable(),
+  lastActiveAt: z.string().nullable(),
+});
+export type MemberActivity = z.infer<typeof MemberActivity>;
 
 export const MessagePage = z.object({
   messages: z.array(Message),
@@ -1244,11 +1290,19 @@ export interface ServerToClientEvents {
    * ago" under a name the instant it dims, rather than showing nothing there
    * until the next `/api/members`. On the way up it is the previous session's
    * mark, which the client stops drawing anyway once the dot turns green.
+   *
+   * Also sent, with `online` still true, when somebody goes away or comes
+   * back. `away`, `onlineSince` and `lastActiveAt` are additions: a client
+   * older than them reads an away transition as "still online", which is what
+   * it already believed.
    */
   'presence:changed': (payload: {
     userId: string;
     online: boolean;
     lastSeenAt: string | null;
+    away?: boolean;
+    onlineSince?: string | null;
+    lastActiveAt?: string | null;
   }) => void;
   'typing:changed': (payload: {
     channelId: string;
@@ -1301,6 +1355,15 @@ export interface ClientToServerEvents {
   'channel:leave': (payload: { channelId: string }) => void;
   'typing:start': (payload: { channelId: string }) => void;
   'typing:stop': (payload: { channelId: string }) => void;
+  /**
+   * I am talking in voice. Sent by the speaker's own client, at most about
+   * once a minute while they keep talking, because only that client can tell:
+   * LiveKit reports speaking to the people in the room, never to the server.
+   *
+   * Counted only for somebody the server can see in a voice channel they are
+   * allowed to speak in. No payload, and no ack.
+   */
+  'activity:voice': () => void;
   /* ----------------------------------------------------------- party */
   'party:start': (payload: { guildId: string; title: string }) => void;
   /**

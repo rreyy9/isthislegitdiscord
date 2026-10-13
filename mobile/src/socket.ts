@@ -62,6 +62,15 @@ export interface SocketEvents {
    * this, which reads correctly as "no update".
    */
   onAndroidUpdate: (p: { version: string; versionCode: number }) => void;
+  /**
+   * Somebody joined or left a voice channel. The whole list for that channel,
+   * not a delta, and an empty list when the last person leaves.
+   *
+   * Sent to every socket regardless of who can read the channel, so the
+   * handler only draws it for channels this account was given in its guild
+   * list. A server older than voice never sends it.
+   */
+  onVoiceParticipants: (p: { channelId: string; userIds: string[] }) => void;
   /** The server is going down to be updated and will be back in seconds. */
   onServerRestarting: () => void;
   onStatus: (status: 'connected' | 'disconnected' | 'connecting') => void;
@@ -115,6 +124,7 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('typing:changed', events.onTyping);
   socket.on('moderation:removed', events.onRemoved);
   socket.on('android:update-available', events.onAndroidUpdate);
+  socket.on('voice:participants', events.onVoiceParticipants);
   socket.on('server:restarting', () => events.onServerRestarting());
 
   return socket;

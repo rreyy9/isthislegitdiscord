@@ -333,6 +333,7 @@ export class MessagesController {
     );
 
     const dto = { ...toDto(row), mentions: pinged };
+    this.gateway.markActive(user.id);
     this.gateway.broadcastMessage(dto);
     // After the broadcast, so that anyone with the channel open has already
     // been given the message their notification is about.
@@ -501,6 +502,7 @@ export class MessagesController {
     );
 
     const dto = { ...toDto(row), mentions: pinged };
+    this.gateway.markActive(user.id);
     this.gateway.broadcastMessageUpdated(dto);
     if (newlyPinged.length > 0) {
       const channel = await this.prisma.channel.findUnique({
@@ -684,6 +686,7 @@ export class MessagesController {
       skipDuplicates: true,
     });
 
+    this.gateway.markActive(user.id);
     return this.publishReaction(channelId, id, emoji);
   }
 
@@ -701,6 +704,7 @@ export class MessagesController {
       where: { messageId: id, userId: user.id, emoji },
     });
 
+    this.gateway.markActive(user.id);
     return this.publishReaction(channelId, id, emoji);
   }
 

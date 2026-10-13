@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Avatar } from './Avatar';
+import { Icon } from './Icon';
 import { MessageContent } from './MessageContent';
 import { personName, plainMentions, quoteLine, timeOf } from '../format';
 import { radius, spacing, theme } from '../theme';
@@ -117,7 +118,11 @@ export const MessageRow = memo(function MessageRow({
               {personName(author)}
             </Text>
             <Text style={styles.time}>{timeOf(message.createdAt)}</Text>
-            {message.pinnedAt && <Text style={styles.pinMark}>📌</Text>}
+            {message.pinnedAt && (
+              <View style={styles.pinMark}>
+                <Icon name="pin" size={12} color={theme.textFaint} />
+              </View>
+            )}
           </View>
         )}
 
@@ -135,9 +140,12 @@ export const MessageRow = memo(function MessageRow({
 
         {message.forwardedFrom && (
           <View style={styles.forward}>
-            <Text style={styles.forwardLabel}>
-              ↪ Forwarded from {personName(message.forwardedFrom.author)}
-            </Text>
+            <View style={styles.forwardHead}>
+              <Icon name="share" size={14} color={theme.textMuted} />
+              <Text style={styles.forwardLabel}>
+                Forwarded from {personName(message.forwardedFrom.author)}
+              </Text>
+            </View>
             <MessageContent
               content={message.forwardedFrom.content}
               attachments={message.forwardedFrom.attachments}
@@ -275,7 +283,7 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 2 },
   author: { color: theme.text, fontWeight: '600', fontSize: 15, flexShrink: 1 },
   time: { color: theme.textFaint, fontSize: 11, marginLeft: spacing.sm },
-  pinMark: { fontSize: 10, marginLeft: spacing.xs },
+  pinMark: { marginLeft: spacing.xs, alignSelf: 'center' },
   quote: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -297,6 +305,12 @@ const styles = StyleSheet.create({
     paddingLeft: spacing.sm,
     borderLeftWidth: 2,
     borderLeftColor: theme.border,
+  },
+  forwardHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 2,
   },
   forwardLabel: {
     color: theme.textMuted,

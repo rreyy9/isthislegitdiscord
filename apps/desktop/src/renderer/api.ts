@@ -128,6 +128,11 @@ export interface ServerConfigDto {
   latestClientVersion: string | null;
   /** A floor. Expected to stay null; see the README's Older clients. */
   minClientVersion: string | null;
+  /**
+   * The newest Android build published to this server, for the Phone app
+   * page. Absent from a server older than the Android channel.
+   */
+  latestAndroidVersion?: string | null;
 }
 
 export interface Me {
@@ -354,7 +359,32 @@ export interface MemberDto {
    * while they are offline, where it is the "last seen 3h ago" under a name.
    */
   lastSeenAt: string | null;
+  /**
+   * Online but has done nothing for half an hour -- the yellow dot. The four
+   * fields from here down are absent from a server older than them; read them
+   * with `?? false` / `?? null`.
+   */
+  away?: boolean;
+  /** When the current session started, or null while offline. */
+  onlineSince?: string | null;
+  /**
+   * When they last sent, edited or reacted to a message, typed, spoke or
+   * joined in voice, or opened the app. As of when the list was fetched; the
+   * profile card asks for a fresh one.
+   */
+  lastActiveAt?: string | null;
+  /** When they joined this guild. */
+  joinedAt?: string;
   user: { id: string; username: string; displayName: string | null; image: string | null };
+}
+/** One person's presence as of now, for the profile card. */
+export interface MemberActivityDto {
+  userId: string;
+  online: boolean;
+  away: boolean;
+  onlineSince: string | null;
+  lastSeenAt: string | null;
+  lastActiveAt: string | null;
 }
 export interface BanDto {
   userId: string;
@@ -435,6 +465,9 @@ export const api = {
   deleteChannel: (id: string) =>
     request<{ ok: boolean }>(`/api/channels/${id}`, { method: 'DELETE' }),
   members: () => request<MemberDto[]>('/api/members'),
+  /** A 404 from a server older than the profile card; the card falls back. */
+  memberActivity: (userId: string) =>
+    request<MemberActivityDto>(`/api/members/${encodeURIComponent(userId)}/activity`),
   history: (channelId: string, before?: string, limit = 50) =>
     request<MessagePageDto>(
       `/api/channels/${channelId}/messages?limit=${limit}${before ? `&before=${before}` : ''}`,

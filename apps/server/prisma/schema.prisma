@@ -167,6 +167,15 @@ model GuildMember {
   // account that has not connected since this was added.
   lastSeenAt DateTime?
 
+  // When they last did something: sent, edited or reacted to a message, typed,
+  // spoke in voice, joined a voice channel, or opened the app.
+  //
+  // Held in memory by the gateway while they are connected and written here
+  // only when their last connection closes, in the same statement as
+  // lastSeenAt -- so it costs no writes of its own. Read from here only for
+  // somebody who is offline; for anyone connected the gateway's copy is newer.
+  lastActiveAt DateTime?
+
   @@unique([guildId, userId])
   @@index([userId])
 }

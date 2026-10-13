@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { MemberDto, MessageDto } from '../api';
 import { MessageContent } from './MessageContent';
 import { Avatar } from './Avatar';
+import { MemberCard } from './MemberCard';
 import { lastSeenLabel, muteLabel, stamp } from './chat-format';
 
 /**
@@ -263,6 +264,20 @@ const MUTE_OPTIONS: { label: string; minutes: number | null }[] = [
   { label: 'Indefinitely', minutes: null },
 ];
 
+/** How long a pointer has to rest on a name before its card opens. */
+const CARD_OPEN_MS = 350;
+/** Moving from one name to the next while a card is open switches faster. */
+const CARD_SWITCH_MS = 120;
+/** Grace for the pointer to cross the gap between the row and the card. */
+const CARD_CLOSE_MS = 150;
+
+interface OpenCard {
+  userId: string;
+  anchor: { top: number; left: number };
+  /** Opened by a click, so it stays until a click elsewhere or Escape. */
+  pinned: boolean;
+}
+
 /**
  * The roster down the right-hand side, and the moderation menu it opens.
  *
@@ -288,6 +303,7 @@ export function MembersPanel({
   onUnmute,
   onKick,
   onBan,
+  voiceChannelOf,
 }: {
   members: MemberDto[];
   /** Ticks once a minute, so the "last seen" durations do not go stale. */
@@ -303,7 +319,68 @@ export function MembersPanel({
   onUnmute: (m: MemberDto) => void;
   onKick: (m: MemberDto) => void;
   onBan: (m: MemberDto) => void;
+  /** Name of the voice channel somebody is in, for their profile card. */
+  voiceChannelOf: (userId: string) => string | null;
 }) {
+  const [card, setCard] = useState<OpenCard | null>(null);
+  const openTimer = useRef<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
+
+  const clearTimers = () => {
+    if (openTimer.current !== null) window.clearTimeout(openTimer.current);
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    openTimer.current = closeTimer.current = null;
+  };
+  useEffect(() => clearTimers, []);
+
+  /*
+   * Hover previews; a click pins. Hover alone is fiddly -- the card closes the
+   * moment the pointer wanders -- and a click is what somebody does when they
+   * actually want to read it.
+   */
+  const hoverRow = (userId: string, row: HTMLElement) => {
+    if (card?.pinned) return;
+    clearTimers();
+    if (card?.userId === userId) return;
+    openTimer.current = window.setTimeout(
+      () => {
+        const r = row.getBoundingClientRect();
+        setCard({ userId, anchor: { top: r.top, left: r.left }, pinned: false });
+      },
+      card ? CARD_SWITCH_MS : CARD_OPEN_MS,
+    );
+  };
+  const leave = () => {
+    if (openTimer.current !== null) window.clearTimeout(openTimer.current);
+    openTimer.current = null;
+    if (!card || card.pinned) return;
+    closeTimer.current = window.setTimeout(() => setCard(null), CARD_CLOSE_MS);
+  };
+  const clickRow = (userId: string, row: HTMLElement) => {
+    clearTimers();
+    onMenuChange(null);
+    if (card?.pinned && card.userId === userId) return setCard(null);
+    const r = row.getBoundingClientRect();
+    setCard({ userId, anchor: { top: r.top, left: r.left }, pinned: true });
+  };
+
+  // A pinned card closes on a click anywhere else or on Escape, like a menu.
+  const pinned = Boolean(card?.pinned);
+  useEffect(() => {
+    if (!pinned) return;
+    const close = () => setCard(null);
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close();
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [pinned]);
+
+  // Looked up each render rather than held, so presence moves the card too.
+  const cardMember = card ? members.find((m) => m.user.id === card.userId) : undefined;
+
   return (
     <div className="col members">
       <div className="sb-head row" style={{ fontSize: 13 }}>
@@ -314,7 +391,9 @@ export function MembersPanel({
           </button>
         )}
       </div>
-      <div className="sb-scroll">
+      {/* Closed on scroll: the card is placed against the row, and a row
+          that scrolls away would leave it pointing at somebody else. */}
+      <div className="sb-scroll" onScroll={() => card && setCard(null)}>
         {[...members]
           .sort((a, b) =>
             a.online === b.online
@@ -326,7 +405,22 @@ export function MembersPanel({
                 : 1,
           )
           .map((m) => (
-            <div key={m.user.id} className={'mem' + (m.online ? '' : ' offline')}>
+            <div
+              key={m.user.id}
+              className={
+                'mem' +
+                (m.online ? '' : ' offline') +
+                (card?.userId === m.user.id ? ' carded' : '')
+              }
+              onMouseEnter={(e) => hoverRow(m.user.id, e.currentTarget)}
+              onMouseLeave={leave}
+              onClick={(e) => {
+                // Stopped for the same reason as the moderation menu's: the
+                // window-wide click that closes a pinned card is this click.
+                e.stopPropagation();
+                clickRow(m.user.id, e.currentTarget);
+              }}
+            >
               <Avatar
                 name={m.user.displayName || m.user.username}
                 image={m.user.image}
@@ -418,10 +512,29 @@ export function MembersPanel({
                   )}
                 </div>
               )}
-              <div className={'pdot ' + (m.online ? 'on' : 'off')} />
+              <div
+                className={'pdot ' + (!m.online ? 'off' : m.away ? 'away' : 'on')}
+                title={!m.online ? 'Offline' : m.away ? 'Away' : 'Online'}
+              />
             </div>
           ))}
       </div>
+      {/* Not while the moderation menu is open: the two would overlap, and
+          somebody reaching for Kick is not reading a profile. */}
+      {card && cardMember && !menuFor && (
+        <MemberCard
+          key={card.userId}
+          member={cardMember}
+          anchor={card.anchor}
+          now={now}
+          voiceChannel={voiceChannelOf(card.userId)}
+          onMouseEnter={() => {
+            if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+            closeTimer.current = null;
+          }}
+          onMouseLeave={leave}
+        />
+      )}
     </div>
   );
 }

@@ -3,6 +3,7 @@ import {
   channelIcon,
   dayLabel,
   describeBytes,
+  durationLabel,
   guessReactions,
   isForever,
   lastSeenLabel,
@@ -128,6 +129,23 @@ describe('muteLabel', () => {
     const laterLabel = muteLabel(new Date('2026-09-10T16:00:00').toISOString());
     expect(todayLabel.length).toBeLessThan(laterLabel.length);
     expect(laterLabel).toMatch(/Sep/);
+  });
+});
+
+describe('durationLabel', () => {
+  const now = new Date('2026-09-08T15:00:00.000Z').getTime();
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+
+  it('reads as a length of time, two units at most', () => {
+    expect(durationLabel(ago(20_000), now)).toBe('<1m');
+    expect(durationLabel(ago(45 * 60_000), now)).toBe('45m');
+    expect(durationLabel(ago(2 * 3600_000), now)).toBe('2h');
+    expect(durationLabel(ago(2 * 3600_000 + 5 * 60_000), now)).toBe('2h 5m');
+    expect(durationLabel(ago(3 * 86_400_000 + 4 * 3600_000 + 59_000), now)).toBe('3d 4h');
+  });
+
+  it('does not go negative on a clock that is slightly ahead', () => {
+    expect(durationLabel(new Date(now + 5_000).toISOString(), now)).toBe('<1m');
   });
 });
 

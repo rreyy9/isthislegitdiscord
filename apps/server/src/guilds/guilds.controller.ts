@@ -1,5 +1,5 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
-import type { Guild, GuildMemberDto } from '@isthislegit/shared';
+import { Controller, Get, NotFoundException, Param, UseGuards } from '@nestjs/common';
+import type { Guild, GuildMemberDto, MemberActivity } from '@isthislegit/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthGuard, CurrentUser, type SessionUser } from '../auth/auth.guard';
 import { ChatGateway } from '../gateway/chat.gateway';
@@ -68,6 +68,8 @@ export class GuildsController {
       mutedUntil:
         m.mutedUntil && m.mutedUntil > now ? m.mutedUntil.toISOString() : null,
       lastSeenAt: m.lastSeenAt ? m.lastSeenAt.toISOString() : null,
+      ...this.activityOf(m.userId, m.lastActiveAt),
+      joinedAt: m.joinedAt.toISOString(),
       user: {
         id: m.user.id,
         username: m.user.username ?? m.user.id,
@@ -75,5 +77,49 @@ export class GuildsController {
         image: m.user.image ?? null,
       },
     }));
+  }
+
+  /**
+   * One person's presence as of now, for the profile card. See
+   * `MemberActivity` in shared for why this is asked for rather than pushed.
+   *
+   * Only for somebody the caller shares a guild with -- the same people the
+   * member list would show them -- and a 404 for anyone else, so the route
+   * cannot be used to ask whether an account exists.
+   */
+  @Get('members/:userId/activity')
+  async activity(
+    @CurrentUser() user: SessionUser,
+    @Param('userId') userId: string,
+  ): Promise<MemberActivity> {
+    const row = await this.prisma.guildMember.findFirst({
+      where: {
+        userId,
+        guild: { members: { some: { userId: user.id } } },
+      },
+      select: { lastSeenAt: true, lastActiveAt: true },
+    });
+    if (!row) throw new NotFoundException('No such member.');
+
+    return {
+      userId,
+      online: this.gateway.onlineUserIds().includes(userId),
+      lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
+      ...this.activityOf(userId, row.lastActiveAt),
+    };
+  }
+
+  /**
+   * The gateway's answer for somebody connected, the column's for somebody
+   * who is not. The column is only written when they leave, so while they are
+   * here it is the previous session's figure.
+   */
+  private activityOf(userId: string, stored: Date | null) {
+    const live = this.gateway.presenceOf(userId);
+    return {
+      away: live?.away ?? false,
+      onlineSince: live?.onlineSince ?? null,
+      lastActiveAt: live?.lastActiveAt ?? (stored ? stored.toISOString() : null),
+    };
   }
 }

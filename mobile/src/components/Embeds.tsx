@@ -17,6 +17,7 @@ import {
   type Embed,
 } from '../link-utils';
 import { Player } from './Attachments';
+import { Icon } from './Icon';
 import { useImageViewer } from './ImageViewer';
 import { radius, spacing, theme } from '../theme';
 
@@ -112,7 +113,7 @@ function YouTube({
         transition={120}
       />
       <View style={styles.ytPlay}>
-        <Text style={styles.ytGlyph}>▶</Text>
+        <Icon name="play" size={26} color="#fff" />
       </View>
     </Pressable>
   );
@@ -183,7 +184,7 @@ function TikTok({
         accessibilityRole="button"
         accessibilityLabel={`${failure}. Open on TikTok`}
       >
-        <Text style={styles.ttMark}>♪</Text>
+        <Icon name="music-note" size={30} color={theme.text} />
         <Text style={[styles.ttLabel, styles.ttFailedLabel]}>
           {failure} — open on TikTok
         </Text>
@@ -225,7 +226,7 @@ function TikTok({
       accessibilityRole="button"
       accessibilityLabel="Play TikTok post"
     >
-      <Text style={styles.ttMark}>♪</Text>
+      <Icon name="music-note" size={30} color={theme.text} />
       <Text style={styles.ttLabel}>Watch on TikTok</Text>
     </Pressable>
   );
@@ -395,7 +396,7 @@ function LinkedVideo({ url }: { url: string }) {
       accessibilityRole="button"
       accessibilityLabel={`Play ${fileNameOf(url)}`}
     >
-      <Text style={styles.videoGlyph}>▶</Text>
+      <Icon name="play" size={26} color={theme.text} />
       <Text style={styles.videoName} numberOfLines={1}>
         {fileNameOf(url)}
       </Text>
@@ -436,7 +437,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  ytGlyph: { color: '#fff', fontSize: 18, marginLeft: 2 },
   ttPoster: {
     height: 120,
     width: '100%',
@@ -444,7 +444,6 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
   },
-  ttMark: { color: theme.text, fontSize: 30 },
   ttLabel: { color: theme.textMuted, fontSize: 12, fontWeight: '600' },
   // The failure wording is a sentence rather than two words, so it needs room
   // to wrap and somewhere to wrap to.
@@ -465,6 +464,5 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
   },
-  videoGlyph: { color: theme.text, fontSize: 22 },
   videoName: { color: theme.textMuted, fontSize: 13, flexShrink: 1 },
 });

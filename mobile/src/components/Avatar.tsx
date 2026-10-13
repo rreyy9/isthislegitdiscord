@@ -55,6 +55,17 @@ export interface AvatarProps {
   size?: number;
   /** Draws the green dot. Omitted where presence is not being shown. */
   online?: boolean;
+  /**
+   * The colour behind the avatar, for the ring around the dot and around the
+   * avatar itself when `ringed`. Defaults to the window background; a panel
+   * passes its own surface so the ring is not a dark halo on a lighter panel.
+   */
+  ringColor?: string;
+  /**
+   * Draw a ring around the whole circle, in `ringColor`. What makes a row of
+   * overlapping avatars read as separate people rather than one blob.
+   */
+  ringed?: boolean;
 }
 
 export const Avatar = memo(function Avatar({
@@ -63,6 +74,8 @@ export const Avatar = memo(function Avatar({
   image,
   size = 40,
   online,
+  ringColor = theme.bg,
+  ringed,
 }: AvatarProps) {
   const box = {
     width: size,
@@ -71,7 +84,15 @@ export const Avatar = memo(function Avatar({
   };
 
   return (
-    <View>
+    <View
+      style={
+        ringed && {
+          borderRadius: radius.pill,
+          borderWidth: 2,
+          borderColor: ringColor,
+        }
+      }
+    >
       {image ? (
         <Image
           style={[box, styles.image]}
@@ -102,6 +123,7 @@ export const Avatar = memo(function Avatar({
               height: size * 0.3,
               borderRadius: radius.pill,
               backgroundColor: online ? theme.online : theme.textFaint,
+              borderColor: ringColor,
             },
           ]}
         />

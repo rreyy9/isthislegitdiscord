@@ -7,6 +7,7 @@ import { saveAttachment } from '../download';
 import { describeBytes } from '../format';
 import { radius, spacing, theme } from '../theme';
 import type { Attachment } from '../types';
+import { Icon } from './Icon';
 import { useImageViewer } from './ImageViewer';
 
 /**
@@ -194,7 +195,7 @@ function AttachmentVideo({ file }: { file: Attachment }) {
       accessibilityRole="button"
       accessibilityLabel={`Play ${file.fileName}`}
     >
-      <Text style={styles.videoGlyph}>▶</Text>
+      <Icon name="play" size={26} color={theme.text} />
       <View style={styles.videoMeta}>
         <Text style={styles.fileName} numberOfLines={1}>
           {file.fileName}
@@ -283,7 +284,11 @@ function AttachmentFile({ file }: { file: Attachment }) {
 
   return (
     <View style={[styles.file, expired && styles.fileExpired]}>
-      <Text style={styles.fileIcon}>{expired ? '✕' : '▤'}</Text>
+      <Icon
+        name={expired ? 'file-remove-outline' : 'file-outline'}
+        size={22}
+        color={theme.textMuted}
+      />
       <View style={styles.fileBody}>
         <Text style={styles.fileName} numberOfLines={1}>
           {file.fileName}
@@ -354,7 +359,6 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
   },
-  videoGlyph: { color: theme.text, fontSize: 20 },
   videoMeta: { flex: 1 },
   file: {
     marginTop: spacing.sm,
@@ -369,7 +373,6 @@ const styles = StyleSheet.create({
     borderColor: theme.border,
   },
   fileExpired: { opacity: 0.6 },
-  fileIcon: { color: theme.textMuted, fontSize: 18 },
   fileBody: { flex: 1 },
   fileName: { color: theme.text, fontSize: 13, fontWeight: '600' },
   fileMeta: { color: theme.textFaint, fontSize: 11, marginTop: 1 },
