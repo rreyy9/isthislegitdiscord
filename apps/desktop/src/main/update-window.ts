@@ -26,8 +26,10 @@ const HTML = `
 <meta charset="utf-8">
 <style>
   :root {
-    --bg: #14161a; --panel: #1c1f26; --line: #2b2f38;
-    --text: #e6e8ec; --dim: #99a0ad; --accent: #5b8def;
+    /* Catppuccin Mocha, fixed: this window runs between the old app closing
+       and the new one starting, so there is no theme setting to read. */
+    --bg: #1e1e2e; --panel: #181825; --line: #313244;
+    --text: #cdd6f4; --dim: #a6adc8; --accent: #cba6f7;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -99,7 +101,7 @@ export async function openUpdateWindow(version: string | null): Promise<void> {
     alwaysOnTop: true,
     skipTaskbar: false,
     title: 'Updating isthislegit',
-    backgroundColor: '#14161a',
+    backgroundColor: '#1e1e2e',
     show: false,
     webPreferences: { sandbox: true },
   });

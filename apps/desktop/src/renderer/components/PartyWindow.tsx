@@ -11,6 +11,7 @@ import {
 } from '../youtube-player';
 import type { WatchPartyStateDto, WatchPartyVideoDto } from '../watch-party-types';
 import { Avatar } from './Avatar';
+import { nameColorVar } from '../theme';
 import { bridge } from '../bridge';
 
 /**
@@ -629,7 +630,9 @@ function PartyRail({
         )}
         {party.chat.map((line) => (
           <div key={line.id} className="pw-line">
-            <span className="pw-who">{nameOf(line.userId)}</span>
+            <span className="pw-who" style={nameColorVar(nameOf(line.userId))}>
+              {nameOf(line.userId)}
+            </span>
             <span className="pw-said">{line.content}</span>
           </div>
         ))}

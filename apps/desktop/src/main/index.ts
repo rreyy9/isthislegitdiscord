@@ -537,7 +537,7 @@ function createWindow() {
     ...restoreBounds(saved),
     minWidth: MIN_WIDTH,
     minHeight: MIN_HEIGHT,
-    backgroundColor: '#14161a',
+    backgroundColor: '#1e1e2e',
     title: 'isthislegit',
     icon: appIcon(),
     webPreferences: {
@@ -691,7 +691,7 @@ function createPartyWindow() {
     ...restoreBounds(saved, { width: PARTY_MIN_WIDTH, height: PARTY_MIN_HEIGHT }),
     minWidth: PARTY_MIN_WIDTH,
     minHeight: PARTY_MIN_HEIGHT,
-    backgroundColor: '#14161a',
+    backgroundColor: '#1e1e2e',
     title: 'Watch party',
     icon: appIcon(),
     // Not a child of the main window and not always-on-top: it is a window

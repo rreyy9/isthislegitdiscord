@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { MemberDto, MessageDto } from '../api';
 import { MessageContent } from './MessageContent';
 import { Avatar } from './Avatar';
+import { nameColorVar } from '../theme';
 import { MemberCard } from './MemberCard';
 import { lastSeenLabel, muteLabel, stamp } from './chat-format';
 
@@ -106,7 +107,10 @@ export function SearchPanel({
             />
             <div className="pin-body">
               <div className="msg-head">
-                <span className="msg-author">
+                <span
+                  className="msg-author"
+                  style={nameColorVar(m.author.displayName || m.author.username)}
+                >
                   {m.author.displayName || m.author.username}
                 </span>
                 <span className="search-where">
@@ -203,7 +207,10 @@ export function PinsPanel({
             />
             <div className="pin-body">
               <div className="msg-head">
-                <span className="msg-author">
+                <span
+                  className="msg-author"
+                  style={nameColorVar(m.author.displayName || m.author.username)}
+                >
                   {m.author.displayName || m.author.username}
                 </span>
                 <span className="msg-time">{stamp(m.createdAt)}</span>

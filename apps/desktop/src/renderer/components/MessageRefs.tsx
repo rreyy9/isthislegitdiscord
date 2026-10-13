@@ -1,5 +1,6 @@
 import type { MessageDto, MessageRefDto } from '../api';
 import { Avatar } from './Avatar';
+import { nameColorVar } from '../theme';
 import { MessageContent } from './MessageContent';
 import { quoteLine, stamp } from './chat-format';
 import { toPlain } from '../mention-utils';
@@ -200,7 +201,7 @@ export function ForwardCard({
         <Avatar name={who} image={refMsg.author.image} />
         <div className="fwd-text">
           <div className="msg-head">
-            <span className="msg-author">{who}</span>
+            <span className="msg-author" style={nameColorVar(who)}>{who}</span>
             <span className="msg-time">{stamp(refMsg.createdAt)}</span>
           </div>
           <MessageContent

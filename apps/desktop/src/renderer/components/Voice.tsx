@@ -18,6 +18,7 @@ import { bridge } from '../bridge';
 import { channelIcon } from './chat-format';
 import { PhoneAppSettings } from './PhoneApp';
 import { ProfileSettings } from './ProfileSettings';
+import { AppearanceSettings } from './AppearanceSettings';
 import {
   listAudioDevices,
   noteScreenPickerCancelled,
@@ -559,6 +560,7 @@ function KeybindSettings({
 
 type Section =
   | 'profile'
+  | 'appearance'
   | 'devices'
   | 'input'
   | 'keybinds'
@@ -577,6 +579,11 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
     id: 'profile',
     label: 'Profile',
     blurb: 'The name and the picture everyone else sees beside your messages.',
+  },
+  {
+    id: 'appearance',
+    label: 'Appearance',
+    blurb: 'How the app looks on this computer. Your friends never see your theme.',
   },
   {
     id: 'devices',
@@ -696,6 +703,8 @@ export function SettingsModal({
             {section === 'profile' && (
               <ProfileSettings me={me} onSaved={onProfileSaved} />
             )}
+
+            {section === 'appearance' && <AppearanceSettings />}
 
             {section === 'phone' && <PhoneAppSettings />}
 

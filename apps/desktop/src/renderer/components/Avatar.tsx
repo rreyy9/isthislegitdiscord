@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { avatarUrl } from '../api';
+import { nameColorVar } from '../theme';
 
 /**
  * The picture beside a name.
@@ -59,9 +60,12 @@ export function Avatar({
     };
   }, [image]);
 
-  const style = size
-    ? { width: size, height: size, fontSize: Math.round(size * 0.4) }
-    : undefined;
+  // The colour is keyed on the name, so the same person is the same colour in
+  // every list, on every machine, and matches their name in the chat.
+  const style = {
+    ...nameColorVar(name),
+    ...(size ? { width: size, height: size, fontSize: Math.round(size * 0.4) } : {}),
+  };
 
   return (
     <div className={('avatar ' + className).trim()} style={style}>

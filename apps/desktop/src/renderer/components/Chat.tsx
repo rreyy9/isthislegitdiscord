@@ -59,6 +59,7 @@ import {
   VoicePanel,
 } from './Voice';
 import { Avatar } from './Avatar';
+import { nameColorVar } from '../theme';
 import {
   StartPartyModal,
   WatchPartyPanel,
@@ -3129,7 +3130,12 @@ export function Chat({
                         )}
                         {!grouped && (
                           <div className="msg-head">
-                            <span className="msg-author">{m.author.displayName || m.author.username}</span>
+                            <span
+                              className="msg-author"
+                              style={nameColorVar(m.author.displayName || m.author.username)}
+                            >
+                              {m.author.displayName || m.author.username}
+                            </span>
                             <span className="msg-time">{timeOf(m.createdAt)}</span>
                           </div>
                         )}
