@@ -252,11 +252,19 @@ export function themeVars(prefs: ThemePrefs, dark = systemDark()): Record<string
 export function applyTheme(prefs: ThemePrefs): void {
   const root = document.documentElement;
   const dark = systemDark();
-  for (const [k, v] of Object.entries(themeVars(prefs, dark))) root.style.setProperty(k, v);
+  const vars = themeVars(prefs, dark);
+  for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
   const id = resolveFlavour(prefs.flavour, dark);
   root.dataset.flavour = id;
   root.style.colorScheme = FLAVOURS[id].dark ? 'dark' : 'light';
   root.classList.toggle('name-colors', prefs.nameColors);
+  // The caption buttons are drawn by Windows, not by this stylesheet, so they
+  // are told separately: the bar's own colour behind them, and the dim text
+  // colour for the glyphs, as the rest of the bar's quiet controls use.
+  void window.desktop?.setTitleBarColors?.({
+    color: vars['--crust'],
+    symbolColor: vars['--dim'],
+  });
 }
 
 const listeners = new Set<(p: ThemePrefs) => void>();

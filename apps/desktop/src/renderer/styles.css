@@ -98,6 +98,98 @@ button { font-family: inherit; cursor: pointer; }
   gap: 8px; padding: 8px; background: var(--crust);
 }
 .col { height: 100%; overflow: hidden; display: flex; flex-direction: column; border-radius: 14px; }
+
+/* ----------------------------------------------------------- title bar */
+/*
+ * Where the system title bar was, on Windows: the same crust the panels float
+ * on, so the bar reads as the top margin of the window rather than a strip
+ * bolted onto it. Windows draws the caption buttons over its right-hand end;
+ * env(titlebar-area-*) says how much of it is ours, with three standard-width
+ * buttons as the fallback. The height must match TITLE_BAR_HEIGHT in
+ * main/index.ts.
+ *
+ * The whole bar drags the window, and double-clicking it maximises -- both
+ * free from the OS. Anything clickable in it has to opt back out with
+ * no-drag, or the click is taken as the start of a drag and never arrives.
+ *
+ * Above every overlay: the caption buttons Windows draws are above them all
+ * regardless, so a lightbox or modal that covered the rest of the bar would
+ * leave the buttons floating on it -- and the window undraggable while it
+ * was up.
+ */
+.window { height: 100%; display: flex; flex-direction: column; }
+.window-body { flex: 1; min-height: 0; }
+.window-body .app { padding-top: 0; }
+.titlebar {
+  height: 40px; flex: none; display: flex; align-items: center;
+  position: relative; z-index: 80; background: var(--crust);
+  padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 140px)));
+  -webkit-app-region: drag; app-region: drag;
+}
+/* As wide as the sidebar plus its gutter, so the name sits over the sidebar
+   and the search box starts where the chat does. */
+.tb-brand {
+  width: 228px; flex: none; padding-left: 16px;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 800; color: var(--dim);
+}
+.tb-logo { width: 18px; height: 18px; border-radius: 5px; }
+.tb-slot { flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 12px; }
+.tb-center { flex: 1; min-width: 0; display: flex; justify-content: center; }
+.tb-right { flex: none; display: flex; align-items: center; padding-right: 10px; }
+.tb-right:empty { display: none; }
+
+.tb-search {
+  position: relative; width: min(100%, 520px);
+  -webkit-app-region: no-drag; app-region: no-drag;
+}
+.tb-field {
+  height: 28px; display: flex; align-items: center; gap: 6px;
+  padding: 0 4px 0 10px; border-radius: 8px;
+  background: var(--bg2); border: 1px solid var(--line);
+}
+.tb-search.open .tb-field, .tb-field:focus-within { border-color: var(--accent); background: var(--bg); }
+.tb-search-icon { color: var(--faint); font-size: 15px; line-height: 1; }
+.tb-input {
+  flex: 1; min-width: 0; height: 100%; background: none; border: 0; outline: none;
+  color: var(--text); font-size: 13px; font-weight: 500;
+}
+.tb-input::placeholder { color: var(--faint); }
+/* The scope switch: the current answer, clicked for the other one. */
+.tb-scope {
+  flex: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--panel2); color: var(--dim); border: 0; border-radius: 5px;
+  padding: 2px 8px; font-size: 11.5px; font-weight: 700;
+}
+.tb-scope:hover { color: var(--text); }
+.tb-scope.on { background: var(--accent-dim); color: var(--accent); }
+.tb-kbd {
+  flex: none; color: var(--faint); font: 600 10.5px/1 var(--font);
+  border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; margin-right: 2px;
+}
+/* The results hang from the box, as wide as it, and never narrower than a
+   message needs to be readable. */
+.pins-panel.search-panel.tb-results {
+  left: 0; width: 100%; min-width: 420px; max-height: 70vh;
+  -webkit-app-region: no-drag; app-region: no-drag;
+}
+/* Where there is no title bar the box sits in the channel header, between the
+   pin board and the connection dot. */
+.chat-head .tb-search { width: 260px; font-weight: 400; }
+
+/* No-drag only so the tooltip naming who is in there can show. */
+.tb-voice {
+  display: flex; align-items: center; gap: 7px; height: 26px; padding: 0 5px 0 10px;
+  border-radius: 999px; font-size: 12px; font-weight: 700; color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  -webkit-app-region: no-drag; app-region: no-drag;
+}
+.tb-voice-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.tb-voice-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tb-voice-count {
+  min-width: 18px; padding: 1px 6px; border-radius: 999px; text-align: center; font-size: 11px;
+  background: color-mix(in srgb, var(--ok) 22%, transparent);
+}
 .sidebar { background: var(--bg2); }
 .members { background: var(--bg2); }
 
@@ -1301,18 +1393,12 @@ button { font-family: inherit; cursor: pointer; }
 
 /* ------------------------------------------------------------- search */
 /*
- * The search popover is the pin board with a text field in its header: same
- * anchoring, same rows, same click-away. Two panels that both mean "a list of
- * messages elsewhere, click one to go there" should not look like two
- * different ideas, so this only overrides what genuinely differs.
+ * The search results are the pin board without its header: same rows, same
+ * click-away. Two panels that both mean "a list of messages elsewhere, click
+ * one to go there" should not look like two different ideas. The box they
+ * hang from is in the title bar section above.
  */
 .search-panel { width: 480px; }
-.search-input {
-  flex: 1; min-width: 0; background: var(--bg); color: var(--text);
-  border: 1px solid var(--line); border-radius: 6px;
-  padding: 6px 10px; font-size: 13px; font-family: inherit; font-weight: 400;
-}
-.search-input:focus { outline: none; border-color: var(--accent); }
 /* Which channel a result is in. Between the name and the time, because that
    is the order the question is asked in: who, where, when. */
 .search-where {

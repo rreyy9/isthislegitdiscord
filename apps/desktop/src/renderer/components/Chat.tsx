@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   api,
   setToken,
@@ -87,8 +88,9 @@ import {
   useDismissOnOutsideClick,
   useMessageSearch,
   useMinuteClock,
+  type SearchScope,
 } from './chat-hooks';
-import { MembersPanel, PinsPanel, SearchPanel, type MemberMenu } from './ChatPanels';
+import { MembersPanel, PinsPanel, SearchBox, type MemberMenu } from './ChatPanels';
 import { EmojiPicker, MentionPicker } from './ComposerPickers';
 import { PreviewImage, UploadRing } from './UploadPreview';
 import {
@@ -114,6 +116,7 @@ export function Chat({
   onMeChanged,
   onSignOut,
   updates,
+  titleSlot,
 }: {
   me: Me;
   /** Your own profile changed — here, or on another machine you are signed in on. */
@@ -121,6 +124,13 @@ export function Chat({
   onSignOut: () => void;
   /** What this build is and whether the server has a newer one. See updates.ts. */
   updates: Updates;
+  /**
+   * The middle of the window's title bar, for the search box and the voice
+   * pill. Null where the system frame is kept -- then the search box sits in
+   * the channel header instead, and the pill is left out, the sidebar already
+   * saying the same thing.
+   */
+  titleSlot: HTMLElement | null;
 }) {
   const [guilds, setGuilds] = useState<GuildDto[]>([]);
   const [members, setMembers] = useState<MemberDto[]>([]);
@@ -196,8 +206,16 @@ export function Chat({
    * lifted by `jumpToLatest`, which is what returns to the live end.
    */
   const [inHistory, setInHistory] = useState(false);
-  /** The search panel under the header, and what is in it. */
+  /** Whether the search box's results are showing. */
   const [searchOpen, setSearchOpen] = useState(false);
+  /**
+   * The open channel, or the whole server. Kept across channel switches and
+   * closes: it is a preference about how somebody searches, not part of one
+   * search.
+   */
+  const [searchScope, setSearchScope] = useState<SearchScope>('channel');
+  /** For Ctrl+K, which puts the caret in the box from anywhere. */
+  const searchInput = useRef<HTMLInputElement>(null);
   /**
    * Bumped to make the channel-load effect re-run for a jump within the
    * channel that is already open, where `activeChannel` does not change and
@@ -1232,7 +1250,30 @@ export function Chat({
 
   // Four pieces of state, a debounce and a sequence number, none of which
   // anything outside the box and its panel reads. See chat-hooks.ts.
-  const search = useMessageSearch({ open: searchOpen, activeChannel, guilds });
+  const search = useMessageSearch({
+    open: searchOpen,
+    scope: searchScope,
+    activeChannel,
+    guilds,
+  });
+
+  /**
+   * Ctrl+K, and Ctrl+F for the people who reach for that, into the search
+   * box from anywhere -- including the composer, where both would otherwise
+   * do nothing at all. Focusing the box is what opens it.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      const key = e.key.toLowerCase();
+      if (key !== 'k' && key !== 'f') return;
+      e.preventDefault();
+      searchInput.current?.focus();
+      searchInput.current?.select();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   /**
    * Fetch the board while it is open — on opening it, on switching channel
@@ -2688,8 +2729,63 @@ export function Chat({
     .filter(Boolean)
     .map((u) => u!.displayName || u!.username);
 
+  const searchBox = (
+    <SearchBox
+      inputRef={searchInput}
+      open={searchOpen}
+      text={search.text}
+      onText={search.setText}
+      onOpen={() => {
+        setPinsOpen(false);
+        setSearchOpen(true);
+      }}
+      onClose={() => setSearchOpen(false)}
+      scope={searchScope}
+      onScope={setSearchScope}
+      channelLabel={activeChannelObj?.kind === 'TEXT' ? activeChannelObj.name : null}
+      results={search.results}
+      busy={search.busy}
+      error={search.error}
+      channelName={(id) => channelNameOf(id) ?? 'unknown'}
+      onJump={jumpTo}
+      lookupMention={lookupMention}
+    />
+  );
+
+  /**
+   * The call you are in, from wherever you are looking. Up in the bar because
+   * the sidebar's own "Voice connected" box scrolls with nothing but is easy
+   * to stop seeing, and "am I still in the call" is a question people ask with
+   * a glance. Not a button: the controls for the call are in the sidebar, and
+   * a pill that left the call on a stray click would be worse than none.
+   */
+  const voiceOccupants = voice.channelId ? (voiceByChannel[voice.channelId] ?? []) : [];
+  const voiceOthers = voiceOccupants.filter((id) => id !== me.id).map(nameOfUser);
+  const voicePill = voiceChannelObj && (
+    <div
+      className="tb-voice"
+      title={
+        voiceOthers.length
+          ? `In ${voiceChannelObj.name} with ${voiceOthers.join(', ')}`
+          : `In ${voiceChannelObj.name} on your own`
+      }
+    >
+      <span className="tb-voice-dot" aria-hidden="true" />
+      <span className="tb-voice-name">{voiceChannelObj.name}</span>
+      <span className="tb-voice-count">{Math.max(voiceOccupants.length, 1)}</span>
+    </div>
+  );
+
   return (
     <div className="app">
+      {titleSlot &&
+        createPortal(
+          <>
+            <div className="tb-center">{searchBox}</div>
+            <div className="tb-right">{voicePill}</div>
+          </>,
+          titleSlot,
+        )}
       {/* -------- sidebar -------- */}
       <div className="col sidebar">
         <div className="sb-head">{guilds[0]?.name ?? 'isthislegit'}</div>
@@ -2978,19 +3074,8 @@ export function Chat({
               📌
             </button>
           )}
-          {activeChannelObj?.kind === 'TEXT' && (
-            <button
-              className={'pin-btn' + (searchOpen ? ' on' : '')}
-              title="Search messages"
-              onClick={(e) => {
-                e.stopPropagation();
-                setPinsOpen(false);
-                setSearchOpen((open) => !open);
-              }}
-            >
-              🔍
-            </button>
-          )}
+          {/* Only where there is no title bar to put it in. */}
+          {!titleSlot && activeChannelObj?.kind === 'TEXT' && searchBox}
           <div className={'status-dot ' + status} title={status} />
           <span className="status-label">
             {status === 'connected'
@@ -3001,20 +3086,6 @@ export function Chat({
                   ? 'reconnecting…'
                   : 'offline'}
           </span>
-
-          {searchOpen && (
-            <SearchPanel
-              text={search.text}
-              onText={search.setText}
-              results={search.results}
-              busy={search.busy}
-              error={search.error}
-              channelName={(id) => channelNameOf(id) ?? 'unknown'}
-              onJump={jumpTo}
-              onClose={() => setSearchOpen(false)}
-              lookupMention={lookupMention}
-            />
-          )}
 
           {pinsOpen && activeChannelObj && (
             <PinsPanel

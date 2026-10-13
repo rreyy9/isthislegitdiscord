@@ -151,6 +151,19 @@ const bridge = {
   setToken: (token: string): Promise<boolean> =>
     ipcRenderer.invoke('token:set', token),
 
+  /* ---------------------------------------------------------- title bar */
+
+  /**
+   * True where the main window has no system title bar and the renderer draws
+   * its own (Windows). Must agree with CUSTOM_TITLE_BAR in main/index.ts.
+   */
+  customTitleBar: process.platform === 'win32',
+  /** Recolour the caption buttons. A no-op for any window but the main one. */
+  setTitleBarColors: (colors: {
+    color: string;
+    symbolColor: string;
+  }): Promise<boolean> => ipcRenderer.invoke('window:title-bar', colors),
+
   /* ------------------------------------------------------------ updates */
 
   /** The running build, from app.getVersion(). */

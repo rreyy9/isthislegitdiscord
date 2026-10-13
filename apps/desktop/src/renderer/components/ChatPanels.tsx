@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import type { MemberDto, MessageDto } from '../api';
 import { MessageContent } from './MessageContent';
 import { Avatar } from './Avatar';
 import { nameColorVar } from '../theme';
 import { MemberCard } from './MemberCard';
 import { lastSeenLabel, muteLabel, stamp } from './chat-format';
+import type { SearchScope } from './chat-hooks';
 
 /**
  * The two popovers that list messages from somewhere else: search results and
@@ -21,113 +22,162 @@ import { lastSeenLabel, muteLabel, stamp } from './chat-format';
  */
 
 /**
- * Search, as a popover under the header.
+ * Search, as a box in the title bar with its results hanging underneath.
  *
- * Deliberately the same shape as the pin board: both are "a list of messages
- * somewhere else in this guild, click one to go there", and giving them two
- * different presentations would be inventing a distinction that is not there.
+ * Always on screen rather than behind a button: finding something is a thing
+ * people do mid-conversation, and an icon to click before there is anywhere
+ * to type was one step more than the job needed. Ctrl+K gets there from the
+ * keyboard -- see Chat.tsx.
+ *
+ * The results are deliberately the same shape as the pin board: both are "a
+ * list of messages somewhere else in this guild, click one to go there", and
+ * giving them two different presentations would be inventing a distinction
+ * that is not there.
  *
  * Results say which channel and when, because that is what the reader is
  * matching against — a search result stripped of its context is a sentence
  * with no way to judge whether it is the one being looked for.
  */
-export function SearchPanel({
+export function SearchBox({
+  inputRef,
+  open,
   text,
   onText,
+  onOpen,
+  onClose,
+  scope,
+  onScope,
+  channelLabel,
   results,
   busy,
   error,
   channelName,
   onJump,
-  onClose,
   lookupMention,
 }: {
+  inputRef: RefObject<HTMLInputElement | null>;
+  open: boolean;
   text: string;
   onText: (value: string) => void;
+  onOpen: () => void;
+  onClose: () => void;
+  scope: SearchScope;
+  onScope: (scope: SearchScope) => void;
+  /** The open channel's name, or null when there is none to narrow to. */
+  channelLabel: string | null;
   /** Null before anything has been searched for; empty for no matches. */
   results: MessageDto[] | null;
   busy: boolean;
   error: string | null;
   channelName: (channelId: string) => string;
   onJump: (channelId: string, messageId: string) => void;
-  onClose: () => void;
   lookupMention: (id: string) => { name: string; self: boolean } | null;
 }) {
-  const input = useRef<HTMLInputElement>(null);
-  // Opened to be typed in. Anything else means a click to open and a click to
-  // focus, for a box that has exactly one use.
-  useEffect(() => input.current?.focus(), []);
+  const inChannel = scope === 'channel' && channelLabel !== null;
+  const where = inChannel ? `#${channelLabel}` : 'this server';
 
   return (
-    <div className="pins-panel search-panel" onClick={(e) => e.stopPropagation()}>
-      <div className="pins-head">
+    // Stops the click, so the window-wide listener that closes popovers does
+    // not see a click in the box as a click away from it.
+    <div className={'tb-search' + (open ? ' open' : '')} onClick={(e) => e.stopPropagation()}>
+      <div className="tb-field">
+        <span className="tb-search-icon" aria-hidden="true">⌕</span>
         <input
-          ref={input}
-          className="search-input"
+          ref={inputRef}
+          className="tb-input"
           value={text}
-          placeholder="Search this server"
-          onChange={(e) => onText(e.target.value)}
+          placeholder={`Search ${where}`}
+          spellCheck={false}
+          onFocus={onOpen}
+          // Still focused after a result was picked or the panel was clicked
+          // away from, so focus alone would not bring it back.
+          onClick={onOpen}
+          onChange={(e) => {
+            if (!open) onOpen();
+            onText(e.target.value);
+          }}
           onKeyDown={(e) => {
-            if (e.key === 'Escape') onClose();
+            if (e.key !== 'Escape') return;
+            onClose();
+            e.currentTarget.blur();
           }}
         />
-        <button className="pins-x" title="Close" onClick={onClose}>
-          ×
-        </button>
-      </div>
-      <div className="pins-body">
-        {error && <div className="banner">{error}</div>}
-        {busy && !results && <div className="hint">Searching…</div>}
-        {!error && !busy && text.trim().length < 2 && (
-          <div className="pins-empty">
-            <div className="pins-empty-mark">🔍</div>
-            <div>Type at least two characters.</div>
-            <div className="hint">
-              Whole words. Quote a phrase to keep it together, and put a minus
-              in front of a word to leave it out.
-            </div>
-          </div>
-        )}
-        {results?.length === 0 && !busy && (
-          <div className="pins-empty">
-            <div className="pins-empty-mark">🔍</div>
-            <div>Nothing matched “{text.trim()}”.</div>
-          </div>
-        )}
-        {results?.map((m) => (
+        {/* Which of the two the box is searching, and the switch between
+            them, in one control: the label is the current answer, a click
+            is the other one. */}
+        {channelLabel !== null && (
           <button
-            className="pin-row"
-            key={m.id}
-            title="Go to this message"
-            onClick={() => onJump(m.channelId, m.id)}
+            className={'tb-scope' + (inChannel ? ' on' : '')}
+            title={inChannel ? 'Search the whole server instead' : `Search only #${channelLabel}`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              onScope(inChannel ? 'server' : 'channel');
+              inputRef.current?.focus();
+            }}
           >
-            <Avatar
-              name={m.author.displayName || m.author.username}
-              image={m.author.image}
-            />
-            <div className="pin-body">
-              <div className="msg-head">
-                <span
-                  className="msg-author"
-                  style={nameColorVar(m.author.displayName || m.author.username)}
-                >
-                  {m.author.displayName || m.author.username}
-                </span>
-                <span className="search-where">
-                  #{channelName(m.channelId)}
-                </span>
-                <span className="msg-time">{stamp(m.createdAt)}</span>
-              </div>
-              <MessageContent
-                content={m.content}
-                attachments={m.attachments}
-                edited={Boolean(m.editedAt)}
-                lookupMention={lookupMention}
-              />
-            </div>
+            {inChannel ? `#${channelLabel}` : 'Server'}
           </button>
-        ))}
+        )}
+        {!open && <kbd className="tb-kbd">Ctrl K</kbd>}
       </div>
+
+      {open && (
+        <div className="pins-panel search-panel tb-results">
+          <div className="pins-body">
+            {error && <div className="banner">{error}</div>}
+            {busy && !results && <div className="hint">Searching…</div>}
+            {!error && !busy && text.trim().length < 2 && (
+              <div className="pins-empty">
+                <div className="pins-empty-mark">🔍</div>
+                <div>Searching {where}.</div>
+                <div className="hint">
+                  Whole words. Quote a phrase to keep it together, and put a
+                  minus in front of a word to leave it out.
+                </div>
+              </div>
+            )}
+            {results?.length === 0 && !busy && (
+              <div className="pins-empty">
+                <div className="pins-empty-mark">🔍</div>
+                <div>Nothing in {where} matched “{text.trim()}”.</div>
+              </div>
+            )}
+            {results?.map((m) => (
+              <button
+                className="pin-row"
+                key={m.id}
+                title="Go to this message"
+                onClick={() => onJump(m.channelId, m.id)}
+              >
+                <Avatar
+                  name={m.author.displayName || m.author.username}
+                  image={m.author.image}
+                />
+                <div className="pin-body">
+                  <div className="msg-head">
+                    <span
+                      className="msg-author"
+                      style={nameColorVar(m.author.displayName || m.author.username)}
+                    >
+                      {m.author.displayName || m.author.username}
+                    </span>
+                    <span className="search-where">
+                      #{channelName(m.channelId)}
+                    </span>
+                    <span className="msg-time">{stamp(m.createdAt)}</span>
+                  </div>
+                  <MessageContent
+                    content={m.content}
+                    attachments={m.attachments}
+                    edited={Boolean(m.editedAt)}
+                    lookupMention={lookupMention}
+                  />
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

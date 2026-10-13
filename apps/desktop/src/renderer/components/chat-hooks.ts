@@ -85,6 +85,8 @@ export function useAutoDismiss(
   }, [value, ms]);
 }
 
+export type SearchScope = 'channel' | 'server';
+
 export interface MessageSearch {
   text: string;
   setText: (text: string) => void;
@@ -107,10 +109,17 @@ export interface MessageSearch {
  */
 export function useMessageSearch({
   open,
+  scope,
   activeChannel,
   guilds,
 }: {
   open: boolean;
+  /**
+   * The channel being read, or the whole guild it is in. The channel is the
+   * default because it is what the box is next to and what somebody looking
+   * for "that link from last week" nearly always means.
+   */
+  scope: SearchScope;
   activeChannel: string | null;
   guilds: GuildDto[];
 }): MessageSearch {
@@ -147,7 +156,12 @@ export function useMessageSearch({
         const guildId = guilds.find((g) =>
           g.channels.some((c) => c.id === activeChannel),
         )?.id;
-        const page = await api.search({ q, guildId });
+        const page = await api.search({
+          q,
+          guildId,
+          channelId:
+            scope === 'channel' ? (activeChannel ?? undefined) : undefined,
+        });
         if (seq !== seqRef.current) return;
         setResults(page.results);
         setError(null);
@@ -165,7 +179,7 @@ export function useMessageSearch({
     }, 250);
 
     return () => window.clearTimeout(timer);
-  }, [open, text, activeChannel, guilds]);
+  }, [open, text, scope, activeChannel, guilds]);
 
   // Closing it clears it: reopening the box to last week's search, already
   // run, is never what somebody opening a search box wants.

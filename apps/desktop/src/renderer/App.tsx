@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { api, getToken, initApi, setToken, type Me } from './api';
+import { bridge } from './bridge';
 import { Login } from './components/Login';
 import { Chat } from './components/Chat';
 import { ImageViewerProvider } from './components/ImageViewer';
 import { UpdateBanner, UpdateRequired } from './components/UpdateBanner';
 import { PartyWindow } from './components/PartyWindow';
+import { TitleBar } from './components/TitleBar';
 import { useUpdates } from './updates';
 
 /**
@@ -18,6 +20,13 @@ import { useUpdates } from './updates';
  */
 const isPartyWindow = window.location.hash === '#party';
 
+/**
+ * Whether this window draws its own title bar. The party window keeps the
+ * system frame: it is a video somebody arranges next to a game, and nothing
+ * in it would go in a bar.
+ */
+const customTitleBar = !isPartyWindow && bridge.customTitleBar;
+
 type State =
   | { phase: 'loading' }
   | { phase: 'login' }
@@ -28,6 +37,24 @@ export function App() {
   // Only once signed in: the server address and this build's version are both
   // read by initApi(), and asking before that answers about the wrong server.
   const updates = useUpdates(state.phase === 'chat');
+  /**
+   * The middle of the title bar, once it exists, for Chat to portal its search
+   * box and voice pill into. State rather than a ref, so Chat renders again
+   * when it arrives -- the bar and Chat mount in the same commit, and on the
+   * first render there is nothing to portal into yet.
+   */
+  const [titleSlot, setTitleSlot] = useState<HTMLDivElement | null>(null);
+
+  /** Every main-window screen, under the bar when there is one. */
+  const framed = (body: ReactNode) =>
+    customTitleBar ? (
+      <div className="window">
+        <TitleBar slotRef={setTitleSlot} />
+        <div className="window-body">{body}</div>
+      </div>
+    ) : (
+      body
+    );
 
   async function resolveSession() {
     await initApi();
@@ -62,7 +89,7 @@ export function App() {
   }, []);
 
   if (state.phase === 'loading') {
-    return <div className="login-wrap"><div className="empty">Loading…</div></div>;
+    return framed(<div className="login-wrap"><div className="empty">Loading…</div></div>);
   }
   if (state.phase === 'login') {
     // The party window cannot sign anybody in: the token lives in main and is
@@ -75,7 +102,7 @@ export function App() {
         </div>
       );
     }
-    return <Login onDone={() => void resolveSession()} />;
+    return framed(<Login onDone={() => void resolveSession()} />);
   }
 
   /**
@@ -89,15 +116,16 @@ export function App() {
   if (isPartyWindow) return <PartyWindow me={state.me} />;
   // A floor the server has set, and this build is under it. Expected never to
   // happen: an out-of-date client is normally notified and left alone.
-  if (updates.blocked) return <UpdateRequired updates={updates} />;
+  if (updates.blocked) return framed(<UpdateRequired updates={updates} />);
 
   // The image viewer sits above Chat rather than inside it: the lightbox and
   // the right-click menu are app-level overlays, and every image that wants
   // them is somewhere under here.
-  return (
+  return framed(
     <ImageViewerProvider>
       <Chat
         me={state.me}
+        titleSlot={customTitleBar ? titleSlot : null}
         onMeChanged={onMeChanged}
         onSignOut={() => setState({ phase: 'login' })}
         // Handed down so the settings screen can show what this build is and
@@ -106,6 +134,6 @@ export function App() {
         updates={updates}
       />
       <UpdateBanner updates={updates} />
-    </ImageViewerProvider>
+    </ImageViewerProvider>,
   );
 }

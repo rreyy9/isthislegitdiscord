@@ -385,6 +385,23 @@ function loadToken(): string {
 let mainWindow: BrowserWindow | null = null;
 
 /**
+ * The main window draws its own title bar on Windows: the app's search and
+ * voice status live up there, and the grey system strip above three floating
+ * panels was the one part of the window that looked like somebody else's app.
+ *
+ * `titleBarOverlay` rather than `frame: false`, so minimise, maximise and close
+ * are still the real caption buttons -- snap layouts on hover, the system's
+ * own hover and press states, and resizing from the top edge all keep working.
+ * The renderer recolours them to the theme through `window:title-bar`.
+ *
+ * Windows only. Elsewhere the system frame stays, and the renderer reads
+ * `customTitleBar` from the preload to know not to draw a second bar.
+ * Must match `--titlebar-h` in styles.css.
+ */
+const TITLE_BAR_HEIGHT = 40;
+const CUSTOM_TITLE_BAR = process.platform === 'win32';
+
+/**
  * How much of the window has to be visible for a saved position to be used.
  *
  * A saved rectangle is a claim about a desktop that may no longer exist: the
@@ -540,6 +557,18 @@ function createWindow() {
     backgroundColor: '#1e1e2e',
     title: 'isthislegit',
     icon: appIcon(),
+    // The stylesheet's default crust and dim, so the buttons are right before
+    // the renderer has run and sent the chosen theme's.
+    ...(CUSTOM_TITLE_BAR
+      ? {
+          titleBarStyle: 'hidden' as const,
+          titleBarOverlay: {
+            color: '#11111b',
+            symbolColor: '#a6adc8',
+            height: TITLE_BAR_HEIGHT,
+          },
+        }
+      : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       sandbox: false,
@@ -750,6 +779,27 @@ ipcMain.handle(
   () => partyWindow !== null && !partyWindow.isDestroyed(),
 );
 
+
+/**
+ * The caption buttons in the theme's colours. Every window's renderer applies
+ * the theme and so every one asks; only the main window has the overlay, and
+ * `setTitleBarOverlay` throws on a window without one.
+ */
+ipcMain.handle(
+  'window:title-bar',
+  (e, colors: { color: string; symbolColor: string }) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!CUSTOM_TITLE_BAR || !win || win !== mainWindow) return false;
+    try {
+      win.setTitleBarOverlay({ ...colors, height: TITLE_BAR_HEIGHT });
+      return true;
+    } catch {
+      // A colour the overlay would not take: the previous one stays, which
+      // is a slightly wrong shade of button rather than a broken window.
+      return false;
+    }
+  },
+);
 
 ipcMain.handle('settings:get', () => loadSettings());
 ipcMain.handle('settings:set', (_e, patch: Partial<Settings>) => {
