@@ -360,7 +360,8 @@ export interface MemberDto {
    */
   lastSeenAt: string | null;
   /**
-   * Online but has done nothing for half an hour -- the yellow dot. The four
+   * Online but not at their computer for ten minutes, or it is locked -- the
+   * yellow dot. See `AWAY_AFTER_MS` in shared. The four
    * fields from here down are absent from a server older than them; read them
    * with `?? false` / `?? null`.
    */

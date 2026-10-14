@@ -755,7 +755,10 @@ export const GuildMemberDto = z.object({
   lastSeenAt: z.string().nullable(),
   /**
    * Online but has not done anything for `AWAY_AFTER_MS`: no message, no
-   * reaction, no typing, nothing said in voice. Always false while offline.
+   * reaction, no typing, nothing said in voice, and -- from a desktop client
+   * that reports it -- no keyboard or mouse anywhere on their computer. Also
+   * true straight away once that computer locks or sleeps. Always false
+   * while offline.
    */
   away: z.boolean(),
   /**
@@ -778,10 +781,13 @@ export type GuildMemberDto = z.infer<typeof GuildMemberDto>;
 /**
  * How long somebody can go without doing anything before they show as away.
  *
- * Fixed rather than a setting: half an hour with no message, no reaction and
- * nothing said in voice is away, whatever else they have open.
+ * Fixed rather than a setting. Ten minutes, the same order as Discord and
+ * Teams, because the desktop client counts any keyboard or mouse input on the
+ * machine (`activity:input`): somebody still at their computer never gets
+ * near it. Phone-only users have no such signal, so for them it is ten
+ * minutes without a message, a reaction or anything said in voice.
  */
-export const AWAY_AFTER_MS = 30 * 60 * 1000;
+export const AWAY_AFTER_MS = 10 * 60 * 1000;
 
 /**
  * One person's presence as of right now, for the profile card.
@@ -1364,6 +1370,22 @@ export interface ClientToServerEvents {
    * allowed to speak in. No payload, and no ack.
    */
   'activity:voice': () => void;
+  /**
+   * I am at my computer: there was keyboard or mouse input somewhere on it --
+   * not necessarily in this app -- in the last few seconds. Sent by the desktop
+   * client at most about once a minute, and straight away after `activity:away`
+   * so coming back is not held up by the throttle.
+   *
+   * Keeps the dot green but does not move `lastActiveAt`: "last active" stays
+   * a record of messages and voice, not of somebody wiggling a mouse.
+   */
+  'activity:input': () => void;
+  /**
+   * My computer has just locked or gone to sleep. Marks the sender away at
+   * once rather than after `AWAY_AFTER_MS`; the next `activity:input` from any
+   * of their machines brings them back.
+   */
+  'activity:away': () => void;
   /* ----------------------------------------------------------- party */
   'party:start': (payload: { guildId: string; title: string }) => void;
   /**

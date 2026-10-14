@@ -116,6 +116,55 @@ describe('away', () => {
   });
 });
 
+describe('input activity', () => {
+  it('keeps somebody present without moving last active', () => {
+    const { gateway, socket } = harness();
+    const s = socket('ana');
+    gateway.handleConnection(s);
+    const connectedAt = gateway.presenceOf('ana')!.lastActiveAt;
+
+    vi.advanceTimersByTime(AWAY_AFTER_MS - 1000);
+    gateway.inputActivity(s);
+    vi.advanceTimersByTime(AWAY_AFTER_MS - 1000);
+    expect(gateway.presenceOf('ana')?.away).toBe(false);
+    expect(gateway.presenceOf('ana')?.lastActiveAt).toBe(connectedAt);
+  });
+
+  it('drops reports inside half a minute, but never the one that brings them back', () => {
+    const { gateway, socket, presence } = harness();
+    const s = socket('ana');
+    gateway.handleConnection(s);
+
+    vi.advanceTimersByTime(AWAY_AFTER_MS - 10_000);
+    gateway.inputActivity(s);
+    vi.advanceTimersByTime(5_000);
+    // Inside the throttle: ignored, so the timer still runs from the first.
+    gateway.inputActivity(s);
+    vi.advanceTimersByTime(AWAY_AFTER_MS - 5_000);
+    expect(gateway.presenceOf('ana')?.away).toBe(true);
+
+    gateway.inputActivity(s);
+    expect(gateway.presenceOf('ana')?.away).toBe(false);
+    expect(presence().at(-1)).toMatchObject({ online: true, away: false });
+  });
+
+  it('goes away at once when the computer locks, and back on the next input', () => {
+    const { gateway, socket, presence } = harness();
+    const s = socket('ana');
+    gateway.handleConnection(s);
+    gateway.inputActivity(s);
+
+    gateway.stepAway(s);
+    expect(gateway.presenceOf('ana')?.away).toBe(true);
+    expect(presence().at(-1)).toMatchObject({ online: true, away: true });
+
+    // Seconds later, well inside the throttle.
+    vi.advanceTimersByTime(2_000);
+    gateway.inputActivity(s);
+    expect(gateway.presenceOf('ana')?.away).toBe(false);
+  });
+});
+
 describe('voice activity', () => {
   it('counts joining a call, but not a call found already going on restart', () => {
     const { gateway, socket } = harness();

@@ -91,7 +91,8 @@ export class ChatGateway
    * `onlineSince` is the start of the current session. `lastActiveAt` moves
    * with every message, reaction, keystroke and sentence said in voice -- far
    * too often to write. `awayTimer` fires `AWAY_AFTER_MS` after the last of
-   * those and is replaced by each new one.
+   * those, or of the desktop client's input reports, and is replaced by each
+   * new one.
    */
   private readonly sessions = new Map<
     string,
@@ -102,6 +103,8 @@ export class ChatGateway
       awayTimer: NodeJS.Timeout;
       /** When a voice report was last accepted; see `voiceActivity`. */
       lastVoiceReport: number;
+      /** When an input report was last accepted; see `inputActivity`. */
+      lastInputReport: number;
     }
   >();
 
@@ -216,6 +219,7 @@ export class ChatGateway
         away: false,
         awayTimer: this.awayTimer(data.userId),
         lastVoiceReport: 0,
+        lastInputReport: 0,
       });
       this.server.emit('presence:changed', {
         userId: data.userId,
@@ -348,6 +352,18 @@ export class ChatGateway
     }
 
     session.lastActiveAt = now;
+    this.markPresent(userId);
+  }
+
+  /**
+   * They are at their computer, whether or not they have said anything. The
+   * part of `markActive` that is about the dot -- restart the away timer, and
+   * bring them back if they were away -- without touching `lastActiveAt`.
+   */
+  private markPresent(userId: string) {
+    const session = this.sessions.get(userId);
+    if (!session) return;
+
     clearTimeout(session.awayTimer);
     session.awayTimer = this.awayTimer(userId);
 
@@ -359,7 +375,7 @@ export class ChatGateway
         lastSeenAt: session.onlineSince.toISOString(),
         away: false,
         onlineSince: session.onlineSince.toISOString(),
-        lastActiveAt: now.toISOString(),
+        lastActiveAt: session.lastActiveAt.toISOString(),
       });
     }
   }
@@ -567,6 +583,37 @@ export class ChatGateway
     if (!member || (member.mutedUntil && member.mutedUntil > new Date())) return;
 
     this.markActive(userId);
+  }
+
+  /**
+   * The desktop client saying there was keyboard or mouse input on the
+   * machine. See `activity:input` in shared.
+   *
+   * Taken on trust, like a voice report -- the worst a forged one does is keep
+   * a dot green -- and dropped inside the same half-minute so a chatty client
+   * costs nothing. Except while away: that report is the one that brings them
+   * back, and must never be the one thrown away.
+   */
+  @SubscribeMessage('activity:input')
+  inputActivity(@ConnectedSocket() socket: Socket) {
+    const { userId } = socket.data as SocketData;
+    const session = this.sessions.get(userId);
+    if (!session) return;
+    const now = Date.now();
+    if (!session.away && now - session.lastInputReport < 30_000) return;
+    session.lastInputReport = now;
+    this.markPresent(userId);
+  }
+
+  /**
+   * The desktop client saying its computer has locked or gone to sleep. Away
+   * now rather than in ten minutes, as Teams does. The timer is left running:
+   * it would only mark them away again.
+   */
+  @SubscribeMessage('activity:away')
+  stepAway(@ConnectedSocket() socket: Socket) {
+    const { userId } = socket.data as SocketData;
+    this.goAway(userId);
   }
 
   /* ------------------------------------------------------- watch parties */

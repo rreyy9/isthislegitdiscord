@@ -26,6 +26,7 @@ import {
   type KeybindAction,
 } from './voice-main';
 import { registerUpdater } from './updater';
+import { registerPresence } from './presence';
 import {
   clearAttention,
   registerNotifications,
@@ -1134,6 +1135,9 @@ app.whenReady().then(() => {
   // before anything tries to raise a toast.
   setNotificationIdentity();
   registerNotifications(() => mainWindow);
+  // The main window only: the party window has a socket of its own, and one
+  // report per person is plenty.
+  registerPresence(() => mainWindow);
   const keys = registerKeybinds(() => mainWindow);
   // The global hook keeps the process alive if it is never stopped.
   //

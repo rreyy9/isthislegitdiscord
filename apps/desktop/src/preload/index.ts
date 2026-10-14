@@ -260,6 +260,29 @@ const bridge = {
     };
   },
 
+  /* ----------------------------------------------------------- presence */
+
+  /**
+   * There was keyboard or mouse input somewhere on this computer in the last
+   * few seconds. Arrives every few seconds while it keeps happening; see
+   * main/presence.ts. Throttling is the listener's job.
+   */
+  onPresenceInput: (cb: () => void): (() => void) => {
+    const handler = () => cb();
+    ipcRenderer.on('presence:input', handler);
+    return () => {
+      ipcRenderer.off('presence:input', handler);
+    };
+  },
+  /** The computer has locked or is going to sleep. */
+  onPresenceAway: (cb: () => void): (() => void) => {
+    const handler = () => cb();
+    ipcRenderer.on('presence:away', handler);
+    return () => {
+      ipcRenderer.off('presence:away', handler);
+    };
+  },
+
   /* ------------------------------------------------------- screen share */
 
   /**

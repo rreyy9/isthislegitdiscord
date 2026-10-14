@@ -45,6 +45,8 @@ import {
   disconnectSocket,
   joinChannel,
   leaveChannel,
+  reportAway,
+  reportInputActivity,
   typingStart,
   typingStop,
 } from '../socket';
@@ -711,6 +713,19 @@ export function Chat({
       ),
     [],
   );
+
+  /**
+   * Being at the computer keeps the dot green; locking it turns it yellow. Main
+   * watches the machine (main/presence.ts) and socket.ts throttles the reports.
+   */
+  useEffect(() => {
+    const offInput = bridge.onPresenceInput(reportInputActivity);
+    const offAway = bridge.onPresenceAway(reportAway);
+    return () => {
+      offInput();
+      offAway();
+    };
+  }, []);
 
   /**
    * The number on the dock or launcher icon, where the OS draws one.

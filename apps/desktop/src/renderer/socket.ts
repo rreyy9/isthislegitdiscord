@@ -244,7 +244,7 @@ let lastVoiceActivity = 0;
 /**
  * I am talking. Called on every meter tick that hears you, and throttled here
  * so the caller does not have to care: the server only needs to know you are
- * still around within its half-hour away window, and once a minute is plenty.
+ * still around within its ten-minute away window, and once a minute is plenty.
  *
  * Only the speaker's own client sends this -- see `activity:voice` in shared.
  */
@@ -253,6 +253,33 @@ export function reportVoiceActivity() {
   if (!socket?.connected || now - lastVoiceActivity < VOICE_ACTIVITY_EVERY_MS) return;
   lastVoiceActivity = now;
   socket.emit('activity:voice');
+}
+
+/** How often, at most, keyboard and mouse input is reported. */
+const INPUT_ACTIVITY_EVERY_MS = 60_000;
+let lastInputActivity = 0;
+
+/**
+ * I am at my computer. Called by main every few seconds while there is input
+ * anywhere on the machine, and throttled here like the voice report above.
+ *
+ * Main window only -- see `activity:input` in shared.
+ */
+export function reportInputActivity() {
+  const now = Date.now();
+  if (!socket?.connected || now - lastInputActivity < INPUT_ACTIVITY_EVERY_MS) return;
+  lastInputActivity = now;
+  socket.emit('activity:input');
+}
+
+/**
+ * The computer has locked or is going to sleep: away now. Also forgets the
+ * last input report, so the first touch after unlocking goes out at once
+ * instead of waiting out the throttle.
+ */
+export function reportAway() {
+  lastInputActivity = 0;
+  socket?.emit('activity:away');
 }
 
 /**
