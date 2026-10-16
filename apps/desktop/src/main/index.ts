@@ -1128,7 +1128,7 @@ app.whenReady().then(() => {
 
   allowEmbedReferrers();
 
-  registerScreenShare(() => mainWindow);
+  registerScreenShare();
   registerVoiceDebugLog(); // TEMP: deafen debugging
   registerUpdater(() => mainWindow);
   // Before the first window, because on Windows the identity has to be set

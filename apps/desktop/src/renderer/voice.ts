@@ -6,8 +6,10 @@ import {
   Room,
   RoomEvent,
   Track,
+  VideoPreset,
   type AudioCaptureOptions,
   type LocalAudioTrack,
+  type LocalTrack,
   type Participant,
   type RemoteParticipant,
   type RemoteTrackPublication,
@@ -16,7 +18,7 @@ import {
 import { api, type VoiceAudioDto } from './api';
 import { bridge } from './bridge';
 import { reportVoiceActivity } from './socket';
-import type { Keybind } from '../preload';
+import type { Keybind, ScreenSource } from '../preload';
 import {
   GATE_SEED_TICKS,
   InputGate,
@@ -64,10 +66,183 @@ export interface VoicePeer {
   screenSharing: boolean;
 }
 
+/**
+ * One person's share, from the moment they pick what to share.
+ *
+ * A share used to appear only once its video was subscribed, and then as a
+ * black box until the first frame decoded -- so for the seconds in between,
+ * nobody could tell a share that was coming from one that was not. The phases
+ * are what lets the stage say which it is:
+ *
+ * - `starting`: they have picked a source and capture is spinning up. Known
+ *   from the `screen` attribute they set, before anything is published.
+ * - `connecting`: published, but not subscribed here yet.
+ * - `live`: the track is here. Whether a frame has arrived yet is the tile's
+ *   business; it has the video element.
+ */
 export interface ScreenShare {
   identity: string;
   name: string;
-  track: Track;
+  isLocal: boolean;
+  phase: 'starting' | 'connecting' | 'live';
+  track: Track | null;
+  /** The SFU has stopped forwarding it because the connection cannot carry it. */
+  paused: boolean;
+}
+
+/**
+ * What the picker offers, and what each choice does to capture and encoding.
+ *
+ * Capture is asked for at the rate it will be sent, not above it: LiveKit's
+ * default captured 30 frames a second to send 15, and the other 15 were
+ * captured, scaled and thrown away on every share.
+ *
+ * Each has a low layer for simulcast. That layer is what a viewer gets while
+ * their bandwidth estimate is still climbing, and what a small tile asks for,
+ * so it is what makes the first picture arrive quickly.
+ */
+export type ShareQuality = 'sharp' | 'balanced' | 'smooth';
+
+export const SHARE_QUALITIES: Record<
+  ShareQuality,
+  {
+    label: string;
+    detail: string;
+    width: number;
+    height: number;
+    fps: number;
+    maxBitrate: number;
+    low: VideoPreset;
+    contentHint: 'detail' | 'motion' | '';
+    degradation: RTCDegradationPreference;
+  }
+> = {
+  // Text and code: every pixel matters, motion barely does.
+  sharp: {
+    label: 'Sharp text',
+    detail: '1080p · 15 fps',
+    width: 1920,
+    height: 1080,
+    fps: 15,
+    maxBitrate: 3_000_000,
+    low: new VideoPreset(960, 540, 600_000, 15),
+    contentHint: 'detail',
+    degradation: 'maintain-resolution',
+  },
+  balanced: {
+    label: 'Balanced',
+    detail: '1080p · 30 fps',
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    maxBitrate: 4_500_000,
+    low: new VideoPreset(1280, 720, 1_200_000, 15),
+    contentHint: '',
+    degradation: 'balanced',
+  },
+  // Games and video: drop resolution before frames.
+  smooth: {
+    label: 'Smooth motion',
+    detail: '720p · 60 fps',
+    width: 1280,
+    height: 720,
+    fps: 60,
+    maxBitrate: 4_000_000,
+    low: new VideoPreset(640, 360, 600_000, 30),
+    contentHint: 'motion',
+    degradation: 'maintain-framerate',
+  },
+};
+
+/**
+ * How long a new capture has to produce its first frame.
+ *
+ * A window Windows will not capture often does not fail outright: the capture
+ * starts and simply never delivers anything. Without a deadline that is a
+ * share that looks live and shows nobody anything. A working one delivers in
+ * well under a second.
+ */
+const FIRST_FRAME_TIMEOUT_MS = 4000;
+
+/**
+ * Wait for a capture to deliver a picture, and say whether it is black.
+ *
+ * Done on a detached video element before anything is published, so a source
+ * that is not going to work is caught here rather than announced to the room.
+ * `loadeddata` rather than requestVideoFrameCallback: the latter only fires
+ * for frames that reach the compositor, which a detached element's never do,
+ * while a MediaStream source reports its first decoded frame either way.
+ * Black is judged a moment after that first frame, which some capturers
+ * deliver before the surface has been drawn.
+ */
+async function probeCapture(
+  track: MediaStreamTrack,
+): Promise<{ ok: false } | { ok: true; ms: number; black: boolean }> {
+  const started = performance.now();
+  const el = document.createElement('video');
+  el.muted = true;
+  el.playsInline = true;
+  el.srcObject = new MediaStream([track]);
+  try {
+    void el.play().catch(() => {});
+    const ok = await new Promise<boolean>((resolve) => {
+      const finish = (v: boolean) => {
+        clearTimeout(timer);
+        el.removeEventListener('loadeddata', loaded);
+        track.removeEventListener('ended', ended);
+        resolve(v);
+      };
+      const loaded = () => finish(true);
+      const ended = () => finish(false);
+      const timer = setTimeout(() => finish(false), FIRST_FRAME_TIMEOUT_MS);
+      el.addEventListener('loadeddata', loaded);
+      track.addEventListener('ended', ended);
+    });
+    if (!ok) return { ok: false };
+    const ms = Math.round(performance.now() - started);
+    await new Promise((r) => setTimeout(r, 300));
+    return { ok: true, ms, black: isBlack(el) };
+  } finally {
+    el.pause();
+    el.srcObject = null;
+  }
+}
+
+/** Is every sampled pixel close to black? A dark theme still has text in it. */
+function isBlack(el: HTMLVideoElement): boolean {
+  try {
+    const c = document.createElement('canvas');
+    c.width = 64;
+    c.height = 36;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    if (!g) return false;
+    g.drawImage(el, 0, 0, c.width, c.height);
+    const px = g.getImageData(0, 0, c.width, c.height).data;
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i] > 16 || px[i + 1] > 16 || px[i + 2] > 16) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Why a share of this source failed, said in terms of what to do about it. */
+function shareFailedMessage(name: string, isScreen: boolean): string {
+  return isScreen
+    ? `Couldn't share “${name}”. Try again, or pick a different screen.`
+    : `Couldn't share “${name}”. Windows won't capture minimised windows, ` +
+        'apps running as administrator, or apps that block capture. Restore ' +
+        'the window and try again, or share the whole screen instead.';
+}
+
+/** Append a line to voice-debug.log. Share start-up is otherwise invisible. */
+function shareTrace(text: string) {
+  try {
+    bridge.voiceDebugLog?.(`share: ${text}`);
+  } catch {
+    // diagnostics only
+  }
 }
 
 /**
@@ -102,6 +277,10 @@ export interface VoiceState {
   error: string | null;
   peers: VoicePeer[];
   screenShares: ScreenShare[];
+  /** The sources the picker is showing, or null when it is closed. */
+  screenPicker: ScreenSource[] | null;
+  /** Between picking a source and the share being live, or failing. */
+  screenShareStarting: boolean;
   muted: boolean;
   /**
    * True while a push-to-mute binding is held.
@@ -152,38 +331,6 @@ export interface VoiceSettings {
   /** Playback level per person, 0..1, keyed by user id. Missing means 1. */
   userVolumes: Record<string, number>;
   rejoinLastChannel: boolean;
-}
-
-/**
- * Set when somebody closes the screen picker without choosing anything.
- *
- * The picker is a component and the request is made by this hook, so the one
- * fact that explains the rejection lives in neither. A module flag rather than
- * a round trip through main: it is set synchronously as the picker closes,
- * which is strictly before the getDisplayMedia rejection it accounts for can
- * arrive.
- */
-let pickerCancelled = false;
-
-export function noteScreenPickerCancelled() {
-  pickerCancelled = true;
-}
-
-/**
- * Was this failure just somebody closing the picker?
- *
- * The flag is the reliable half: it is set by the picker itself, so it does
- * not depend on which of several messages Chromium picked this time. The
- * pattern is a second line for the cancels that never reach our picker at all
- * — a macOS screen-recording permission that was never granted, say.
- */
-function isPickerCancellation(err: Error): boolean {
-  return (
-    pickerCancelled ||
-    /permission denied|not allowed|cancel|invalid capture constraints/i.test(
-      err.message ?? '',
-    )
-  );
 }
 
 /** A live reading of the local microphone, for the meter in settings. */
@@ -311,6 +458,8 @@ export function useVoice(
     error: null,
     peers: [],
     screenShares: [],
+    screenPicker: null,
+    screenShareStarting: false,
     muted: false,
     pushMuted: false,
     deafened: false,
@@ -362,6 +511,12 @@ export function useVoice(
    * is opened and the channel list is a separate arrival.
    */
   const listenOnlyRef = useRef(false);
+  /**
+   * True from picking a source until the share is live or has failed. A ref
+   * as well as state because `sync` reads it to draw our own placeholder, and
+   * a second click on the button must not start a second capture.
+   */
+  const shareStartingRef = useRef(false);
   // Held in a ref so the caller may pass a fresh closure every render without
   // tearing down and re-registering the keybinding listener each time.
   const onDisconnectRef = useRef(onDisconnect);
@@ -647,14 +802,23 @@ export function useVoice(
 
     const screenShares: ScreenShare[] = [];
     for (const p of all) {
-      for (const pub of p.trackPublications.values()) {
-        if (pub.source === Track.Source.ScreenShare && pub.track) {
-          screenShares.push({
-            identity: p.identity,
-            name: nameOf(p),
-            track: pub.track,
-          });
-        }
+      const isLocal = p === room.localParticipant;
+      const base = { identity: p.identity, name: nameOf(p), isLocal };
+      const pub = p.getTrackPublication(Track.Source.ScreenShare);
+      if (pub?.track) {
+        screenShares.push({
+          ...base,
+          phase: 'live',
+          track: pub.track,
+          paused:
+            !isLocal && pub.track.streamState === Track.StreamState.Paused,
+        });
+      } else if (pub) {
+        screenShares.push({ ...base, phase: 'connecting', track: null, paused: false });
+      } else if (
+        isLocal ? shareStartingRef.current : p.attributes?.screen === 'starting'
+      ) {
+        screenShares.push({ ...base, phase: 'starting', track: null, paused: false });
       }
     }
 
@@ -1075,6 +1239,7 @@ export function useVoice(
       status: 'idle',
       peers: [],
       screenShares: [],
+      screenPicker: null,
       screenSharing: false,
       listenOnly: false,
     }));
@@ -1174,6 +1339,16 @@ export function useVoice(
         })
         .on(RoomEvent.TrackPublished, sync)
         .on(RoomEvent.TrackUnpublished, sync)
+        // Whether the SFU is forwarding a share at all, which is what tells a
+        // tile frozen for bandwidth apart from one that is still loading.
+        .on(RoomEvent.TrackStreamStateChanged, sync)
+        .on(
+          RoomEvent.TrackSubscriptionFailed,
+          (sid: string, participant: RemoteParticipant) => {
+            shareTrace(`subscription failed ${participant.identity}/${sid}`);
+            sync();
+          },
+        )
         .on(RoomEvent.ActiveSpeakersChanged, sync)
         .on(RoomEvent.MediaDevicesChanged, () => {
           ensureMicMeter();
@@ -1300,15 +1475,16 @@ export function useVoice(
             status: 'idle',
             peers: [],
             screenShares: [],
+            screenPicker: null,
             screenSharing: false,
           }));
         })
-        // Screen-share failures arrive here as well as rejecting the call that
-        // started them, and this fires first — so cancelling the picker put a
-        // red banner up through this path no matter what the caller did with
-        // the rejection. Microphone failures are still worth saying out loud.
+        // Microphone failures. Screen capture does not come through here: it
+        // is started with createScreenTracks rather than setScreenShareEnabled,
+        // which is the path that emits this, and its failures are explained by
+        // pickScreen in terms of the source that was picked.
         .on(RoomEvent.MediaDevicesError, (e: Error) => {
-          if (!isCurrent() || isPickerCancellation(e)) return;
+          if (!isCurrent()) return;
           setState((st) => ({ ...st, error: e.message }));
         });
 
@@ -1462,37 +1638,138 @@ export function useVoice(
     [applyVolumes, applyMic, publishVoiceState, sync, debugSnapshot, debugTrace],
   );
 
+  /**
+   * The share button: stop a share, or open the picker for a new one.
+   *
+   * Opening the picker is all it does. Capture starts in `pickScreen`, once a
+   * source and a quality have been chosen -- see registerScreenShare in main
+   * for why the order is that way round.
+   */
   const toggleScreenShare = useCallback(async () => {
     const room = roomRef.current;
-    if (!room) return;
-    const on = room.localParticipant.isScreenShareEnabled;
-    pickerCancelled = false;
+    if (!room || shareStartingRef.current) return;
     // Whatever went wrong last time is not this attempt's problem, and the
     // banner has no dismiss of its own.
     setState((s) => ({ ...s, error: null }));
-    try {
-      // Screen audio on Windows is the system mix, which is the whole point
-      // when sharing a game; LiveKit publishes it as a second track.
-      //
-      // Not in an AFK room, whose grant carries no screen audio. Asking for it
-      // anyway is not refused up front: the picture publishes, the sound is
-      // rejected after it, and somebody sees an error banner over a share that
-      // has half started.
-      await room.localParticipant.setScreenShareEnabled(!on, {
-        audio: !listenOnlyRef.current,
-      });
-    } catch (err) {
-      // Cancelling always rejects, and what it rejects with is Chromium's
-      // business — it has been a permission error and an "invalid capture
-      // constraints" at different times. Ours is the only account of it worth
-      // trusting, so the flag decides, not the message.
-      if (!isPickerCancellation(err as Error)) {
-        setState((s) => ({ ...s, error: (err as Error).message }));
-      }
+    if (room.localParticipant.isScreenShareEnabled) {
+      // Unpublishes the screen audio alongside it.
+      await room.localParticipant.setScreenShareEnabled(false).catch(() => {});
+      sync();
+      return;
     }
-    pickerCancelled = false;
-    sync();
+    try {
+      const sources = await bridge.listScreenSources();
+      if (roomRef.current !== room) return;
+      setState((s) => ({ ...s, screenPicker: sources }));
+    } catch (err) {
+      setState((s) => ({ ...s, error: (err as Error).message }));
+    }
   }, [sync]);
+
+  /**
+   * The picker's answer: null is a cancel, anything else starts the share.
+   *
+   * Capture is proven before it is published. A source Windows will not
+   * capture either rejects here or starts and never delivers a frame, and
+   * either way it is caught before the room is told about a share -- rather
+   * than leaving everybody looking at a black tile that is never going to
+   * fill in.
+   */
+  const pickScreen = useCallback(
+    async (choice: { source: ScreenSource; quality: ShareQuality } | null) => {
+      setState((s) => ({ ...s, screenPicker: null }));
+      const room = roomRef.current;
+      if (!choice || !room || shareStartingRef.current) return;
+      const { source, quality } = choice;
+      const q = SHARE_QUALITIES[quality];
+      const stale = () => roomRef.current !== room;
+
+      shareStartingRef.current = true;
+      setState((s) => ({ ...s, screenShareStarting: true, error: null }));
+      sync();
+      // Lets everyone else draw a placeholder before there is anything to
+      // subscribe to. Cleared below whatever happens.
+      void room.localParticipant
+        .setAttributes({ screen: 'starting' })
+        .catch(() => {});
+
+      const t0 = performance.now();
+      const since = () => `${Math.round(performance.now() - t0)}ms`;
+      shareTrace(`picked ${source.id} "${source.name}" quality=${quality}`);
+
+      let tracks: LocalTrack[] = [];
+      try {
+        await bridge.selectScreenSource(source.id);
+        tracks = await room.localParticipant.createScreenTracks({
+          // Screen audio on Windows is the system mix, which is the whole
+          // point when sharing a game; LiveKit publishes it as a second track.
+          // Not in an AFK room, whose grant carries no screen audio.
+          audio: !listenOnlyRef.current,
+          resolution: { width: q.width, height: q.height, frameRate: q.fps },
+          contentHint: q.contentHint || undefined,
+        });
+        const video = tracks.find((t) => t.kind === Track.Kind.Video);
+        if (!video) throw new Error('no video track');
+        shareTrace(
+          `captured after ${since()} ` +
+            JSON.stringify(video.mediaStreamTrack.getSettings()),
+        );
+
+        const probe = await probeCapture(video.mediaStreamTrack);
+        if (!probe.ok) throw new Error('no frames from the capture');
+        shareTrace(`frames after ${probe.ms}ms black=${probe.black}`);
+        if (stale()) throw new Error('left the room');
+
+        await room.localParticipant.publishTrack(video, {
+          screenShareEncoding: { maxBitrate: q.maxBitrate, maxFramerate: q.fps },
+          screenShareSimulcastLayers: [q.low],
+          degradationPreference: q.degradation,
+        });
+        // The sound is a bonus to the picture, not a condition of it.
+        for (const audio of tracks.filter((t) => t.kind === Track.Kind.Audio)) {
+          await room.localParticipant.publishTrack(audio).catch((e: Error) => {
+            shareTrace(`audio publish failed: ${e.message}`);
+            audio.stop();
+          });
+        }
+        shareTrace(`live after ${since()}`);
+
+        if (probe.black) {
+          setState((s) => ({
+            ...s,
+            error:
+              `Sharing “${source.name}”, but it is coming through black. ` +
+              'Games in exclusive fullscreen and apps that block capture ' +
+              'often do this; borderless windowed mode or sharing the whole ' +
+              'screen usually works.',
+          }));
+        }
+      } catch (err) {
+        const e = err as Error;
+        shareTrace(`failed after ${since()}: ${e.name}: ${e.message}`);
+        for (const t of tracks) t.stop();
+        // Anything that did get published goes too, so a failed start never
+        // leaves half a share behind.
+        if (room.localParticipant.isScreenShareEnabled) {
+          await room.localParticipant
+            .setScreenShareEnabled(false)
+            .catch(() => {});
+        }
+        if (!stale()) {
+          setState((s) => ({
+            ...s,
+            error: shareFailedMessage(source.name, source.isScreen),
+          }));
+        }
+      } finally {
+        shareStartingRef.current = false;
+        setState((s) => ({ ...s, screenShareStarting: false }));
+        void room.localParticipant.setAttributes({ screen: '' }).catch(() => {});
+        sync();
+      }
+    },
+    [sync],
+  );
 
   /** The banner sits there until something replaces it; this is its dismiss. */
   const clearError = useCallback(() => {
@@ -1782,6 +2059,7 @@ export function useVoice(
     setMuted,
     setDeafened,
     toggleScreenShare,
+    pickScreen,
     clearError,
     setInputDevice,
     setOutputDevice,

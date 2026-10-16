@@ -3691,7 +3691,7 @@ export function Chat({
         onBan={askBan}
         voiceChannelOf={voiceChannelOf}
       />
-      <ScreenPicker />
+      <ScreenPicker voice={voice} />
       {startingParty && (
         <StartPartyModal
           onClose={() => setStartingParty(false)}

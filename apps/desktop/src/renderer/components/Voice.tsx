@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Track } from 'livekit-client';
 import type { NotificationSettings, ScreenSource } from '../../preload';
 import {
   conflictsFor,
@@ -21,50 +20,76 @@ import { ProfileSettings } from './ProfileSettings';
 import { AppearanceSettings } from './AppearanceSettings';
 import {
   listAudioDevices,
-  noteScreenPickerCancelled,
   PTT_RELEASE_DELAY_MAX_MS,
+  SHARE_QUALITIES,
   type InputLevel,
+  type ScreenShare,
+  type ShareQuality,
   type Voice,
   type VoiceSettings,
 } from '../voice';
 
 /* ------------------------------------------------------------ screen picker */
 
+/** Remembered between shares; a convenience, so browser storage is enough. */
+const SHARE_QUALITY_KEY = 'share-quality';
+
+function savedQuality(): ShareQuality {
+  try {
+    const v = localStorage.getItem(SHARE_QUALITY_KEY);
+    if (v && v in SHARE_QUALITIES) return v as ShareQuality;
+  } catch {
+    // storage unavailable; fall through to the default
+  }
+  return 'balanced';
+}
+
 /**
  * Electron ships no screen picker of its own on Windows, so the app supplies
- * one. Main asks for a choice; this answers.
+ * one. It opens before capture starts, which is what lets it ask for a quality
+ * as well as a source.
  *
  * The list and the thumbnails arrive separately, because capturing a frame of
  * every open window is slow enough to be the entire perceived cost of clicking
  * the share button. The names come first and the pictures land underneath them
  * a moment later; picking before they do is perfectly allowed.
+ *
+ * A window with no picture at all is one Windows refused to capture for the
+ * thumbnail, and it will almost always refuse the share too. It stays
+ * pickable -- the refusal is sometimes temporary -- but it says so.
  */
-export function ScreenPicker() {
-  const [sources, setSources] = useState<ScreenSource[] | null>(null);
-  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
-
-  useEffect(
-    () =>
-      bridge.onScreenChoose((list) => {
-        // Cleared here rather than on close: a second picker must not open
-        // showing the last one's pictures against this one's names.
-        setThumbnails({});
-        setSources(list);
-      }),
-    [],
+export function ScreenPicker({ voice }: { voice: Voice }) {
+  const sources = voice.screenPicker;
+  const [thumbnails, setThumbnails] = useState<Record<string, string> | null>(
+    null,
   );
-  useEffect(() => bridge.onScreenThumbnails(setThumbnails), []);
+  const [quality, setQuality] = useState<ShareQuality>(savedQuality);
 
-  function pick(id: string | null) {
-    setSources(null);
-    // Said here rather than inferred from the rejection later: this is the
-    // only place that knows the difference between changing your mind and
-    // capture actually failing.
-    if (id === null) noteScreenPickerCancelled();
-    void bridge.chooseScreenSource(id);
-  }
+  useEffect(() => {
+    if (!sources) return;
+    // Cleared here rather than on close: a second picker must not open
+    // showing the last one's pictures against this one's names.
+    setThumbnails(null);
+    let live = true;
+    void bridge
+      .screenThumbnails()
+      .then((t) => live && setThumbnails(t))
+      .catch(() => live && setThumbnails({}));
+    return () => {
+      live = false;
+    };
+  }, [sources]);
 
   if (!sources) return null;
+
+  function pick(source: ScreenSource | null) {
+    try {
+      localStorage.setItem(SHARE_QUALITY_KEY, quality);
+    } catch {
+      // not worth failing a share over
+    }
+    void voice.pickScreen(source && { source, quality });
+  }
 
   const screens = sources.filter((s) => s.isScreen);
   const windows = sources.filter((s) => !s.isScreen);
@@ -73,6 +98,20 @@ export function ScreenPicker() {
     <div className="modal-wrap" onClick={() => pick(null)}>
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">Share your screen</div>
+        <div className="share-quality" role="radiogroup" aria-label="Quality">
+          {(Object.keys(SHARE_QUALITIES) as ShareQuality[]).map((q) => (
+            <button
+              key={q}
+              role="radio"
+              aria-checked={quality === q}
+              className={quality === q ? 'on' : ''}
+              onClick={() => setQuality(q)}
+            >
+              <span>{SHARE_QUALITIES[q].label}</span>
+              <small>{SHARE_QUALITIES[q].detail}</small>
+            </button>
+          ))}
+        </div>
         <div className="src-scroll">
           {[
             ['Screens', screens],
@@ -83,17 +122,37 @@ export function ScreenPicker() {
                 <div className="sb-section">{label as string}</div>
                 <div className="src-grid">
                   {(list as ScreenSource[]).map((s) => {
-                    const shot = s.thumbnail ?? thumbnails[s.id];
+                    // Undefined once the pass is in is a window that opened
+                    // after it ran: no picture, but no reason to doubt it.
+                    const shot = thumbnails?.[s.id];
+                    const refused = shot === '';
                     return (
-                      <div key={s.id} className="src" onClick={() => pick(s.id)}>
+                      <div
+                        key={s.id}
+                        className={'src' + (refused ? ' refused' : '')}
+                        onClick={() => pick(s)}
+                        title={
+                          refused
+                            ? "Windows wouldn't capture a preview of this window. " +
+                              'It may be minimised, running as administrator, or ' +
+                              'blocking capture, and sharing it will likely fail.'
+                            : s.name
+                        }
+                      >
                         {shot ? (
                           <img src={shot} alt="" />
+                        ) : refused ? (
+                          <div className="src-shot-refused">
+                            No preview — may not share
+                          </div>
                         ) : (
-                          <div className="src-shot-empty" />
+                          <div
+                            className={
+                              'src-shot-empty' + (thumbnails ? ' still' : '')
+                            }
+                          />
                         )}
-                        <div className="src-name" title={s.name}>
-                          {s.name}
-                        </div>
+                        <div className="src-name">{s.name}</div>
                       </div>
                     );
                   })}
@@ -103,6 +162,11 @@ export function ScreenPicker() {
           )}
         </div>
         <div className="modal-foot">
+          {!voice.listenOnly && (
+            <span className="share-foot-note">
+              Sound is shared with whole screens only.
+            </span>
+          )}
           <button onClick={() => pick(null)}>Cancel</button>
         </div>
       </div>
@@ -112,22 +176,80 @@ export function ScreenPicker() {
 
 /* ------------------------------------------------------------- screen stage */
 
-function VideoTile({ track, label }: { track: Track; label: string }) {
+/**
+ * After this long without a first frame, the tile says it is still trying
+ * rather than just spinning, so a slow start does not look like a hang.
+ */
+const SLOW_START_MS = 8000;
+
+function ShareTile({ share }: { share: ScreenShare }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const { track } = share;
+  // Whether a frame has actually been drawn. Subscribed is not the same
+  // thing: the element sits black until the first keyframe is decoded, and
+  // that is the wait people were reading as "it is not working".
+  const [showing, setShowing] = useState(false);
+  const [slow, setSlow] = useState(false);
 
   useEffect(() => {
+    setShowing(false);
     const el = ref.current;
-    if (!el) return;
+    if (!el || !track) return;
+    // Media events rather than requestVideoFrameCallback, which only fires
+    // for frames that get composited -- and a transparent element's may not.
+    // A MediaStream source reaches HAVE_CURRENT_DATA on its first frame.
+    const shown = () => {
+      if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) setShowing(true);
+    };
+    el.addEventListener('loadeddata', shown);
+    el.addEventListener('resize', shown);
     track.attach(el);
+    shown();
     return () => {
+      el.removeEventListener('loadeddata', shown);
+      el.removeEventListener('resize', shown);
       track.detach(el);
     };
   }, [track]);
 
+  const waiting = !showing;
+  useEffect(() => {
+    setSlow(false);
+    if (!waiting) return;
+    const t = setTimeout(() => setSlow(true), SLOW_START_MS);
+    return () => clearTimeout(t);
+  }, [waiting, share.phase]);
+
+  const who = share.isLocal ? 'your' : `${share.name}'s`;
+  let status: string | null = null;
+  if (share.phase === 'starting') {
+    status = share.isLocal ? 'Starting your share…' : `${share.name} is starting a share…`;
+  } else if (waiting) {
+    status = slow
+      ? `Still connecting to ${who} screen — this can take a moment on a slow connection`
+      : `Connecting to ${who} screen…`;
+  } else if (share.paused) {
+    status = 'Paused — the connection is too slow for this stream';
+  }
+
   return (
     <div className="tile">
-      <video ref={ref} autoPlay playsInline muted={false} />
-      <div className="tile-label">{label}</div>
+      <video
+        ref={ref}
+        autoPlay
+        playsInline
+        muted={false}
+        className={showing ? '' : 'pending'}
+      />
+      {status && (
+        <div className={'tile-status' + (showing ? ' over' : '')}>
+          {!share.paused && <span className="tile-spin" />}
+          <span>{status}</span>
+        </div>
+      )}
+      <div className="tile-label">
+        {share.isLocal ? 'Your screen' : `${share.name}'s screen`}
+      </div>
     </div>
   );
 }
@@ -144,11 +266,10 @@ export function ScreenStage({ voice }: { voice: Voice }) {
       title="Double-click to expand"
     >
       {voice.screenShares.map((s) => (
-        <VideoTile
-          key={s.identity + s.track.sid}
-          track={s.track}
-          label={`${s.name}'s screen`}
-        />
+        // Keyed by person, not track, so the tile -- and its spinner -- carries
+        // on through starting, connecting and live rather than being torn
+        // down and rebuilt at each step.
+        <ShareTile key={s.identity} share={s} />
       ))}
     </div>
   );
@@ -1143,10 +1264,27 @@ export function VoicePanel({
           {voice.deafened ? '🔕' : '🎧'}
         </button>
         <button
-          className={voice.screenSharing ? 'on' : ''}
-          disabled={connecting}
+          className={
+            voice.screenShareStarting
+              ? 'busy'
+              : voice.screenSharing
+                ? 'on'
+                : ''
+          }
+          disabled={connecting || voice.screenShareStarting}
+          // The picture pass is the slow part of opening the picker, so it
+          // starts while the pointer is still on its way to the click.
+          onMouseEnter={() => {
+            if (!voice.screenSharing) bridge.warmScreenSources();
+          }}
           onClick={() => void voice.toggleScreenShare()}
-          title={voice.screenSharing ? 'Stop sharing' : 'Share your screen'}
+          title={
+            voice.screenShareStarting
+              ? 'Starting your share…'
+              : voice.screenSharing
+                ? 'Stop sharing'
+                : 'Share your screen'
+          }
         >
           🖥
         </button>

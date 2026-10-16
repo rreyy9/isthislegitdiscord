@@ -117,8 +117,6 @@ export interface MentionNotice {
 export interface ScreenSource {
   id: string;
   name: string;
-  /** Null until the thumbnail pass catches up. */
-  thumbnail: string | null;
   isScreen: boolean;
 }
 
@@ -286,30 +284,23 @@ const bridge = {
   /* ------------------------------------------------------- screen share */
 
   /**
-   * Main asks the renderer which screen or window to share; the renderer shows
-   * the picker and answers with `chooseScreenSource`. Electron has no built-in
-   * picker on Windows, so `getDisplayMedia` simply fails without this exchange.
+   * The picker runs before capture: list, choose, `selectScreenSource`, then
+   * getDisplayMedia, which main answers with the selected source. Electron has
+   * no built-in picker on Windows, so `getDisplayMedia` simply fails without
+   * a selection. See registerScreenShare in main.
    */
-  onScreenChoose: (cb: (sources: ScreenSource[]) => void): (() => void) => {
-    const handler = (_e: unknown, sources: ScreenSource[]) => cb(sources);
-    ipcRenderer.on('screen:choose', handler);
-    return () => {
-      ipcRenderer.off('screen:choose', handler);
-    };
-  },
-  chooseScreenSource: (sourceId: string | null): Promise<boolean> =>
-    ipcRenderer.invoke('screen:chose', sourceId),
-  /** The pictures, id-keyed, arriving after the list they belong to. */
-  onScreenThumbnails: (
-    cb: (thumbnails: Record<string, string>) => void,
-  ): (() => void) => {
-    const handler = (_e: unknown, thumbnails: Record<string, string>) =>
-      cb(thumbnails);
-    ipcRenderer.on('screen:thumbnails', handler);
-    return () => {
-      ipcRenderer.off('screen:thumbnails', handler);
-    };
-  },
+  listScreenSources: (): Promise<ScreenSource[]> =>
+    ipcRenderer.invoke('screen:sources'),
+  /**
+   * The pictures, id-keyed. '' is a window Windows refused to capture, which
+   * usually means sharing it will fail too.
+   */
+  screenThumbnails: (): Promise<Record<string, string>> =>
+    ipcRenderer.invoke('screen:thumbnails'),
+  /** Start the slow thumbnail pass early, e.g. when the pointer nears the button. */
+  warmScreenSources: (): void => ipcRenderer.send('screen:warm'),
+  selectScreenSource: (sourceId: string): Promise<boolean> =>
+    ipcRenderer.invoke('screen:select', sourceId),
 
   /* -------------------------------------------------------- watch party */
 

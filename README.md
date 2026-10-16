@@ -967,30 +967,55 @@ fallback for anybody not yet metered.
 which is seconds on a busy desktop — and that was the whole of the delay between clicking
 share and seeing anything. It now runs twice: once with `thumbnailSize: { width: 0, height:
 0 }` for the names, which is nearly free and is what the picker opens with, and once for
-the pictures, which arrive on a second IPC message and fill in behind them. Picking a
-window before its thumbnail has landed is allowed and does not wait.
+the pictures, which the picker asks for separately and which fill in behind them. Picking
+a window before its thumbnail has landed is allowed and does not wait. The picture pass is
+also started when the pointer goes over the share button and kept for a few seconds, so it
+has usually finished by the time the picker opens.
 
-### Cancelling the picker is `callback(null)`
+### The picker runs before capture, not inside it
 
-`setDisplayMediaRequestHandler` reads `callback({})` as a promise of a video stream that
-was then broken, not as a refusal: it throws *"Video was requested, but no video stream was
-provided"* inside the handler — an unhandled rejection in main — and the renderer's
-`getDisplayMedia` rejects with the unrelated-sounding *"Invalid capture constraints"*,
-which the app then showed as a red error for closing a dialog. `callback(null)` is the
-documented refusal and rejects with an ordinary permission error instead.
+It used to be the other way round: the renderer called `getDisplayMedia`, the request
+landed in `setDisplayMediaRequestHandler`, and only then did main ask the renderer to show
+the picker. That put the choice inside a call whose options were already fixed — so there
+was no way to offer a quality — and it gave "still choosing" and "capture is starting" one
+promise between them, so the button could not say which was happening. Now the renderer
+lists the sources (`screen:sources`), shows the picker, tells main the choice
+(`screen:select`), and only then captures; the handler answers with the selected source at
+once, and refuses any request that arrives without a fresh selection.
 
-The client does not read that message to decide, though. The picker is a component and the
-request comes from the voice hook, so cancelling sets a module flag on its way out —
-synchronously, and therefore strictly before the rejection it explains — and the hook
-trusts that over whatever string Chromium chose that week.
+Cancelling therefore never reaches Chromium at all, which retired two workarounds: the
+module flag the picker set so the hook could tell a cancel from a failure, and the filter
+on `RoomEvent.MediaDevicesError` that kept a cancel from putting a red banner up. Capture
+is started with `createScreenTracks` and published by hand, not with
+`setScreenShareEnabled`, and only the latter emits that event — so screen-share failures
+are explained once, by `pickScreen`, in terms of the window that was picked.
 
-**A cancelled share fails twice, and only one of them is a rejection.** LiveKit also emits
-`RoomEvent.MediaDevicesError` for the same failure, and it fires *first* — so a handler
-that put every device error on screen showed the banner no matter how carefully the caller
-filtered the rejection it got back. Both paths now ask the same question before saying
-anything. Microphone failures still come through that event and are still worth showing,
-which is why it is a filter rather than a removed listener. The banner is clickable to
-dismiss, since nothing else clears it until the next attempt.
+**Cancelling a request in the handler is `callback(null)`.** `setDisplayMediaRequestHandler`
+reads `callback({})` as a promise of a video stream that was then broken, not as a refusal:
+it throws *"Video was requested, but no video stream was provided"* inside the handler — an
+unhandled rejection in main — and the renderer's `getDisplayMedia` rejects with the
+unrelated-sounding *"Invalid capture constraints"*. `callback(null)` is the documented
+refusal and rejects with an ordinary permission error instead.
+
+### A share is proven before it is announced
+
+Windows will not capture a minimised window, one running as administrator while the app is
+not, or one that has opted out of capture — and it often does not refuse outright: the
+capture starts and never delivers a frame. Published as-is, that was a share that looked
+live and showed everybody a black box that never filled in. Each new capture now has four
+seconds to produce a first frame on a detached video element before anything is published;
+if it does not, it is stopped and the sharer is told what to try. A capture that delivers
+only black (exclusive-fullscreen games, mostly) is published but warned about. The picker
+flags windows Windows refused to thumbnail, which are almost always the same windows.
+
+Everyone else sees a placeholder from the moment a source is picked, carried on a `screen:
+starting` participant attribute before there is any track to subscribe to, and the tile
+then says it is connecting until the first frame is actually decoded — `loadeddata`, not
+`requestVideoFrameCallback`, which only fires for frames that get composited. Quality is
+picked in the picker (sharp text 1080p15, balanced 1080p30, smooth 720p60), each with its
+own simulcast low layer, and capture is asked for at the rate it is sent: LiveKit's default
+captured 30 frames a second to send 15. `voice-debug.log` records each share's start-up:
+the source, the capture settings, time to first frame and to live, and why it failed.
 
 **`Failed to start capture: -2147024809` in the console is not this.** That is
 `E_INVALIDARG` from Windows Graphics Capture, logged once per window that refuses to be

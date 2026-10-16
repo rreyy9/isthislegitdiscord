@@ -1,5 +1,5 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain, session } from 'electron';
-import type { Streams } from 'electron';
+import type { DesktopCapturerSource, Streams } from 'electron';
 import { appendFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -21,7 +21,7 @@ export type { Binding, Keybind, KeybindAction } from '../keybinds';
  *
  * 1. Screen capture. In Electron `getDisplayMedia` fails unless the main
  *    process answers the request, because there is no built-in picker: the app
- *    is expected to supply one. Ours asks the renderer to show it.
+ *    is expected to supply one. The renderer shows ours before it asks.
  * 2. Keybindings. Electron's `globalShortcut` only reports presses, never
  *    releases, so it physically cannot do hold-to-talk. `uiohook-napi` gives
  *    key-down and key-up from a global hook, which is what "hold" needs — and
@@ -40,15 +40,102 @@ export type { Binding, Keybind, KeybindAction } from '../keybinds';
 export interface ScreenSource {
   id: string;
   name: string;
-  /** Null until the thumbnail pass catches up — see registerScreenShare. */
-  thumbnail: string | null;
   isScreen: boolean;
 }
 
-/** Resolves when the renderer's picker comes back; null means cancelled. */
-let pendingChoice: ((sourceId: string | null) => void) | null = null;
+/**
+ * The renderer chooses first and captures second.
+ *
+ * It used to be the other way round: the renderer called getDisplayMedia, the
+ * request landed in the handler below, and only then did the picker open. That
+ * put the picker inside a call whose options were already fixed, so there was
+ * no way to let somebody pick a quality, and the renderer could not tell
+ * "still choosing" from "capture is starting" -- the two had one promise
+ * between them. Now the renderer asks for the list, shows the picker, says
+ * which source it wants, and only then calls getDisplayMedia, which this
+ * answers straight away with the source it was told about.
+ */
 
-export function registerScreenShare(getWindow: () => BrowserWindow | null) {
+/** What was last listed, so a choice can be turned back into a source. */
+let listed: DesktopCapturerSource[] = [];
+
+/** The renderer's choice, waiting for the getDisplayMedia it is about to make. */
+let selected: { id: string; at: number } | null = null;
+
+/**
+ * Long enough to cover the renderer's round trip into getDisplayMedia, short
+ * enough that a choice nobody acted on cannot answer some later request.
+ */
+const SELECTION_TTL_MS = 15_000;
+
+/**
+ * Thumbnails are the expensive half: asking for them makes desktopCapturer grab
+ * a frame of every open window, which on a busy desktop is seconds. So the pass
+ * is shared and kept briefly -- started when the pointer goes over the share
+ * button, it has usually finished by the time the picker opens.
+ */
+let thumbPass: { at: number; done: Promise<Record<string, string>> } | null =
+  null;
+const THUMB_FRESH_MS = 8_000;
+
+function thumbnails(): Promise<Record<string, string>> {
+  if (thumbPass && Date.now() - thumbPass.at < THUMB_FRESH_MS) {
+    return thumbPass.done;
+  }
+  const done = desktopCapturer
+    .getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 320, height: 180 },
+      fetchWindowIcons: false,
+    })
+    .then((shot) => {
+      const out: Record<string, string> = {};
+      // An empty picture is a window Windows Graphics Capture refused: a
+      // minimised one, one with capture protection, one running as
+      // administrator. Said as '' rather than left out, so the picker can tell
+      // "refused" from "not here yet" -- sharing one of these is the commonest
+      // way for a window share to fail.
+      for (const s of shot) {
+        out[s.id] = s.thumbnail.isEmpty() ? '' : s.thumbnail.toDataURL();
+      }
+      return out;
+    });
+  const pass = { at: Date.now(), done };
+  thumbPass = pass;
+  done.catch(() => {
+    if (thumbPass === pass) thumbPass = null;
+  });
+  return done;
+}
+
+export function registerScreenShare() {
+  // The names and ids are nearly free, so the picker opens on these and the
+  // pictures come from `screen:thumbnails` behind them.
+  ipcMain.handle('screen:sources', async (): Promise<ScreenSource[]> => {
+    listed = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 0, height: 0 },
+      fetchWindowIcons: false,
+    });
+    return listed.map((s) => ({
+      id: s.id,
+      name: s.name,
+      isScreen: s.id.startsWith('screen:'),
+    }));
+  });
+
+  ipcMain.handle('screen:thumbnails', () => thumbnails().catch(() => ({})));
+
+  // Fire and forget: the answer is collected by `screen:thumbnails` later.
+  ipcMain.on('screen:warm', () => {
+    void thumbnails().catch(() => {});
+  });
+
+  ipcMain.handle('screen:select', (_e, sourceId: string) => {
+    selected = { id: sourceId, at: Date.now() };
+    return true;
+  });
+
   session.defaultSession.setDisplayMediaRequestHandler(
     (request, callback) => {
       /**
@@ -65,64 +152,28 @@ export function registerScreenShare(getWindow: () => BrowserWindow | null) {
       const cancel = () => (callback as (s: Streams | null) => void)(null);
 
       void (async () => {
-        const win = getWindow();
-        if (!win) return cancel();
+        const choice = selected;
+        selected = null;
+        if (!choice || Date.now() - choice.at > SELECTION_TTL_MS) {
+          return cancel();
+        }
 
-        // Two passes, because the thumbnails are the whole cost. Asking for
-        // them makes desktopCapturer grab a frame of every open window, which
-        // on a busy desktop is seconds of nothing happening after the button
-        // is clicked. The names and ids are nearly free, so the list goes out
-        // first and the pictures fill in behind it.
-        const sources = await desktopCapturer.getSources({
-          types: ['screen', 'window'],
-          thumbnailSize: { width: 0, height: 0 },
-          fetchWindowIcons: false,
-        });
-
-        // A second request while a picker is open cancels the first.
-        pendingChoice?.(null);
-        win.webContents.send(
-          'screen:choose',
-          sources.map<ScreenSource>((s) => ({
-            id: s.id,
-            name: s.name,
-            thumbnail: null,
-            isScreen: s.id.startsWith('screen:'),
-          })),
-        );
-
-        const chosen = new Promise<string | null>((resolve) => {
-          pendingChoice = resolve;
-        });
-
-        // Deliberately not awaited. Picking a window before its picture has
-        // arrived is an ordinary thing to do, and the choice must not be made
-        // to wait on a pass that exists only to make the list look nicer.
-        void desktopCapturer
-          .getSources({
+        let source = listed.find((s) => s.id === choice.id);
+        if (!source) {
+          const fresh = await desktopCapturer.getSources({
             types: ['screen', 'window'],
-            thumbnailSize: { width: 320, height: 180 },
+            thumbnailSize: { width: 0, height: 0 },
             fetchWindowIcons: false,
-          })
-          .then((shot) => {
-            if (!pendingChoice) return; // already picked, or cancelled
-            const thumbnails: Record<string, string> = {};
-            for (const s of shot) thumbnails[s.id] = s.thumbnail.toDataURL();
-            getWindow()?.webContents.send('screen:thumbnails', thumbnails);
-          })
-          .catch(() => {});
-
-        const chosenId = await chosen;
-        pendingChoice = null;
-
-        const source = sources.find((s) => s.id === chosenId);
+          });
+          source = fresh.find((s) => s.id === choice.id);
+        }
         if (!source) return cancel();
 
         callback({
           video: source,
           // Windows can hand over the system audio mix, which is the whole
           // point when sharing a game. Only whole screens, never single
-          // windows — per-window audio is not a thing the OS offers.
+          // windows: Chromium's loopback is the system mix or nothing.
           //
           // And only when the renderer asked for sound. A share in an AFK room
           // asks for none, because its grant carries none, and handing loopback
@@ -141,11 +192,6 @@ export function registerScreenShare(getWindow: () => BrowserWindow | null) {
     // Our own picker, not the OS one: the OS picker exists on macOS 15+ only.
     { useSystemPicker: false },
   );
-
-  ipcMain.handle('screen:chose', (_e, sourceId: string | null) => {
-    pendingChoice?.(sourceId);
-    return true;
-  });
 }
 
 /* ------------------------------------------------------------- keybindings */
