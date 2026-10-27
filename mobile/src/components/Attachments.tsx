@@ -1,6 +1,6 @@
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Image } from 'expo-image';
+import { Image, type ImageProps } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { absoluteUrl, authHeaders } from '../api';
 import { saveAttachment } from '../download';
@@ -128,7 +128,8 @@ function AttachmentImage({ file }: { file: Attachment }) {
       accessibilityRole="imagebutton"
       accessibilityLabel={file.fileName}
     >
-      <Image
+      <GifAwareImage
+        gif={/^image\/gif$/i.test(file.contentType)}
         style={StyleSheet.absoluteFill}
         source={{ uri, headers: authHeaders() }}
         contentFit="cover"
@@ -143,6 +144,63 @@ function AttachmentImage({ file }: { file: Attachment }) {
         onError={() => setFailed(true)}
       />
     </Pressable>
+  );
+}
+
+/* ------------------------------------------------------------------ gif */
+
+/** How long a GIF plays -- when it first loads, and again on each tap of play. */
+const GIF_PLAY_MS = 10_000;
+
+/**
+ * A picture that, if it is a GIF, plays for a while and then holds still.
+ *
+ * A GIF loops forever by default, and a conversation with a few of them in it
+ * never stops moving. So a GIF plays for `GIF_PLAY_MS`, is stopped where it is,
+ * and gets a play button drawn over it to go again. The button takes its own
+ * taps; the rest of the picture still opens the viewer, which plays it freely.
+ */
+export function GifAwareImage({ gif, onLoad, ...props }: ImageProps & { gif: boolean }) {
+  const image = useRef<Image>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [playing, setPlaying] = useState(true);
+
+  useEffect(() => {
+    if (!gif || !playing || !loaded) return;
+    const timer = setTimeout(() => {
+      void image.current?.stopAnimating();
+      setPlaying(false);
+    }, GIF_PLAY_MS);
+    return () => clearTimeout(timer);
+  }, [gif, playing, loaded]);
+
+  return (
+    <>
+      <Image
+        ref={image}
+        {...props}
+        onLoad={(e) => {
+          setLoaded(true);
+          onLoad?.(e);
+        }}
+      />
+      {gif && !playing && (
+        <View style={styles.gifOverlay} pointerEvents="box-none">
+          <Pressable
+            style={styles.gifPlay}
+            onPress={() => {
+              void image.current?.startAnimating();
+              setPlaying(true);
+            }}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Play GIF"
+          >
+            <Icon name="play" size={20} color="#fff" />
+          </Pressable>
+        </View>
+      )}
+    </>
   );
 }
 
@@ -337,6 +395,23 @@ const styles = StyleSheet.create({
     backgroundColor: theme.surfaceAlt,
   },
   pictureFallback: { height: 220 },
+  gifOverlay: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gifPlay: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   video: {
     marginTop: spacing.sm,
     width: '100%',

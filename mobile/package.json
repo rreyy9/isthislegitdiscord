@@ -1,6 +1,6 @@
 {
   "name": "@isthislegit/mobile",
-  "version": "0.5.0",
+  "version": "0.5.4",
   "private": true,
   "description": "Android client for a self-hosted isthislegit server",
   "main": "expo-router/entry",

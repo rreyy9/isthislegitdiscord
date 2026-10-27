@@ -16,7 +16,7 @@ import {
   tiktokPlayerUrl,
   type Embed,
 } from '../link-utils';
-import { Player } from './Attachments';
+import { GifAwareImage, Player } from './Attachments';
 import { Icon } from './Icon';
 import { useImageViewer } from './ImageViewer';
 import { radius, spacing, theme } from '../theme';
@@ -345,7 +345,8 @@ function LinkedImage({ url }: { url: string }) {
       accessibilityRole="imagebutton"
       accessibilityLabel={fileNameOf(url)}
     >
-      <Image
+      <GifAwareImage
+        gif={/\.gif(\?.*)?$/i.test(url)}
         style={styles.linkedImage}
         source={url}
         contentFit="cover"

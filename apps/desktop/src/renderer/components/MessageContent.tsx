@@ -244,6 +244,102 @@ function LinkedVideo({ url }: { url: string }) {
   );
 }
 
+/* ---------------------------------------------------------------- gifs */
+
+/** How long a GIF plays -- when first seen, and again on each press of play. */
+const GIF_PLAY_MS = 10_000;
+
+const GIF_URL_RE = /\.gif(\?.*)?$/i;
+
+/**
+ * A GIF that plays for a while and then holds still.
+ *
+ * A GIF loops forever by default, and a channel with a few of them in view is
+ * a channel that never stops moving. So each one plays for `GIF_PLAY_MS` and
+ * then the frame it was on is copied onto a canvas, the `<img>` is hidden, and
+ * a play button is drawn over the still to go again.
+ *
+ * The clock starts the first time the GIF is actually on screen rather than
+ * when it mounts: one that arrived while somebody was scrolled up should still
+ * get its run when they come down to it.
+ *
+ * The canvas is only ever drawn on, never read, so a GIF linked from another
+ * site -- which taints the canvas -- stills just as well as an upload.
+ */
+function GifImage({
+  src,
+  alt,
+  lazy,
+  onError,
+  actions,
+}: {
+  src: string;
+  alt: string;
+  lazy?: boolean;
+  onError: () => void;
+  actions: ReturnType<ReturnType<typeof useImageActions>['imageProps']>;
+}) {
+  const img = useRef<HTMLImageElement>(null);
+  const still = useRef<HTMLCanvasElement>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [seen, setSeen] = useState(false);
+  const [playing, setPlaying] = useState(true);
+
+  useEffect(() => {
+    const el = img.current;
+    if (!el || seen) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) setSeen(true);
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [seen]);
+
+  useEffect(() => {
+    if (!playing || !loaded || !seen) return;
+    const timer = setTimeout(() => {
+      const el = img.current;
+      const canvas = still.current;
+      if (!el || !canvas || !el.naturalWidth) return;
+      canvas.width = el.naturalWidth;
+      canvas.height = el.naturalHeight;
+      canvas.getContext('2d')?.drawImage(el, 0, 0);
+      setPlaying(false);
+    }, GIF_PLAY_MS);
+    return () => clearTimeout(timer);
+  }, [playing, loaded, seen]);
+
+  // The viewer and the context menu hang off the wrapper so they work on
+  // whichever of the two is showing; the play button keeps its click to itself.
+  return (
+    <div className="gif" {...actions}>
+      <img
+        ref={img}
+        src={src}
+        alt={alt}
+        loading={lazy ? 'lazy' : undefined}
+        style={playing ? undefined : { display: 'none' }}
+        onLoad={() => setLoaded(true)}
+        onError={onError}
+      />
+      <canvas ref={still} style={playing ? { display: 'none' } : undefined} />
+      {!playing && (
+        <button
+          className="gif-play"
+          title="Play GIF"
+          aria-label="Play GIF"
+          onClick={(e) => {
+            e.stopPropagation();
+            setPlaying(true);
+          }}
+        >
+          ▶
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* -------------------------------------------------------- linked image */
 
 /** An image someone linked to directly, rather than uploaded. */
@@ -257,15 +353,26 @@ function LinkedImage({ url }: { url: string }) {
       </a>
     );
   }
+  const actions = imageProps({ src: url, name: fileNameOf(url) });
   return (
     <div className="embed-img">
-      <img
-        src={url}
-        alt=""
-        loading="lazy"
-        onError={() => setFailed(true)}
-        {...imageProps({ src: url, name: fileNameOf(url) })}
-      />
+      {GIF_URL_RE.test(url) ? (
+        <GifImage
+          src={url}
+          alt=""
+          lazy
+          onError={() => setFailed(true)}
+          actions={actions}
+        />
+      ) : (
+        <img
+          src={url}
+          alt=""
+          loading="lazy"
+          onError={() => setFailed(true)}
+          {...actions}
+        />
+      )}
     </div>
   );
 }
@@ -314,18 +421,26 @@ export function AttachmentImage({ file }: { file: AttachmentDto }) {
       className={'attach' + (src ? '' : ' loading')}
       style={{ aspectRatio: ratio, maxWidth }}
     >
-      {src && (
-        <img
-          src={src}
-          alt={file.fileName}
-          // A fetch that worked and bytes that will not decode is a real
-          // state: a server newer than this build may call something inline
-          // that this one has no idea how to draw, and a silent empty box is
-          // the worst way to say so.
-          onError={() => setFailed(true)}
-          {...imageProps({ src, name: file.fileName })}
-        />
-      )}
+      {src &&
+        (/^image\/gif$/i.test(file.contentType) ? (
+          <GifImage
+            src={src}
+            alt={file.fileName}
+            onError={() => setFailed(true)}
+            actions={imageProps({ src, name: file.fileName })}
+          />
+        ) : (
+          <img
+            src={src}
+            alt={file.fileName}
+            // A fetch that worked and bytes that will not decode is a real
+            // state: a server newer than this build may call something inline
+            // that this one has no idea how to draw, and a silent empty box is
+            // the worst way to say so.
+            onError={() => setFailed(true)}
+            {...imageProps({ src, name: file.fileName })}
+          />
+        ))}
     </div>
   );
 }

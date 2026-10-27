@@ -889,6 +889,20 @@ button { font-family: inherit; cursor: pointer; }
 .embed-img img, .attach img {
   display: block; max-width: 100%; height: auto; cursor: zoom-in;
 }
+/* A GIF plays for a while, then holds still on a canvas with a button to go
+   again. The canvas stands in for the image, so it is sized like one. */
+.gif { position: relative; }
+.gif canvas {
+  display: block; max-width: 100%; height: auto; cursor: zoom-in;
+}
+.gif-play {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 44px; height: 44px; border-radius: 50%; border: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .6); color: #fff; font-size: 16px;
+  cursor: pointer; transition: background .12s;
+}
+.gif-play:hover { background: rgba(0, 0, 0, .8); }
 /* Holds the image's real shape before its bytes arrive, so the list does not
    jump while it loads. */
 .attach.loading { min-height: 60px; }
