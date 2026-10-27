@@ -3,6 +3,9 @@ import {
   IMAGE_EXT_RE,
   URL_RE,
   VIDEO_EXT_RE,
+  parseRedditManifest,
+  redditVideoBase,
+  redditVideoId,
   tiktokErrorLabel,
   tiktokId,
   tiktokPlayerError,
@@ -304,5 +307,106 @@ describe('tiktokErrorLabel', () => {
   it('falls back rather than showing somebody a number', () => {
     // Including for codes TikTok has not published yet.
     expect(tiktokErrorLabel(9999)).toBe('Couldn’t load this one');
+  });
+});
+
+describe('redditVideoId', () => {
+  it('reads the share link', () => {
+    expect(redditVideoId('https://v.redd.it/hhae5v10soxh1')).toBe('hhae5v10soxh1');
+    expect(redditVideoId('https://v.redd.it/hhae5v10soxh1/')).toBe('hhae5v10soxh1');
+  });
+
+  it('reads a link to one of the clip’s own files', () => {
+    expect(redditVideoId('https://v.redd.it/hhae5v10soxh1/CMAF_720.mp4')).toBe(
+      'hhae5v10soxh1',
+    );
+    expect(redditVideoId('https://v.redd.it/hhae5v10soxh1/HLSPlaylist.m3u8')).toBe(
+      'hhae5v10soxh1',
+    );
+  });
+
+  it('ignores other hosts and odd shapes', () => {
+    expect(redditVideoId('https://www.reddit.com/video/hhae5v10soxh1')).toBeNull();
+    expect(redditVideoId('https://v.redd.it.example.com/hhae5v10soxh1')).toBeNull();
+    expect(redditVideoId('https://v.redd.it/')).toBeNull();
+    expect(redditVideoId('https://v.redd.it/HHAE5V10SOXH1')).toBeNull();
+    expect(redditVideoId('https://v.redd.it/abc/def/ghi')).toBeNull();
+    expect(redditVideoId('not a url')).toBeNull();
+  });
+});
+
+describe('redditVideoBase', () => {
+  it('builds from a checked id only', () => {
+    expect(redditVideoBase('hhae5v10soxh1')).toBe('https://v.redd.it/hhae5v10soxh1');
+    expect(redditVideoBase('../evil')).toBeNull();
+  });
+});
+
+/** The shape v.redd.it serves today, trimmed to what the parser reads. */
+const CMAF_MPD = `<MPD>
+  <Period duration="PT15S" id="0">
+    <AdaptationSet contentType="video" id="1" maxHeight="720" maxWidth="720">
+      <Representation bandwidth="63418" height="220" id="5" mimeType="video/mp4" width="220">
+        <BaseURL>CMAF_220.mp4</BaseURL>
+      </Representation>
+      <Representation bandwidth="467073" height="720" id="9" mimeType="video/mp4" width="720">
+        <BaseURL>CMAF_720.mp4</BaseURL>
+      </Representation>
+      <Representation bandwidth="267214" height="480" id="8" mimeType="video/mp4" width="480">
+        <BaseURL>CMAF_480.mp4</BaseURL>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet contentType="audio" id="2">
+      <Representation audioSamplingRate="48000" codecs="mp4a.40.2" id="10" mimeType="audio/mp4">
+        <BaseURL>CMAF_AUDIO_128.mp4</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`;
+
+describe('parseRedditManifest', () => {
+  it('picks the tallest rendition up to 720 and sees the sound', () => {
+    expect(parseRedditManifest(CMAF_MPD)).toEqual({
+      video: 'CMAF_720.mp4',
+      width: 720,
+      height: 720,
+      audio: true,
+    });
+  });
+
+  it('reads an older, soundless manifest with the mime type on the set', () => {
+    const xml = `<MPD><Period>
+      <AdaptationSet mimeType="video/mp4">
+        <Representation height="1080" width="1920"><BaseURL>DASH_1080</BaseURL></Representation>
+        <Representation height="720" width="1280"><BaseURL>DASH_720</BaseURL></Representation>
+      </AdaptationSet>
+    </Period></MPD>`;
+    expect(parseRedditManifest(xml)).toEqual({
+      video: 'DASH_720',
+      width: 1280,
+      height: 720,
+      audio: false,
+    });
+  });
+
+  it('falls back to the shortest when everything is over the cap', () => {
+    const xml = `<AdaptationSet contentType="video">
+      <Representation height="1440" width="1440"><BaseURL>CMAF_1440.mp4</BaseURL></Representation>
+      <Representation height="1080" width="1080"><BaseURL>CMAF_1080.mp4</BaseURL></Representation>
+    </AdaptationSet>`;
+    expect(parseRedditManifest(xml)?.video).toBe('CMAF_1080.mp4');
+  });
+
+  it('refuses file names that could leave the clip’s directory', () => {
+    const xml = `<AdaptationSet contentType="video">
+      <Representation height="720" width="720"><BaseURL>../x.mp4</BaseURL></Representation>
+      <Representation height="480" width="480"><BaseURL>https://evil.example/a.mp4</BaseURL></Representation>
+    </AdaptationSet>`;
+    expect(parseRedditManifest(xml)).toBeNull();
+  });
+
+  it('returns null for something that is not a manifest', () => {
+    expect(parseRedditManifest('<Error>AccessDenied</Error>')).toBeNull();
+    expect(parseRedditManifest('')).toBeNull();
   });
 });

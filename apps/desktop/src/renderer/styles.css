@@ -388,7 +388,7 @@ button { font-family: inherit; cursor: pointer; }
 /* Images on the board are thumbnails: the panel is 420px wide and a full-size
    screenshot would be the only thing in it. */
 .pin-body .attach, .pin-body .embed-img, .pin-body .yt,
-.pin-body .embed-video, .pin-body .attach-video { max-width: 240px; }
+.pin-body .embed-video, .pin-body .attach-video, .pin-body .rv { max-width: 240px; }
 .pin-body .tt { max-width: 160px; }
 .pin-unpin {
   align-self: flex-start; background: none; border: none; color: var(--faint);
@@ -968,6 +968,18 @@ button { font-family: inherit; cursor: pointer; }
 .embed-video video, .attach-video video {
   display: block; width: 100%; max-height: 420px; background: #000;
 }
+/* A v.redd.it clip. The component sets the box to the clip's own shape from
+   its manifest; until that arrives it is a 16:9 placeholder. */
+.rv {
+  margin-top: 6px; position: relative; max-width: 100%; border-radius: 8px;
+  overflow: hidden; background: #000;
+}
+.rv.loading:not([style]) { width: 420px; aspect-ratio: 16 / 9; background: var(--panel2); }
+.rv video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.rv.poster { cursor: pointer; }
+.rv.poster .gif-play { pointer-events: none; }
+.rv.poster:hover .gif-play { background: rgba(0, 0, 0, .8); }
+
 /* The card shown before the bytes are asked for: a video is the largest thing
    anyone sends and nothing is fetched until this is clicked. */
 .attach-video.poster {

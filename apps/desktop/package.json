@@ -1,6 +1,6 @@
 {
   "name": "@isthislegit/desktop",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
@@ -27,6 +27,7 @@
   "dependencies": {
     "@fontsource-variable/nunito": "^5.3.0",
     "electron-updater": "^6.8.9",
+    "hls.js": "^1.7.3",
     "livekit-client": "^2.22.2",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",

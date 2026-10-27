@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import {
   attachmentUrl,
   fetchAttachmentBytes,
@@ -10,6 +10,9 @@ import {
   TIKTOK_PLAYER_ORIGIN,
   URL_RE,
   VIDEO_EXT_RE,
+  parseRedditManifest,
+  redditVideoBase,
+  redditVideoId,
   tiktokErrorLabel,
   tiktokId,
   tiktokPlayerError,
@@ -17,6 +20,7 @@ import {
   tiktokShareUrl,
   youtubeId,
   youtubeStart,
+  type RedditManifest,
 } from '../link-utils';
 import { MENTION_RE } from '../mention-utils';
 import { emojiOnly } from '../emoji-utils';
@@ -240,6 +244,241 @@ function LinkedVideo({ url }: { url: string }) {
   return (
     <div className="embed-video">
       <video src={url} controls preload="none" onError={() => setFailed(true)} />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------- reddit video */
+
+/**
+ * Manifests already asked for, by clip id.
+ *
+ * The promise rather than the answer, so two copies of one link on screen --
+ * or a message re-rendering while the first request is out -- share a fetch.
+ * Bounded like the TikTok cache in main, oldest out first.
+ */
+const redditManifests = new Map<string, Promise<RedditManifest | null>>();
+const REDDIT_CACHE_MAX = 200;
+
+function redditManifest(id: string): Promise<RedditManifest | null> {
+  const cached = redditManifests.get(id);
+  if (cached) return cached;
+
+  const base = redditVideoBase(id);
+  const pending = base
+    ? fetch(`${base}/DASHPlaylist.mpd`)
+        .then((r) => (r.ok ? r.text() : null))
+        .then((xml) => (xml ? parseRedditManifest(xml) : null))
+        .catch(() => null)
+    : Promise.resolve(null);
+
+  if (redditManifests.size >= REDDIT_CACHE_MAX) {
+    const oldest = redditManifests.keys().next().value;
+    if (oldest !== undefined) redditManifests.delete(oldest);
+  }
+  redditManifests.set(id, pending);
+  return pending;
+}
+
+/** The box a clip is drawn in: its own shape, no wider or taller than 420px. */
+function redditBox(m: RedditManifest): CSSProperties {
+  return {
+    aspectRatio: `${m.width} / ${m.height}`,
+    width: Math.min(420, Math.round((420 * m.width) / m.height)),
+  };
+}
+
+/**
+ * A `v.redd.it` clip.
+ *
+ * Reddit serves the picture and the sound as separate files, so the plain MP4
+ * is mute, and which file names exist depends on how old the clip is. The
+ * DASH manifest answers both, and is fetched when the link first comes on
+ * screen -- the same moment a linked image or GIF is fetched, which is the
+ * bargain this embed is offering: a clip with no sound is drawn as a GIF.
+ *
+ * - **No sound:** the picture-only MP4, muted and looping, on the same clock
+ *   as `GifImage` -- it plays for `GIF_PLAY_MS` after first being seen and then
+ *   holds, with a button to go again. A paused `<video>` keeps its frame, so
+ *   there is no canvas here.
+ * - **Sound:** the same MP4 with `preload="metadata"` stands as the poster,
+ *   which costs a ranged request and shows the clip's first frame. Clicking it
+ *   plays the HLS playlist, the one URL that carries picture and sound
+ *   together. Chromium's own HLS support says "maybe" and then fails, so the
+ *   stream goes through hls.js, which is only loaded on that click.
+ *
+ * Anything that goes wrong -- a deleted clip, a manifest that does not parse,
+ * a stream that will not play -- falls back to the plain link, like
+ * `LinkedVideo`.
+ */
+function RedditVideo({ id, url }: { id: string; url: string }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [seen, setSeen] = useState(false);
+  const [manifest, setManifest] = useState<RedditManifest | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el || seen) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) setSeen(true);
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [seen]);
+
+  useEffect(() => {
+    if (!seen) return;
+    let live = true;
+    redditManifest(id).then((m) => {
+      if (!live) return;
+      if (m) setManifest(m);
+      else setFailed(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [seen, id]);
+
+  const base = redditVideoBase(id);
+  if (failed || !base) {
+    return (
+      <a className="link" href={url} onClick={openExternal(url)}>
+        {url}
+      </a>
+    );
+  }
+  if (!manifest) {
+    return <div ref={box} className="rv loading" />;
+  }
+
+  const src = `${base}/${manifest.video}`;
+  return manifest.audio ? (
+    <RedditStream
+      src={src}
+      playlist={`${base}/HLSPlaylist.m3u8`}
+      style={redditBox(manifest)}
+      onError={() => setFailed(true)}
+    />
+  ) : (
+    <RedditLoop src={src} style={redditBox(manifest)} onError={() => setFailed(true)} />
+  );
+}
+
+/** A clip with no sound, played like a GIF. See `RedditVideo`. */
+function RedditLoop({
+  src,
+  style,
+  onError,
+}: {
+  src: string;
+  style: CSSProperties;
+  onError: () => void;
+}) {
+  const video = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(true);
+
+  // The manifest was only fetched once the box was on screen, so the clock can
+  // start as soon as this mounts.
+  useEffect(() => {
+    const el = video.current;
+    if (!el) return;
+    if (!playing) {
+      el.pause();
+      return;
+    }
+    el.play().catch(() => {});
+    const timer = setTimeout(() => setPlaying(false), GIF_PLAY_MS);
+    return () => clearTimeout(timer);
+  }, [playing]);
+
+  return (
+    <div className="rv" style={style}>
+      <video ref={video} src={src} muted loop playsInline onError={onError} />
+      {!playing && (
+        <button
+          className="gif-play"
+          title="Play"
+          aria-label="Play"
+          onClick={() => setPlaying(true)}
+        >
+          ▶
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** A clip with sound: a still until clicked, then the HLS stream. */
+function RedditStream({
+  src,
+  playlist,
+  style,
+  onError,
+}: {
+  src: string;
+  playlist: string;
+  style: CSSProperties;
+  onError: () => void;
+}) {
+  const stream = useRef<HTMLVideoElement>(null);
+  const [state, setState] = useState<'poster' | 'loading' | 'playing'>('poster');
+  const started = state !== 'poster';
+
+  // Runs once, on the click. The stream element is already mounted by then --
+  // `started` swaps it in -- and hls.js is handed it to drive. React never sets
+  // that element's `src`, so nothing here fights hls.js for it.
+  useEffect(() => {
+    if (!started) return;
+    let live = true;
+    let hls: { destroy(): void } | null = null;
+
+    import('hls.js').then(({ default: Hls }) => {
+      const el = stream.current;
+      if (!live || !el) return;
+      if (!Hls.isSupported()) {
+        onError();
+        return;
+      }
+      // No worker: hls.js starts one from a blob: URL, which the page's CSP
+      // does not allow, and these clips are short enough not to need it.
+      // `capLevelToPlayerSize` keeps a 420px box from pulling 1080p.
+      const player = new Hls({ enableWorker: false, capLevelToPlayerSize: true });
+      hls = player;
+      player.on(Hls.Events.ERROR, (_e, data) => {
+        if (data.fatal) onError();
+      });
+      player.loadSource(playlist);
+      player.attachMedia(el);
+      el.play().catch(() => {});
+      setState('playing');
+    }, onError);
+
+    return () => {
+      live = false;
+      hls?.destroy();
+    };
+    // `onError` is a fresh closure each render and changes nothing about what
+    // this effect does.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [started, playlist]);
+
+  if (started) {
+    return (
+      <div className={'rv' + (state === 'loading' ? ' loading' : '')} style={style}>
+        <video key="stream" ref={stream} controls playsInline />
+      </div>
+    );
+  }
+
+  return (
+    <div className="rv poster" style={style} onClick={() => setState('loading')} title="Play">
+      {/* The picture-only file as the poster: a ranged request for its first
+          frame, so the still is the clip rather than a black box. */}
+      <video key="poster" src={`${src}#t=0.1`} preload="metadata" muted playsInline />
+      <div className="gif-play" aria-hidden>
+        ▶
+      </div>
     </div>
   );
 }
@@ -768,6 +1007,7 @@ export function MessageContent({
       // A share link has no id yet; the component goes and gets one if it is
       // ever clicked. Either way it is the same poster.
       const ttShare = yt || tt ? null : tiktokShareUrl(url);
+      const rv = yt || tt || ttShare ? null : redditVideoId(url);
       if (yt) {
         embeds.push(<YouTube key={`y${key}`} id={yt} start={youtubeStart(url)} />);
       } else if (tt || ttShare) {
@@ -776,6 +1016,10 @@ export function MessageContent({
         embeds.push(
           <TikTok key={`t${key}:${url}`} id={tt} shareUrl={ttShare} url={url} />,
         );
+      } else if (rv) {
+        // Ahead of the extension checks: a link to one of a clip's own files
+        // ends in .mp4 and would otherwise play as a mute linked video.
+        embeds.push(<RedditVideo key={`r${key}:${url}`} id={rv} url={url} />);
       } else if (IMAGE_EXT_RE.test(url)) {
         embeds.push(<LinkedImage key={`i${key}`} url={url} />);
       } else if (VIDEO_EXT_RE.test(url)) {

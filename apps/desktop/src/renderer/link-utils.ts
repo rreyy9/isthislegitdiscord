@@ -72,6 +72,103 @@ export function youtubeStart(url: string): number | null {
   return Number(hours ?? 0) * 3600 + Number(minutes ?? 0) * 60 + Number(seconds ?? 0);
 }
 
+/* -------------------------------------------------------- reddit video */
+
+/**
+ * The id out of a `v.redd.it` link, or null.
+ *
+ * `v.redd.it/<id>` is what Reddit's share button hands out. A link straight to
+ * one of the files under it (`v.redd.it/<id>/CMAF_720.mp4`) is matched too,
+ * because that file is picture only -- Reddit keeps the sound in a file of its
+ * own -- and played as an ordinary linked video it would be silently mute.
+ *
+ * A `reddit.com/r/.../comments/...` post link is not matched. Getting from one
+ * of those to a video id means asking reddit.com, which refuses requests that
+ * do not come from a signed-in browser.
+ *
+ * The id is lowercase letters and digits, 13 of them today, and is checked
+ * rather than assumed: it is interpolated into the URLs this app fetches.
+ */
+export function redditVideoId(url: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.hostname.toLowerCase() !== 'v.redd.it') return null;
+  const m = u.pathname.match(/^\/([a-z0-9]{6,20})(?:\/[\w.-]*)?$/);
+  return m ? m[1] : null;
+}
+
+/** Where a clip's files live. Built from a checked id only. */
+export function redditVideoBase(id: string): string | null {
+  return /^[a-z0-9]{6,20}$/.test(id) ? `https://v.redd.it/${id}` : null;
+}
+
+/** What `DASHPlaylist.mpd` says about a clip. */
+export interface RedditManifest {
+  /** File name of the picture-only MP4 to show, relative to the clip's base. */
+  video: string;
+  width: number;
+  height: number;
+  /** Whether the clip has a sound track at all. */
+  audio: boolean;
+}
+
+/** The tallest rendition worth fetching for a box no bigger than 420px. */
+const REDDIT_MAX_HEIGHT = 720;
+
+/**
+ * Read the parts of a clip's DASH manifest that decide how it is drawn.
+ *
+ * The manifest is the only reliable way to know the file names: they have been
+ * `DASH_720`, then `DASH_720.mp4`, and are `CMAF_720.mp4` today, and the old
+ * names 403 on new clips. It also says whether there is any sound, which is
+ * what separates a clip that loops like a GIF from one that waits for a click.
+ *
+ * String matching rather than an XML parser, so it runs the same under test as
+ * in the renderer. The manifest is a few kilobytes of a fixed shape and only a
+ * handful of attributes are read. Every file name is checked before it is
+ * returned: it came from somebody else's server and is about to become part of
+ * a URL.
+ */
+export function parseRedditManifest(xml: string): RedditManifest | null {
+  const sets = xml.split(/<AdaptationSet\b/).slice(1);
+  let audio = false;
+  let best: { video: string; width: number; height: number } | null = null;
+
+  for (const set of sets) {
+    const head = set.slice(0, set.indexOf('>'));
+    if (/contentType="audio"|mimeType="audio\//.test(set)) {
+      audio = true;
+      continue;
+    }
+    const setIsVideo = /contentType="video"|mimeType="video\//.test(head);
+
+    for (const rep of set.split(/<Representation\b/).slice(1)) {
+      const attrs = rep.slice(0, rep.indexOf('>'));
+      if (!setIsVideo && !/mimeType="video\//.test(attrs)) continue;
+
+      const width = Number(attrs.match(/\bwidth="(\d+)"/)?.[1]);
+      const height = Number(attrs.match(/\bheight="(\d+)"/)?.[1]);
+      const video = rep.match(/<BaseURL>\s*([^<\s]+)\s*<\/BaseURL>/)?.[1];
+      if (!width || !height || !video) continue;
+      if (!/^[A-Za-z0-9_]{1,40}(\.mp4)?$/.test(video)) continue;
+
+      // The tallest that fits under the cap; failing that, the shortest.
+      const fits = height <= REDDIT_MAX_HEIGHT;
+      const better =
+        !best ||
+        (fits
+          ? best.height > REDDIT_MAX_HEIGHT || height > best.height
+          : best.height > REDDIT_MAX_HEIGHT && height < best.height);
+      if (better) best = { video, width, height };
+    }
+  }
+  return best ? { ...best, audio } : null;
+}
+
 /* ------------------------------------------------------------- tiktok */
 
 /**
