@@ -1,6 +1,7 @@
 import { io, type Socket } from 'socket.io-client';
 import { getClientVersion, getServerUrl, getToken } from './api';
-import type { MessageDto, PublicUserDto } from './api';
+import type { DirectMessageDto, MessageDto, PublicUserDto } from './api';
+import { unsealMessage } from './e2e';
 import type {
   PartyAck,
   WatchPartyActionName,
@@ -123,6 +124,12 @@ export interface SocketEvents {
    */
   onUpdateAvailable: (p: { version: string }) => void;
   /**
+   * One of your DMs changed: a message in it (already decrypted), or -- with
+   * `message` null -- it was opened, or its people or name changed. Only ever
+   * sent to the people in it.
+   */
+  onDmMessage: (p: { dm: DirectMessageDto; message: MessageDto | null }) => void;
+  /**
    * The server is on its way down to be updated, and will be back in a few
    * seconds. Arrives immediately before the disconnect, not instead of it --
    * the reconnect that follows is the ordinary one, and everything already
@@ -188,8 +195,18 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('disconnect', () => events.onStatus('disconnected'));
   socket.io.on('reconnect_attempt', () => events.onStatus('connecting'));
 
-  socket.on('message:new', events.onMessage);
-  socket.on('message:updated', events.onMessageUpdated);
+  // Through one queue, so a DM message that takes a moment to decrypt cannot
+  // be overtaken by the one sent after it.
+  socket.on('message:new', (m: MessageDto) => inOrder(unsealMessage(m), events.onMessage));
+  socket.on('message:updated', (m: MessageDto) =>
+    inOrder(unsealMessage(m), events.onMessageUpdated),
+  );
+  socket.on('dm:message', (p: { dm: DirectMessageDto; message: MessageDto | null }) =>
+    inOrder(
+      p.message ? unsealMessage(p.message).then((message) => ({ ...p, message })) : Promise.resolve(p),
+      events.onDmMessage,
+    ),
+  );
   socket.on('message:deleted', events.onMessageDeleted);
   socket.on('channel:activity', events.onChannelActivity);
   socket.on('member:updated', events.onMemberUpdated);
@@ -220,6 +237,13 @@ export function connectSocket(events: SocketEvents): Socket {
  * and the current transport -- and a wrapper around those would be a second
  * copy of the same state, kept in step by hand.
  */
+let queue: Promise<void> = Promise.resolve();
+
+/** Hand each result over in the order the events arrived. */
+function inOrder<T>(work: Promise<T>, deliver: (value: T) => void) {
+  queue = queue.then(() => work.then(deliver)).catch(() => undefined);
+}
+
 export function getSocket(): Socket | null {
   return socket;
 }
@@ -313,6 +337,7 @@ export function idleEvents(): SocketEvents {
     onTyping: ignore,
     onVoiceParticipants: ignore,
     onUpdateAvailable: ignore,
+    onDmMessage: ignore,
     onServerRestarting: ignore,
     onPartyState: ignore,
     onPartyEnded: ignore,

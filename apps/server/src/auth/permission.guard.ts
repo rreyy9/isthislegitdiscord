@@ -56,6 +56,43 @@ const ADMIN_ONLY: ReadonlySet<Action> = new Set<Action>([
 ]);
 
 /**
+ * What a participant may do in a direct message. Everything else is refused,
+ * whoever asks -- including a guild admin.
+ *
+ * Moderation is missing on purpose. A DM is not the server's furniture the way
+ * a channel is, and an admin who could delete or read messages in other
+ * people's conversations would make "private" a word on a label. What an admin
+ * can still do is remove somebody from the guild, which ends their ability to
+ * send (see `WRITE_IN_DM`) without touching the history.
+ *
+ * Pinning is in, for the other reason `message.pin` is its own name: in a
+ * channel it puts something in front of everybody, and in a DM "everybody" is
+ * the two people already in it.
+ */
+const DM_ACTIONS: ReadonlySet<Action> = new Set<Action>([
+  'channel.read',
+  'channel.write',
+  'message.react',
+  'message.pin',
+]);
+
+/**
+ * The DM actions that need the two people to still share a guild. Reading
+ * does not: somebody who was kicked keeps the history of what was said to
+ * them, and so does the person who is still here.
+ */
+const WRITE_IN_DM: ReadonlySet<Action> = new Set<Action>([
+  'channel.write',
+  'message.react',
+  'message.pin',
+]);
+
+/** The key that makes a one-to-one DM unique: both ids, in a fixed order. */
+export function dmKeyOf(a: string, b: string): string {
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+/**
  * No action is denied by a mute, and that is the rule rather than an omission.
  *
  * A mute takes away the microphone and nothing else — see `MuteMemberInput` in
@@ -109,7 +146,45 @@ export class PermissionService {
       select: { guildId: true },
     });
     if (!channel) return false;
+    // No guild means a DM. Answered by its own rules rather than falling
+    // through, though falling through would also refuse: `canInGuild` finds no
+    // membership in a guild that is not there.
+    if (channel.guildId === null) return this.canInDm(userId, channelId, action);
     return this.canInGuild(userId, channel.guildId, action);
+  }
+
+  /**
+   * Participant or nothing, and only the actions a DM has.
+   *
+   * Writing also needs somebody to write to. In a one-to-one DM that is the
+   * other person still sharing a guild with you; in a group it is at least one
+   * of the others. Without it, being kicked would leave a back door into the
+   * inbox of everybody you had ever messaged.
+   */
+  async canInDm(userId: string, channelId: string, action: Action) {
+    if (!DM_ACTIONS.has(action)) return false;
+    const participants = await this.prisma.channelParticipant.findMany({
+      where: { channelId },
+      select: { userId: true },
+    });
+    if (!participants.some((p) => p.userId === userId)) return false;
+    if (!WRITE_IN_DM.has(action)) return true;
+
+    const others = participants.map((p) => p.userId).filter((id) => id !== userId);
+    for (const other of others) {
+      if (await this.sharesGuild(userId, other)) return true;
+    }
+    return false;
+  }
+
+  /** Whether two people are both members of at least one guild. */
+  async sharesGuild(a: string, b: string): Promise<boolean> {
+    if (a === b) return true;
+    const shared = await this.prisma.guildMember.findFirst({
+      where: { userId: a, guild: { members: { some: { userId: b } } } },
+      select: { id: true },
+    });
+    return shared !== null;
   }
 
   /**
@@ -129,7 +204,8 @@ export class PermissionService {
       where: { id: channelId },
       select: { guildId: true },
     });
-    if (!channel) return null;
+    // A DM has no voice of its own yet, and no guild to have muted anyone in.
+    if (!channel?.guildId) return null;
     return this.mutedUntilInGuild(userId, channel.guildId);
   }
 }

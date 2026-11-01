@@ -21,6 +21,7 @@ import { MentionsModule } from './mentions/mentions.module';
 import { ChannelsModule } from './channels/channels.module';
 import { WatchPartyModule } from './watchparty/watch-party.module';
 import { SearchController } from './search/search.controller';
+import { DmsModule } from './dms/dms.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { SearchController } from './search/search.controller';
     MentionsModule,
     ChannelsModule,
     WatchPartyModule,
+    DmsModule,
   ],
   controllers: [
     AppController,

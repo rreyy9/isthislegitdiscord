@@ -346,6 +346,12 @@ export class AdminController {
 
   @Get('channels/:id/messages')
   async recentMessages(@Param('id') id: string) {
+    const channel = await this.prisma.channel.findUnique({
+      where: { id },
+      select: { guildId: true },
+    });
+    // A DM is not the server's to look into, and its text is sealed anyway.
+    if (!channel?.guildId) throw new NotFoundException('No such channel.');
     const rows = await this.prisma.message.findMany({
       where: { channelId: id },
       include: { author: { select: { username: true } } },
@@ -363,6 +369,17 @@ export class AdminController {
 
   @Delete('messages/:id')
   async deleteMessage(@CurrentUser() admin: SessionUser, @Param('id') id: string) {
+    // Not a DM's. Nobody moderates those, the operator included -- and the
+    // deletion below is announced to everyone, which for a DM would say that
+    // a private conversation exists.
+    const target = await this.prisma.message.findUnique({
+      where: { id },
+      select: { channel: { select: { guildId: true } } },
+    });
+    if (!target) throw new NotFoundException('No such message.');
+    if (target.channel.guildId === null) {
+      throw new ForbiddenException('Messages in direct messages cannot be moderated.');
+    }
     const row = await this.prisma.message.update({
       where: { id },
       data: { deletedAt: new Date(), deletedById: admin.id },

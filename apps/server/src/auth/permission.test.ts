@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { PrismaService } from '../prisma/prisma.service';
-import { type Action, type Membership, PermissionService, isMuted } from './permission.guard';
+import {
+  type Action,
+  type Membership,
+  PermissionService,
+  dmKeyOf,
+  isMuted,
+} from './permission.guard';
 
 /**
  * A stand-in for Prisma holding two rows in memory.
@@ -163,5 +169,88 @@ describe('mutedUntil', () => {
     expect(await p.mutedUntilInGuild('clear', 'g1')).toBeNull();
     expect(await p.mutedUntilInChannel('muted', 'c1')).toEqual(until);
     expect(await p.mutedUntilInChannel('muted', 'nope')).toBeNull();
+  });
+});
+
+describe('direct messages', () => {
+  /**
+   * A DM is a channel with no guild and a list of participants. Sharing a
+   * guild is faked as a set of pairs, since that is all `sharesGuild` asks.
+   */
+  function dmService(opts: {
+    participants: Record<string, string[]>;
+    shared: [string, string][];
+    admins?: string[];
+  }) {
+    const shares = (a: string, b: string) =>
+      opts.shared.some(([x, y]) => (x === a && y === b) || (x === b && y === a));
+    const prisma = {
+      channel: {
+        findUnique: async ({ where }: any) =>
+          opts.participants[where.id] ? { guildId: null } : null,
+      },
+      channelParticipant: {
+        findMany: async ({ where }: any) =>
+          (opts.participants[where.channelId] ?? []).map((userId) => ({ userId })),
+      },
+      guildMember: {
+        findUnique: async ({ where }: any) =>
+          opts.admins?.includes(where.guildId_userId.userId)
+            ? { role: 'ADMIN', mutedUntil: null }
+            : null,
+        findFirst: async ({ where }: any) =>
+          shares(where.userId, where.guild.members.some.userId) ? { id: 'm' } : null,
+      },
+    } as unknown as PrismaService;
+    return new PermissionService(prisma);
+  }
+
+  it('lets the participants read and write', async () => {
+    const p = dmService({ participants: { dm: ['a', 'b'] }, shared: [['a', 'b']] });
+    expect(await p.canInChannel('a', 'dm', 'channel.read')).toBe(true);
+    expect(await p.canInChannel('b', 'dm', 'channel.write')).toBe(true);
+    expect(await p.canInChannel('a', 'dm', 'message.pin')).toBe(true);
+  });
+
+  it('refuses everybody else, admins included', async () => {
+    const p = dmService({
+      participants: { dm: ['a', 'b'] },
+      shared: [['a', 'b'], ['a', 'admin']],
+      admins: ['admin'],
+    });
+    expect(await p.canInChannel('admin', 'dm', 'channel.read')).toBe(false);
+    expect(await p.canInChannel('admin', 'dm', 'message.moderate')).toBe(false);
+  });
+
+  it('has no moderation, even for the people in it', async () => {
+    const p = dmService({ participants: { dm: ['a', 'b'] }, shared: [['a', 'b']] });
+    expect(await p.canInChannel('a', 'dm', 'message.moderate')).toBe(false);
+    expect(await p.canInChannel('a', 'dm', 'voice.join')).toBe(false);
+    expect(await p.canInChannel('a', 'dm', 'channel.manage')).toBe(false);
+  });
+
+  it('keeps the history readable but stops sending once they share no guild', async () => {
+    const p = dmService({ participants: { dm: ['a', 'b'] }, shared: [] });
+    expect(await p.canInChannel('a', 'dm', 'channel.read')).toBe(true);
+    expect(await p.canInChannel('a', 'dm', 'channel.write')).toBe(false);
+    expect(await p.canInChannel('a', 'dm', 'message.react')).toBe(false);
+  });
+
+  it('lets a group carry on when one person has gone', async () => {
+    const p = dmService({
+      participants: { g: ['a', 'b', 'c'] },
+      shared: [['a', 'b']],
+    });
+    expect(await p.canInChannel('a', 'g', 'channel.write')).toBe(true);
+    // c shares a guild with nobody in it: reading, yes; writing, no.
+    expect(await p.canInChannel('c', 'g', 'channel.read')).toBe(true);
+    expect(await p.canInChannel('c', 'g', 'channel.write')).toBe(false);
+  });
+});
+
+describe('dmKeyOf', () => {
+  it('is the same whichever way round it is asked', () => {
+    expect(dmKeyOf('b', 'a')).toBe(dmKeyOf('a', 'b'));
+    expect(dmKeyOf('a', 'b')).toBe('a:b');
   });
 });

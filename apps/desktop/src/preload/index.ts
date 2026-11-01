@@ -148,6 +148,11 @@ const bridge = {
   getToken: (): Promise<string> => ipcRenderer.invoke('token:get'),
   setToken: (token: string): Promise<boolean> =>
     ipcRenderer.invoke('token:set', token),
+  /** This device's end-to-end private keys for one account, as JSON, or null. */
+  getE2eIdentity: (userId: string): Promise<string | null> =>
+    ipcRenderer.invoke('e2e:get', userId),
+  setE2eIdentity: (userId: string, json: string): Promise<boolean> =>
+    ipcRenderer.invoke('e2e:set', userId, json),
 
   /* ---------------------------------------------------------- title bar */
 

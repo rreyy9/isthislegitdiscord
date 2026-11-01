@@ -27,6 +27,7 @@ export function MemberCard({
   anchor,
   now,
   voiceChannel,
+  onMessage,
   onMouseEnter,
   onMouseLeave,
 }: {
@@ -36,6 +37,8 @@ export function MemberCard({
   now: number;
   /** Name of the voice channel they are in, or null. */
   voiceChannel: string | null;
+  /** Open a DM with them. Absent on your own card. */
+  onMessage?: () => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
@@ -130,6 +133,11 @@ export function MemberCard({
           </Row>
         )}
       </dl>
+      {onMessage && (
+        <button className="mc-message" onClick={onMessage}>
+          Message
+        </button>
+      )}
     </div>
   );
 }

@@ -52,7 +52,9 @@ export class MentionsService {
       where: { id: channelId },
       select: { guildId: true },
     });
-    if (!channel) return [];
+    // A DM has no tags: every message in one is already addressed to the
+    // other person, and the DM badge is what says so.
+    if (!channel?.guildId) return [];
 
     const members = await this.prisma.guildMember.findMany({
       where: { guildId: channel.guildId, userId: { in: claimed } },

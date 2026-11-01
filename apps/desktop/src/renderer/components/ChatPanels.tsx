@@ -361,6 +361,8 @@ export function MembersPanel({
   onKick,
   onBan,
   voiceChannelOf,
+  meId,
+  onMessage,
 }: {
   members: MemberDto[];
   /** Ticks once a minute, so the "last seen" durations do not go stale. */
@@ -378,6 +380,10 @@ export function MembersPanel({
   onBan: (m: MemberDto) => void;
   /** Name of the voice channel somebody is in, for their profile card. */
   voiceChannelOf: (userId: string) => string | null;
+  /** Who is looking, so their own card offers no "Message" button. */
+  meId: string;
+  /** Open a direct message with somebody, from their card. */
+  onMessage: (userId: string) => void;
 }) {
   const [card, setCard] = useState<OpenCard | null>(null);
   const openTimer = useRef<number | null>(null);
@@ -585,6 +591,14 @@ export function MembersPanel({
           anchor={card.anchor}
           now={now}
           voiceChannel={voiceChannelOf(card.userId)}
+          onMessage={
+            card.userId === meId
+              ? undefined
+              : () => {
+                  setCard(null);
+                  onMessage(card.userId);
+                }
+          }
           onMouseEnter={() => {
             if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
             closeTimer.current = null;

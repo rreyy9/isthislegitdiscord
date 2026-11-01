@@ -2047,3 +2047,90 @@ button { font-family: inherit; cursor: pointer; }
   font-weight: 700; color: var(--accent); word-break: normal;
 }
 .ovr-foot button.link:disabled { color: var(--faint); cursor: default; }
+
+/* ------------------------------------------------------ direct messages */
+/*
+ * Its own block under the server's channels, with its own scroll. The
+ * channels keep their place however many conversations pile up here: past
+ * about two fifths of the sidebar this list scrolls by itself, and while it is
+ * short it takes only the room it needs.
+ */
+.sidebar .sb-scroll { min-height: 120px; }
+.dm-section {
+  flex: 0 1 auto; max-height: 42%; min-height: 0;
+  display: flex; flex-direction: column;
+  border-top: 1px solid var(--line); padding: 0 8px 6px;
+}
+.dm-head { flex: none; }
+.dm-section .dm-head .sb-add { opacity: .7; }
+.dm-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.dm-empty {
+  width: 100%; text-align: left; background: none; border: 1px dashed var(--line);
+  color: var(--faint); font-size: 13px; padding: 7px 9px; border-radius: 6px; cursor: pointer;
+}
+.dm-empty:hover { color: var(--text); border-color: var(--panel3); }
+.dm-row { gap: 9px; }
+.dm-avatar { position: relative; flex: none; display: flex; }
+/* Ringed in the sidebar's colour, like the card's dot is ringed in the card's. */
+.dm-dot {
+  position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px;
+  border-radius: 50%; border: 2px solid var(--bg2);
+}
+.dm-dot.on { background: var(--ok); }
+.dm-dot.away { background: var(--warn); }
+.dm-dot.off { background: var(--faint); }
+.dm-group-icon {
+  width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--panel3); color: var(--text); font-size: 10px; font-weight: 700;
+}
+.dm-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-row .ping-badge, .dm-row .unread-dot { margin-left: 0; }
+.dm-close {
+  background: none; border: 0; color: var(--faint); font-size: 15px; line-height: 1;
+  padding: 0 2px; cursor: pointer; opacity: 0;
+}
+.dm-row:hover .dm-close, .dm-close:focus-visible { opacity: 1; }
+.dm-close:hover { color: var(--text); }
+
+.e2e-chip {
+  font-size: 11px; font-weight: 500; color: var(--ok); white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--ok) 45%, transparent);
+  border-radius: 9px; padding: 1px 8px; cursor: help;
+}
+.dm-actions { display: flex; gap: 6px; margin-left: 6px; }
+.dm-actions button {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+  font-size: 12px; font-weight: 500; padding: 3px 9px; border-radius: 6px;
+}
+.dm-actions button:hover { color: var(--text); background: var(--panel3); }
+.dm-actions button.danger:hover { color: var(--on-bad); background: var(--bad); border-color: var(--bad); }
+.dm-notice {
+  margin: 8px 18px 0; padding: 7px 11px; border-radius: 6px; font-size: 12.5px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 60%, transparent); color: var(--text);
+}
+.sealed-error { color: var(--faint); font-style: italic; font-size: 13.5px; }
+
+.dm-pick-search {
+  width: 100%; box-sizing: border-box; background: var(--bg); border: 1px solid var(--line);
+  color: var(--text); padding: 8px 10px; border-radius: 6px; font: inherit; font-size: 13.5px;
+  outline: none;
+}
+.dm-pick-search:focus { border-color: var(--accent); }
+.dm-pick-list {
+  margin-top: 10px; max-height: 260px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.modal label.dm-pick {
+  display: flex; align-items: center; gap: 9px; margin: 0; padding: 6px 8px;
+  border-radius: 6px; color: var(--text); font-size: 13.5px; cursor: pointer;
+}
+.modal label.dm-pick:hover, .modal label.dm-pick.on { background: var(--panel2); }
+.dm-pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-pick-user { color: var(--faint); font-size: 12px; }
+
+.mc-message {
+  margin-top: 12px; width: 100%; background: var(--accent); color: var(--on-accent);
+  border: 0; border-radius: 6px; padding: 7px; font-weight: 700; font-size: 13px; cursor: pointer;
+}
+.mc-message:hover { filter: brightness(1.08); }

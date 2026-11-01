@@ -20,6 +20,7 @@ import {
 import type {
   ClientPlatform,
   ConnectedClient,
+  DirectMessage,
   Message,
   PublicUser,
   WatchPartyAction,
@@ -523,6 +524,10 @@ export class ChatGateway
     @MessageBody() body: { channelId: string },
   ) {
     const { userId } = socket.data as SocketData;
+    // Only from a socket that is in the room, which `channel:join` let it into
+    // only after asking `channel.read`. Without this anybody holding a DM's id
+    // could make themselves appear to be typing in it.
+    if (!socket.rooms.has(`channel:${body.channelId}`)) return;
     this.markActive(userId);
     socket.to(`channel:${body.channelId}`).emit('typing:changed', {
       channelId: body.channelId,
@@ -537,6 +542,7 @@ export class ChatGateway
     @MessageBody() body: { channelId: string },
   ) {
     const { userId } = socket.data as SocketData;
+    if (!socket.rooms.has(`channel:${body.channelId}`)) return;
     socket.to(`channel:${body.channelId}`).emit('typing:changed', {
       channelId: body.channelId,
       userId,
@@ -575,7 +581,7 @@ export class ChatGateway
       where: { id: channelId },
       select: { guildId: true, listenOnly: true },
     });
-    if (!channel || channel.listenOnly) return;
+    if (!channel?.guildId || channel.listenOnly) return;
     const member = await this.prisma.guildMember.findUnique({
       where: { guildId_userId: { guildId: channel.guildId, userId } },
       select: { mutedUntil: true },
@@ -849,13 +855,37 @@ export class ChatGateway
    * second emit nothing tells it another channel has something new, and the
    * unread dot there stays dark until the next launch. Ids only, like a
    * deletion, so it carries nothing a reader of that channel would not see.
+   *
+   * Except in a DM, where `privateTo` names the participants and the fact
+   * goes to them alone. "Something was just said in a conversation you are
+   * not in" is itself what a DM is supposed to keep to itself.
    */
-  broadcastMessage(message: Message) {
+  broadcastMessage(message: Message, privateTo?: string[]) {
     this.server.to(`channel:${message.channelId}`).emit('message:new', message);
-    this.server.emit('channel:activity', {
+    this.audience(privateTo).emit('channel:activity', {
       channelId: message.channelId,
       messageId: message.id,
     });
+  }
+
+  /**
+   * Everyone, or only these people's `user:` rooms. The one switch between a
+   * guild channel's reach and a DM's, so the two cannot be got wrong
+   * separately in each broadcast that needs it.
+   */
+  private audience(privateTo?: string[]) {
+    if (!privateTo) return this.server;
+    // An empty list must reach nobody, not fall back to everybody.
+    if (privateTo.length === 0) return this.server.to('nobody');
+    return this.server.to(privateTo.map((id) => `user:${id}`));
+  }
+
+  /**
+   * One DM, as one participant sees it. To their `user:` room so every window
+   * they have open hears it -- see `dm:message` in shared.
+   */
+  notifyDm(userId: string, payload: { dm: DirectMessage; message: Message | null }) {
+    this.server.to(`user:${userId}`).emit('dm:message', payload);
   }
 
   broadcastMessageUpdated(message: Message) {
@@ -897,10 +927,12 @@ export class ChatGateway
    * Deletion goes to everyone, not just the channel room: a client only joins
    * the room for the channel it is looking at, and a message deleted in
    * another channel still has to disappear from whatever that client has
-   * cached. The payload carries no content, so this leaks nothing.
+   * cached. The payload carries no content, so this leaks nothing -- except,
+   * for a DM, that the conversation exists and just changed, which is why
+   * `privateTo` keeps that one to its participants.
    */
-  broadcastMessageDeleted(id: string, channelId: string) {
-    this.server.emit('message:deleted', { id, channelId });
+  broadcastMessageDeleted(id: string, channelId: string, privateTo?: string[]) {
+    this.audience(privateTo).emit('message:deleted', { id, channelId });
   }
 
   /**

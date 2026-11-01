@@ -53,6 +53,7 @@ export const refSelect = {
     createdAt: true,
     editedAt: true,
     deletedAt: true,
+    sealed: true,
     author: authorSelect,
     attachments: attachmentSelect,
   },
@@ -125,6 +126,7 @@ export function toRefDto(row: any): MessageRef | null {
     editedAt: row.editedAt ? row.editedAt.toISOString() : null,
     attachments: deleted ? [] : (row.attachments ?? []).map(toAttachmentDto),
     deleted,
+    sealed: deleted ? null : (row.sealed ?? null),
   };
 }
 
@@ -160,6 +162,7 @@ export function toDto(row: any): Message {
       image: row.author.image ?? null,
     },
     content: row.content,
+    sealed: row.sealed ?? null,
     createdAt: row.createdAt.toISOString(),
     editedAt: row.editedAt ? row.editedAt.toISOString() : null,
     deletedAt: row.deletedAt ? row.deletedAt.toISOString() : null,

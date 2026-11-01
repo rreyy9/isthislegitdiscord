@@ -128,6 +128,10 @@ export class SearchController {
    *
    * Membership is the whole test, as everywhere else. Voice channels are left
    * out because they hold no messages to find.
+   *
+   * Never a DM, not even your own. DM messages are end-to-end encrypted, so
+   * there is no text here to match -- and the `guild` condition is what keeps
+   * them out, since a DM has none.
    */
   private async readableChannelIds(
     userId: string,

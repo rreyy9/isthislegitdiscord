@@ -75,7 +75,8 @@ export class ChannelsController {
       where: { id: channelId },
       select: { guildId: true },
     });
-    if (!channel) throw new NotFoundException('No such channel.');
+    // A DM is nobody's to rename or delete, and saying so would confirm the id.
+    if (!channel?.guildId) throw new NotFoundException('No such channel.');
     if (!(await this.permissions.membership(user.id, channel.guildId))) {
       throw new NotFoundException('No such channel.');
     }

@@ -199,6 +199,8 @@ export const MessageRef = z.object({
    * content, which the client replaces with a line saying so.
    */
   deleted: z.boolean(),
+  /** The quoted message's encrypted envelope, when it is from a DM. */
+  sealed: z.string().nullable().optional(),
 });
 export type MessageRef = z.infer<typeof MessageRef>;
 
@@ -293,6 +295,12 @@ export const Message = z.object({
   channelId: z.string(),
   author: PublicUser,
   content: z.string(),
+  /**
+   * A DM message's end-to-end encrypted envelope, null everywhere else.
+   * `content` is empty when this is set: what was said is inside, and only
+   * the participants' devices can open it.
+   */
+  sealed: z.string().nullable().optional(),
   createdAt: z.string(),
   editedAt: z.string().nullable(),
   deletedAt: z.string().nullable(),
@@ -456,8 +464,21 @@ export type LoginInput = z.infer<typeof LoginInput>;
  */
 export const MAX_MESSAGE_CHARS = 4000;
 
+/**
+ * How big an encrypted envelope may be. Bigger than a message, because it
+ * carries the text base64-encoded plus one wrapped key per recipient device --
+ * a full group of ten, each on two machines, is twenty of those.
+ */
+export const MAX_SEALED_CHARS = 64_000;
+
 export const SendMessageInput = z.object({
   channelId: z.string(),
+  /**
+   * Required in a DM and refused everywhere else. A DM refuses plain
+   * `content` outright, so a client that forgot to encrypt fails loudly
+   * instead of quietly sending the words in the clear.
+   */
+  sealed: z.string().max(MAX_SEALED_CHARS).optional(),
   // Empty content is allowed when there are attachments: a pasted screenshot
   // with nothing typed is a normal thing to send.
   content: z.string().max(MAX_MESSAGE_CHARS),
@@ -505,6 +526,8 @@ export type SendMessageInput = z.infer<typeof SendMessageInput>;
 
 export const EditMessageInput = z.object({
   content: z.string().max(MAX_MESSAGE_CHARS),
+  /** The re-encrypted envelope, for a DM message. See `SendMessageInput`. */
+  sealed: z.string().max(MAX_SEALED_CHARS).optional(),
 });
 export type EditMessageInput = z.infer<typeof EditMessageInput>;
 
@@ -808,6 +831,90 @@ export const MemberActivity = z.object({
   lastActiveAt: z.string().nullable(),
 });
 export type MemberActivity = z.infer<typeof MemberActivity>;
+
+/**
+ * One direct message conversation, as the person asking sees it.
+ *
+ * `user` is the other person. A DM channel has no name of its own -- it is
+ * drawn as whoever is on the other end -- so the client never has to work out
+ * which of two participants is not itself.
+ *
+ * `lastMessageId` and `unread` are what put it in order and badge it. Every
+ * message in a DM counts toward `unread`, the way a tag does in a channel:
+ * a DM is addressed to you by definition.
+ */
+export const DirectMessage = z.object({
+  channelId: z.string(),
+  /** Two people, or a group of up to `MAX_GROUP_DM` who chose each other. */
+  kind: z.enum(['direct', 'group']),
+  /** A group's name if somebody gave it one; null means "list the people". */
+  name: z.string().nullable(),
+  /** Everybody in it except the person asking, in the order they joined. */
+  users: z.array(PublicUser),
+  /**
+   * Of `users`, the ones who no longer share a guild with the person asking.
+   * They keep what was said while they were here, and nothing new is sealed
+   * to them.
+   */
+  departedIds: z.array(z.string()),
+  lastMessageId: z.string().nullable(),
+  unread: z.number().int(),
+  /**
+   * False once there is nobody left to talk to: in a one-to-one DM, the other
+   * person left the guild, was kicked or was banned; in a group, nobody else
+   * in it shares a guild with you any more. The history stays readable.
+   */
+  canSend: z.boolean(),
+});
+export type DirectMessage = z.infer<typeof DirectMessage>;
+
+/** People in a group DM, counting yourself. */
+export const MAX_GROUP_DM = 10;
+export const MAX_GROUP_NAME = 60;
+
+/**
+ * Start a conversation. One other person opens (or reopens) your DM with
+ * them; two or more start a new group, every time.
+ */
+export const OpenDirectMessageInput = z.object({
+  userIds: z.array(z.string().min(1).max(64)).min(1).max(MAX_GROUP_DM - 1),
+  name: z.string().trim().max(MAX_GROUP_NAME).optional(),
+});
+export type OpenDirectMessageInput = z.infer<typeof OpenDirectMessageInput>;
+
+export const AddGroupMembersInput = z.object({
+  userIds: z.array(z.string().min(1).max(64)).min(1).max(MAX_GROUP_DM - 1),
+});
+export type AddGroupMembersInput = z.infer<typeof AddGroupMembersInput>;
+
+export const RenameGroupInput = z.object({
+  /** Empty clears it, and the group goes back to being named by its people. */
+  name: z.string().trim().max(MAX_GROUP_NAME),
+});
+export type RenameGroupInput = z.infer<typeof RenameGroupInput>;
+
+/** One device's public keys, as it registers them. Base64 SPKI, P-256. */
+export const RegisterDeviceInput = z.object({
+  encryptionKey: z.string().min(40).max(400),
+  signingKey: z.string().min(40).max(400),
+});
+export type RegisterDeviceInput = z.infer<typeof RegisterDeviceInput>;
+
+/**
+ * A device a DM message may be sealed to, or a signature checked against.
+ *
+ * `recipient` is false for a participant who no longer shares a guild with
+ * the person asking. Their keys still come back -- their old messages have to
+ * be verified -- but nothing new is sealed to them.
+ */
+export const DmDevice = z.object({
+  userId: z.string(),
+  deviceId: z.string(),
+  encryptionKey: z.string(),
+  signingKey: z.string(),
+  recipient: z.boolean(),
+});
+export type DmDevice = z.infer<typeof DmDevice>;
 
 export const MessagePage = z.object({
   messages: z.array(Message),
@@ -1353,6 +1460,24 @@ export interface ServerToClientEvents {
    * not connected missed it, which is what "session-only" means.
    */
   'party:chat': (line: WatchPartyChatLine) => void;
+  /**
+   * A message was posted in one of your DMs, or one was opened with you.
+   *
+   * Sent to the participants' `user:` rooms and nowhere else -- the DM
+   * counterpart of `channel:activity` and `mention:new` together. Those two go
+   * out to everyone and to the channel name respectively, and a DM can use
+   * neither: the first would tell every connected client that a private
+   * conversation just happened, and the second has no channel name to give.
+   *
+   * `dm` is the conversation as the recipient sees it, so a row that was
+   * closed, or one this client has never heard of, can be put back in the
+   * sidebar without a round trip. `message` is null when the conversation was
+   * only opened, not written in.
+   *
+   * A new event rather than a changed one: a client older than DMs never
+   * registered it, and sees nothing rather than something it draws wrong.
+   */
+  'dm:message': (payload: { dm: DirectMessage; message: Message | null }) => void;
 }
 
 /** Client -> server. */

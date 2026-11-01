@@ -39,6 +39,8 @@ model User {
   bansIssued  GuildBan[]         @relation("BanIssuer")
   mentions    MessageMention[]
   reactions   MessageReaction[]
+  conversations ChannelParticipant[]
+  deviceKeys    DeviceKey[]
 
   @@map("user")
 }
@@ -119,8 +121,13 @@ model Guild {
 
 model Channel {
   id         String      @id
-  guildId    String
-  guild      Guild       @relation(fields: [guildId], references: [id], onDelete: Cascade)
+  // Null for a direct message, and that is the whole of what makes one: a DM
+  // is a TEXT channel that belongs to no guild. Every guild-scoped read --
+  // `guild.channels`, `where: { guildId }`, `canInGuild` -- skips it without
+  // having to know DMs exist, so forgetting to filter one out cannot put it in
+  // front of somebody else. See ChannelParticipant for who may read it.
+  guildId    String?
+  guild      Guild?      @relation(fields: [guildId], references: [id], onDelete: Cascade)
   name       String
   kind       ChannelKind @default(TEXT)
   position   Int         @default(0)
@@ -131,10 +138,69 @@ model Channel {
   listenOnly Boolean     @default(false)
   createdAt  DateTime    @default(now())
 
-  messages   Message[]
-  readStates ChannelReadState[]
+  // "lowUserId:highUserId" on a one-to-one DM, null on everything else -- a
+  // group DM included, since two groups of the same people are two
+  // conversations. The unique index is what makes opening a one-to-one DM
+  // idempotent: two clicks, two windows, or both people opening it at the same
+  // moment all land on one row, the same way the unique constraint is the
+  // concurrency story for reactions.
+  dmKey      String?     @unique
+
+  messages     Message[]
+  readStates   ChannelReadState[]
+  participants ChannelParticipant[]
 
   @@index([guildId])
+}
+
+/**
+ * The public half of one device's end-to-end keys.
+ *
+ * Per device rather than per person, because the private half never leaves
+ * the machine it was made on: somebody on a desktop and a laptop has two, and
+ * a DM message is sealed to each of them. The server is a directory and
+ * nothing more -- it hands these out, and a client remembers what it was
+ * handed, so a key that changes under an existing id is refused rather than
+ * trusted.
+ *
+ * `id` is chosen by the device, once, when it makes its keys.
+ */
+model DeviceKey {
+  id            String   @id
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// ECDH P-256, SPKI, base64. What messages are sealed to.
+  encryptionKey String
+  /// ECDSA P-256, SPKI, base64. What this device signs what it sends with.
+  signingKey    String
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+}
+
+/**
+ * One person in one direct message.
+ *
+ * Only DMs have rows here. A guild channel's readers are the guild's members,
+ * and copying them down into this table would be a second answer to the same
+ * question that could disagree with the first.
+ */
+model ChannelParticipant {
+  id        String   @id
+  channelId String
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt  DateTime @default(now())
+
+  // Closed from the sidebar. Cleared by the next message in the conversation,
+  // so closing one is "hide it until something new happens", never leaving --
+  // the history is still there the next time either person opens it.
+  hiddenAt  DateTime?
+
+  @@unique([channelId, userId])
+  // "My DMs": asked on every launch.
+  @@index([userId])
 }
 
 model GuildMember {
@@ -254,6 +320,13 @@ model Message {
   // "The pins in this channel" -- asked every time the list is opened, and
   // otherwise a scan of every message the channel has ever held.
   @@index([channelId, pinnedAt])
+  /// A DM's message, end-to-end encrypted: a JSON envelope the server stores
+  /// and hands back and cannot read. `content` is empty on these rows, so the
+  /// search vector built from it is empty too and nothing leaks through it.
+  /// Null on every guild message. See `apps/desktop/src/renderer/e2e.ts` for
+  /// the format.
+  sealed String?
+
   // Nothing reads these; ON DELETE SET NULL does. Postgres does not index a
   // foreign key column on its own, and without one, deleting an account -- which
   // cascades every message it ever sent -- is a full scan of the message table

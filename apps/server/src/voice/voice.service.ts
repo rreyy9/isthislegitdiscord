@@ -312,7 +312,7 @@ export class VoiceService implements OnModuleInit, OnModuleDestroy {
       where: { id: channelId },
       select: { guildId: true, listenOnly: true },
     });
-    if (!channel) return { listenOnly: false, muted: new Set() };
+    if (!channel?.guildId) return { listenOnly: false, muted: new Set() };
 
     // Nobody talks in an AFK channel, so there is nothing to ask the member
     // table: the room's rule is wider than any mute, and covers admins too.

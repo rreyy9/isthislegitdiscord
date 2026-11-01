@@ -381,6 +381,48 @@ function loadToken(): string {
   }
 }
 
+/* ------------------------------------------------- e2e identity (safeStorage) */
+
+/**
+ * This device's end-to-end private keys, per account, encrypted at rest the
+ * way the token is. One file per user id, so two people signing in on one
+ * machine never read each other's DMs -- and signing out does not delete it,
+ * because a device that threw its keys away on every sign-out could never
+ * read its own history again.
+ *
+ * Opaque to main: the renderer makes the keys and hands over a JSON string.
+ */
+function e2ePath(userId: string): string | null {
+  // An id is used in a file name, so it is held to what ids look like.
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(userId)) return null;
+  return join(userData, `e2e-${userId}.bin`);
+}
+
+function saveE2e(userId: string, json: string): boolean {
+  const path = e2ePath(userId);
+  if (!path) return false;
+  const buf = safeStorage.isEncryptionAvailable()
+    ? safeStorage.encryptString(json)
+    : Buffer.from('PLAIN:' + json, 'utf8');
+  writeFileSync(path, buf);
+  return true;
+}
+
+function loadE2e(userId: string): string | null {
+  const path = e2ePath(userId);
+  if (!path || !existsSync(path)) return null;
+  try {
+    const buf = readFileSync(path);
+    if (buf.length === 0) return null;
+    if (buf.subarray(0, 6).toString() === 'PLAIN:') {
+      return buf.subarray(6).toString('utf8');
+    }
+    return safeStorage.decryptString(buf);
+  } catch {
+    return null;
+  }
+}
+
 /* ------------------------------------------------------------------- window */
 
 let mainWindow: BrowserWindow | null = null;
@@ -843,6 +885,8 @@ ipcMain.handle('app:launched-from-update', () =>
 );
 
 ipcMain.handle('token:get', () => loadToken());
+ipcMain.handle('e2e:get', (_e, userId: string) => loadE2e(userId));
+ipcMain.handle('e2e:set', (_e, userId: string, json: string) => saveE2e(userId, json));
 ipcMain.handle('token:set', (_e, token: string) => {
   saveToken(token);
   return true;

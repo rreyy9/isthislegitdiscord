@@ -1,4 +1,5 @@
 import { bridge } from './bridge';
+import { unsealMessage, unsealMessages } from './e2e';
 
 /**
  * Thin API client. Holds the bearer token in memory and mirrors it into the
@@ -120,6 +121,16 @@ async function request<T>(
 
 /* ------------------------------------------------------------------ calls */
 
+/**
+ * A page of history with any DM envelopes opened. Done here rather than by
+ * each caller so that nothing in the chat view ever holds a sealed message it
+ * forgot to open.
+ */
+async function pageOf(page: Promise<MessagePageDto>): Promise<MessagePageDto> {
+  const p = await page;
+  return { ...p, messages: await unsealMessages(p.messages) };
+}
+
 export interface ServerConfigDto {
   livekitUrl: string;
   maxUploadBytes: number;
@@ -225,6 +236,8 @@ export interface MessageRefDto {
   attachments: AttachmentDto[];
   /** The original was deleted. The pointer stays, the quote becomes a line. */
   deleted: boolean;
+  /** The quoted DM message's encrypted envelope; see `MessageDto.sealed`. */
+  sealed?: string | null;
 }
 
 /** What a send may say about other messages: an answer, or a forward. */
@@ -238,6 +251,8 @@ export interface SendExtrasDto {
   replyPing?: boolean;
   /** A message from elsewhere in this guild, carried into this channel. */
   forwardedFromId?: string;
+  /** The encrypted envelope, in a DM. `content` is then empty. */
+  sealed?: string;
 }
 
 export interface MessageDto {
@@ -245,6 +260,16 @@ export interface MessageDto {
   channelId: string;
   author: { id: string; username: string; displayName: string | null; image: string | null };
   content: string;
+  /**
+   * A DM message's end-to-end encrypted envelope. `content` is empty on the
+   * wire and filled in here once `e2e.ts` has opened it.
+   */
+  sealed?: string | null;
+  /**
+   * Set on a DM message this device could not open or could not verify, with
+   * the sentence to draw instead of the text. Never on the wire.
+   */
+  sealedError?: string;
   createdAt: string;
   editedAt: string | null;
   deletedAt: string | null;
@@ -315,6 +340,30 @@ export interface ChannelMentionsDto {
   channelId: string;
   count: number;
 }
+/** One DM conversation as this account sees it. See `DirectMessage` in shared. */
+export interface DirectMessageDto {
+  channelId: string;
+  kind: 'direct' | 'group';
+  /** A group's chosen name, or null to list its people instead. */
+  name: string | null;
+  /** Everybody in it but you. */
+  users: PublicUserDto[];
+  /** Of `users`, who no longer shares a server with you. */
+  departedIds: string[];
+  lastMessageId: string | null;
+  unread: number;
+  canSend: boolean;
+}
+
+/** A device a DM message is sealed to, or verified against. */
+export interface DmDeviceDto {
+  userId: string;
+  deviceId: string;
+  encryptionKey: string;
+  signingKey: string;
+  recipient: boolean;
+}
+
 export interface ChannelReadDto {
   channelId: string;
   lastReadMessageId: string | null;
@@ -470,9 +519,9 @@ export const api = {
   memberActivity: (userId: string) =>
     request<MemberActivityDto>(`/api/members/${encodeURIComponent(userId)}/activity`),
   history: (channelId: string, before?: string, limit = 50) =>
-    request<MessagePageDto>(
+    pageOf(request<MessagePageDto>(
       `/api/channels/${channelId}/messages?limit=${limit}${before ? `&before=${before}` : ''}`,
-    ),
+    )),
   /**
    * A page centred on one message: what landing on a search result or a pin
    * needs. Both cursors come back set, because a window in the middle of a
@@ -484,14 +533,14 @@ export const api = {
    * two failures.
    */
   historyAround: (channelId: string, around: string, limit = 50) =>
-    request<MessagePageDto>(
+    pageOf(request<MessagePageDto>(
       `/api/channels/${channelId}/messages?limit=${limit}&around=${encodeURIComponent(around)}`,
-    ),
+    )),
   /** The next page of newer messages, for walking back down to the live end. */
   historyAfter: (channelId: string, after: string, limit = 50) =>
-    request<MessagePageDto>(
+    pageOf(request<MessagePageDto>(
       `/api/channels/${channelId}/messages?limit=${limit}&after=${encodeURIComponent(after)}`,
-    ),
+    )),
 
   /* ------------------------------------------------------------- search */
 
@@ -528,7 +577,7 @@ export const api = {
       // no edit here. Absent keys are dropped by JSON.stringify, which is what
       // keeps an ordinary message an ordinary message on the wire.
       body: { content, clientNonce, ...extra },
-    }),
+    }).then(unsealMessage),
   /**
    * Send with files. Multipart rather than the JSON route, because upload and
    * send are one request server-side — an attachment cannot exist without its
@@ -606,11 +655,11 @@ export const api = {
       xhr.send(form);
     });
   },
-  editMessage: (channelId: string, id: string, content: string) =>
+  editMessage: (channelId: string, id: string, content: string, sealed?: string) =>
     request<MessageDto>(`/api/channels/${channelId}/messages/${id}`, {
       method: 'PATCH',
-      body: { content },
-    }),
+      body: sealed ? { content: '', sealed } : { content },
+    }).then(unsealMessage),
   deleteMessage: (channelId: string, id: string) =>
     request<{ ok: boolean }>(`/api/channels/${channelId}/messages/${id}`, {
       method: 'DELETE',
@@ -625,7 +674,7 @@ export const api = {
    * channel switch: the icon in the header is always there regardless.
    */
   pins: (channelId: string) =>
-    request<MessageDto[]>(`/api/channels/${channelId}/messages/pinned`),
+    request<MessageDto[]>(`/api/channels/${channelId}/messages/pinned`).then(unsealMessages),
   pinMessage: (channelId: string, id: string) =>
     request<MessageDto>(`/api/channels/${channelId}/messages/${id}/pin`, {
       method: 'POST',
@@ -687,6 +736,37 @@ export const api = {
   unban: (guildId: string, userId: string) =>
     request<{ ok: boolean }>(`/api/guilds/${guildId}/bans/${userId}`, {
       method: 'DELETE',
+    }),
+
+  /* ---------------------------------------------------- direct messages */
+
+  dms: () => request<DirectMessageDto[]>('/api/dms'),
+  /** One person opens your DM with them; two or more start a new group. */
+  openDm: (userIds: string[], name?: string) =>
+    request<DirectMessageDto>('/api/dms', {
+      method: 'POST',
+      body: name ? { userIds, name } : { userIds },
+    }),
+  hideDm: (channelId: string) =>
+    request<{ ok: boolean }>(`/api/dms/${channelId}/hide`, { method: 'POST' }),
+  leaveGroup: (channelId: string) =>
+    request<{ ok: boolean }>(`/api/dms/${channelId}/leave`, { method: 'POST' }),
+  addToGroup: (channelId: string, userIds: string[]) =>
+    request<DirectMessageDto>(`/api/dms/${channelId}/members`, {
+      method: 'POST',
+      body: { userIds },
+    }),
+  renameGroup: (channelId: string, name: string) =>
+    request<DirectMessageDto>(`/api/dms/${channelId}`, {
+      method: 'PATCH',
+      body: { name },
+    }),
+  dmDevices: (channelId: string) =>
+    request<DmDeviceDto[]>(`/api/dms/${channelId}/devices`),
+  registerDevice: (deviceId: string, keys: { encryptionKey: string; signingKey: string }) =>
+    request<{ ok: boolean }>(`/api/keys/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'PUT',
+      body: keys,
     }),
 
   reads: () => request<ChannelReadDto[]>('/api/reads'),

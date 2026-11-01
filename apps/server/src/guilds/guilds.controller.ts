@@ -29,7 +29,8 @@ export class GuildsController {
       name: m.guild.name,
       channels: m.guild.channels.map((c) => ({
         id: c.id,
-        guildId: c.guildId,
+        // Never null here: these came through the guild's own relation.
+        guildId: m.guild.id,
         name: c.name,
         kind: c.kind,
         position: c.position,

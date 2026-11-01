@@ -11,6 +11,7 @@ import {
   api,
   setToken,
   type ChannelDto,
+  type DirectMessageDto,
   type GuildDto,
   type MemberDto,
   type MessageDto,
@@ -104,6 +105,14 @@ import {
   type Removal,
 } from './ChatModals';
 import { ForwardCard, ReplyStrip, requoted, toRef } from './MessageRefs';
+import {
+  DmSection,
+  MAX_GROUP_DM,
+  PickPeopleModal,
+  RenameGroupModal,
+  dmTitle,
+} from './DirectMessages';
+import { forgetDevices, initE2e, seal } from '../e2e';
 
 
 
@@ -303,6 +312,20 @@ export function Chat({
    * worth a look now. One is a dot; this one is a number.
    */
   const [mentionCounts, setMentionCounts] = useState<Record<string, number>>({});
+  /**
+   * This account's direct messages, newest first. Their unread counts live in
+   * `mentionCounts` beside the tags, because every DM message is addressed to
+   * you the way a tag is -- and that is what puts them on the icon badge.
+   */
+  const [dms, setDms] = useState<DirectMessageDto[]>([]);
+  /** Whether the list has been asked for, so an open DM is not taken for gone. */
+  const [dmsLoaded, setDmsLoaded] = useState(false);
+  const [dmDialog, setDmDialog] = useState<
+    | { mode: 'new' }
+    | { mode: 'add'; dm: DirectMessageDto }
+    | { mode: 'rename'; dm: DirectMessageDto }
+    | null
+  >(null);
   /** What the app may do when somebody tags you. Persisted in settings.json. */
   const [notifications, setNotifications] = useState<NotificationSettings>({
     mentions: true,
@@ -605,10 +628,19 @@ export function Chat({
   /** Same reason: a tag arriving has to resolve names against the live list. */
   const membersRef = useRef<MemberDto[]>(members);
   membersRef.current = members;
+  /** Same reason: the socket handlers ask which channels are DMs. */
+  const dmsRef = useRef<DirectMessageDto[]>(dms);
+  dmsRef.current = dms;
 
-  const activeChannelObj = guilds
-    .flatMap((g) => g.channels)
-    .find((c) => c.id === activeChannel);
+  const activeDm = dms.find((d) => d.channelId === activeChannel) ?? null;
+  /**
+   * A DM stands in as a text channel named after its people, so the message
+   * list, composer, pins and typing line need no second code path. What does
+   * differ -- the header, files, moderation -- asks `activeDm` directly.
+   */
+  const activeChannelObj =
+    guilds.flatMap((g) => g.channels).find((c) => c.id === activeChannel) ??
+    (activeDm ? dmChannel(activeDm) : undefined);
 
   /* ---------------------------------------------------------- mentions */
 
@@ -911,6 +943,10 @@ export function Chat({
 
   useEffect(() => {
     (async () => {
+      // Keys first: every DM message that comes back after this is opened on
+      // the way in, and one fetched before would draw as unreadable.
+      await initE2e(me.id);
+      await loadDms();
       const gs = await loadGuilds();
       await loadMembers();
       // A client starting up mid-call would otherwise see empty voice channels
@@ -1079,6 +1115,25 @@ export function Chat({
         }, 250);
       },
       onUserUpdated: applyUserUpdate,
+      onDmMessage: ({ dm, message }) => {
+        // No message means the conversation itself changed -- opened, renamed,
+        // somebody added or gone -- and who it is sealed to may have with it.
+        if (!message) forgetDevices(dm.channelId);
+        setDms((prev) => upsertDm(prev, dm));
+        if (!message) return;
+        setLatest((prev) =>
+          !prev[dm.channelId] || message.id > prev[dm.channelId]
+            ? { ...prev, [dm.channelId]: message.id }
+            : prev,
+        );
+        if (message.author.id === me.id) return;
+        // The server's count, not a +1: it is already right however many of
+        // these this client missed.
+        if (message.channelId !== activeChannelRef.current) {
+          setMentionCounts((prev) => ({ ...prev, [dm.channelId]: dm.unread }));
+        }
+        announceDm(message, dm);
+      },
       onPresence: (p) => {
         const { userId, online, lastSeenAt } = p;
         // Applied here rather than waited for: the dot and the duration under
@@ -1142,6 +1197,8 @@ export function Chat({
         // Tags that arrived while the socket was down produced no event, so
         // the counts are re-asked for rather than repaired.
         void loadMentions();
+        // And DMs, for the same reason.
+        void loadDms();
         // Same for pins: an event missed while offline cannot be replayed.
         setPinsVersion((v) => v + 1);
         // A reconnect is a new socket and party rooms are per socket, so this
@@ -1331,14 +1388,19 @@ export function Chat({
    */
   const reopenedRef = useRef(false);
   useEffect(() => {
-    if (reopenedRef.current || !settingsReady || guilds.length === 0) return;
+    if (reopenedRef.current || !settingsReady || guilds.length === 0 || !dmsLoaded) return;
     reopenedRef.current = true;
+    // The last thing open may have been a DM.
+    if (dms.some((d) => d.channelId === lastTextChannelId)) {
+      setActiveChannel(lastTextChannelId);
+      return;
+    }
     const texts = guilds.flatMap((g) => g.channels).filter((c) => c.kind === 'TEXT');
     // A channel that has since been deleted falls back to the first one,
     // which is where a first-ever launch starts anyway.
     const target = texts.find((c) => c.id === lastTextChannelId) ?? texts[0];
     if (target) setActiveChannel(target.id);
-  }, [guilds, settingsReady, lastTextChannelId]);
+  }, [guilds, settingsReady, lastTextChannelId, dms, dmsLoaded]);
 
   /**
    * A channel can vanish under the reader — an admin deletes it, here or in
@@ -1355,7 +1417,10 @@ export function Chat({
     if (guilds.length === 0) return;
     const channels = guilds.flatMap((g) => g.channels);
 
-    if (activeChannel && !channels.some((c) => c.id === activeChannel)) {
+    // A DM counts as still there while the list has not loaded yet; one that
+    // was closed or left is gone.
+    const isDm = !dmsLoaded || dms.some((d) => d.channelId === activeChannel);
+    if (activeChannel && !channels.some((c) => c.id === activeChannel) && !isDm) {
       const texts = channels.filter((c) => c.kind === 'TEXT');
       setActiveChannel(texts[0]?.id ?? null);
     }
@@ -1365,7 +1430,7 @@ export function Chat({
     if (voice.channelId && !channels.some((c) => c.id === voice.channelId)) {
       leaveVoice();
     }
-  }, [guilds, activeChannel, voice.channelId]);
+  }, [guilds, activeChannel, voice.channelId, dms, dmsLoaded]);
 
   /** Remember which channel to come back to. */
   useEffect(() => {
@@ -1565,10 +1630,104 @@ export function Chat({
   async function loadMentions() {
     try {
       const rows = await api.mentions();
-      setMentionCounts(Object.fromEntries(rows.map((r) => [r.channelId, r.count])));
+      // The DM counts come from `loadDms`, and this must not wipe them.
+      setMentionCounts((prev) => ({
+        ...Object.fromEntries(
+          Object.entries(prev).filter(([id]) =>
+            dmsRef.current.some((d) => d.channelId === id),
+          ),
+        ),
+        ...Object.fromEntries(rows.map((r) => [r.channelId, r.count])),
+      }));
     } catch {
       /* the badge is cosmetic; never break chat over it */
     }
+  }
+
+  /** The DM list, with each one's newest message and unread count. */
+  async function loadDms() {
+    try {
+      const rows = await api.dms();
+      setDms(rows);
+      setLatest((prev) => {
+        const next = { ...prev };
+        for (const d of rows) if (d.lastMessageId) next[d.channelId] = d.lastMessageId;
+        return next;
+      });
+      setMentionCounts((prev) => {
+        const next = { ...prev };
+        for (const d of rows) {
+          if (d.unread > 0 && d.channelId !== activeChannelRef.current) {
+            next[d.channelId] = d.unread;
+          } else delete next[d.channelId];
+        }
+        return next;
+      });
+    } catch {
+      /* a server older than DMs has no list; the section stays empty */
+    } finally {
+      setDmsLoaded(true);
+    }
+  }
+
+  /**
+   * Somebody sent you a DM. The same switches as a tag -- it is addressed to
+   * you in exactly the way a tag is -- and the same rule about not telling
+   * you what is already in front of you.
+   */
+  function announceDm(message: MessageDto, dm: DirectMessageDto) {
+    const settings = notificationsRef.current;
+    if (settings.sound) playPing();
+    if (!settings.mentions) return;
+    if (message.channelId === activeChannelRef.current && document.hasFocus()) return;
+
+    const who = message.author.displayName || message.author.username;
+    const body = message.sealedError
+      ? `🔒 ${message.sealedError}`
+      : toPlain(message.content, (id) => {
+          const user = membersRef.current.find((m) => m.user.id === id)?.user;
+          return user ?? null;
+        }).trim();
+    void bridge.notifyMention({
+      title: dm.kind === 'group' ? `${who} in ${dmTitle(dm)}` : who,
+      body: body || 'Forwarded a message',
+      channelId: message.channelId,
+      messageId: message.id,
+    });
+  }
+
+  /** Open (or start) a conversation and go to it. */
+  async function openDmWith(userIds: string[], name?: string) {
+    const dm = await api.openDm(userIds, name || undefined);
+    setDms((prev) => upsertDm(prev, dm));
+    setActiveChannel(dm.channelId);
+  }
+
+  /** Take a conversation out of the list; the next message brings it back. */
+  function closeDm(dm: DirectMessageDto) {
+    setDms((prev) => prev.filter((d) => d.channelId !== dm.channelId));
+    void api.hideDm(dm.channelId).catch(() => {
+      setBanner('Could not close that conversation.');
+      void loadDms();
+    });
+  }
+
+  function askLeaveGroup(dm: DirectMessageDto) {
+    setConfirmation({
+      title: `Leave ${dmTitle(dm)}?`,
+      body:
+        'You will stop getting its messages and it will leave your list. ' +
+        'Somebody in it can add you back.',
+      confirmLabel: 'Leave group',
+      run: async () => {
+        try {
+          await api.leaveGroup(dm.channelId);
+          setDms((prev) => prev.filter((d) => d.channelId !== dm.channelId));
+        } catch (e: any) {
+          setBanner(e?.message ?? 'Could not leave the group.');
+        }
+      },
+    });
   }
 
   /**
@@ -1995,6 +2154,11 @@ export function Chat({
    */
   function addFiles(files: File[]) {
     if (files.length === 0) return;
+    // Files would reach the server readable, and a DM promises otherwise.
+    if (activeDm) {
+      setBanner('Files can’t be sent in direct messages yet: they would not be encrypted.');
+      return;
+    }
     // Built before the state update rather than inside it. The updater has to
     // be a pure function of the previous list -- React is free to call it more
     // than once -- and this one makes object URLs and starts the checks, both
@@ -2245,7 +2409,14 @@ export function Chat({
                   : prev,
               ),
           )
-        : await api.send(channelId, row.content, nonce, extra);
+        : dmsRef.current.some((d) => d.channelId === channelId)
+          ? // Sealed here rather than when it was typed, so a retry is sealed
+            // to whoever is in the conversation by then.
+            await api.send(channelId, '', nonce, {
+              ...extra,
+              sealed: await seal(channelId, { content: row.content }),
+            })
+          : await api.send(channelId, row.content, nonce, extra);
       outboxRef.current.delete(nonce);
       for (const url of row.previews ?? []) URL.revokeObjectURL(url);
       // The socket echo usually lands first; reconcile either way by nonce.
@@ -2523,7 +2694,9 @@ export function Chat({
    */
   const canEdit = (m: Msg) => m.author.id === me.id && !m.pending;
   /** Your own, or anyone's if you administer the server. */
-  const canDelete = (m: Msg) => (m.author.id === me.id || iAmAdmin) && !m.pending;
+  const canDelete = (m: Msg) =>
+    // Nobody moderates a DM, admins included.
+    (m.author.id === me.id || (iAmAdmin && !activeDm)) && !m.pending;
   /**
    * Whether this message can be answered, passed on, or reacted to. Anybody's,
    * including your own -- but not one the server has never heard of, since all
@@ -2569,7 +2742,11 @@ export function Chat({
     );
     cancelEdit();
     try {
-      await api.editMessage(m.channelId, m.id, content);
+      if (dmsRef.current.some((d) => d.channelId === m.channelId)) {
+        await api.editMessage(m.channelId, m.id, '', await seal(m.channelId, { content }));
+      } else {
+        await api.editMessage(m.channelId, m.id, content);
+      }
     } catch (e: any) {
       setMessages((prev) =>
         prev.map((x) =>
@@ -2610,7 +2787,8 @@ export function Chat({
    * for it or not, which is why it is an admin's call.
    */
   const canPin = (m: Msg) =>
-    iAmAdmin && !m.pending && activeChannelObj?.kind === 'TEXT';
+    // Either person in a DM may pin: "everybody" there is the two of them.
+    (iAmAdmin || activeDm !== null) && !m.pending && activeChannelObj?.kind === 'TEXT';
 
   /**
    * Pin or unpin, from the hover row or from the board itself.
@@ -2757,7 +2935,10 @@ export function Chat({
       onClose={() => setSearchOpen(false)}
       scope={searchScope}
       onScope={setSearchScope}
-      channelLabel={activeChannelObj?.kind === 'TEXT' ? activeChannelObj.name : null}
+      // A DM cannot be searched: it is encrypted, and the server has no text.
+      channelLabel={
+        activeChannelObj?.kind === 'TEXT' && !activeDm ? activeChannelObj.name : null
+      }
       results={search.results}
       busy={search.busy}
       error={search.error}
@@ -3000,6 +3181,17 @@ export function Chat({
           ))}
         </div>
 
+        <DmSection
+          dms={dms}
+          activeChannel={activeChannel}
+          members={members}
+          unreadCount={(id) => mentionCounts[id] ?? 0}
+          isUnread={isUnread}
+          onOpen={setActiveChannel}
+          onNew={() => setDmDialog({ mode: 'new' })}
+          onClose={closeDm}
+        />
+
         {/* Above the voice panel, and the same shape as it: both say "here is
             something you are currently in", and one glance should answer it
             for both without reading. */}
@@ -3068,9 +3260,42 @@ export function Chat({
       <div className="col chat">
         <div className="chat-head">
           <span className="hash" style={{ color: 'var(--faint)' }}>
-            {activeChannelObj ? channelIcon(activeChannelObj) : '#'}
+            {activeDm
+              ? activeDm.kind === 'group'
+                ? '👥'
+                : '@'
+              : activeChannelObj
+                ? channelIcon(activeChannelObj)
+                : '#'}
           </span>
           {activeChannelObj?.name ?? '—'}
+          {activeDm && (
+            <span
+              className="e2e-chip"
+              title={
+                'Only the people in this conversation can read it, on devices that were ' +
+                'set up before each message was sent. The server cannot. Who is talking ' +
+                'to whom, and when, is not hidden.'
+              }
+            >
+              🔒 End-to-end encrypted
+            </span>
+          )}
+          {activeDm?.kind === 'group' && (
+            <span className="dm-actions">
+              {activeDm.canSend && activeDm.users.length + 1 < MAX_GROUP_DM && (
+                <button onClick={() => setDmDialog({ mode: 'add', dm: activeDm })}>
+                  Add people
+                </button>
+              )}
+              <button onClick={() => setDmDialog({ mode: 'rename', dm: activeDm })}>
+                Rename
+              </button>
+              <button className="danger" onClick={() => askLeaveGroup(activeDm)}>
+                Leave
+              </button>
+            </span>
+          )}
           {/* Always there, whether or not anything is pinned: an icon that
               came and went with the board's contents would be a control
               nobody could learn the position of. */}
@@ -3090,7 +3315,7 @@ export function Chat({
             </button>
           )}
           {/* Only where there is no title bar to put it in. */}
-          {!titleSlot && activeChannelObj?.kind === 'TEXT' && searchBox}
+          {!titleSlot && activeChannelObj?.kind === 'TEXT' && !activeDm && searchBox}
           <div className={'status-dot ' + status} title={status} />
           <span className="status-label">
             {status === 'connected'
@@ -3107,7 +3332,7 @@ export function Chat({
               channelName={activeChannelObj.name}
               pins={pins}
               error={pinsError}
-              canPin={iAmAdmin}
+              canPin={iAmAdmin || activeDm !== null}
               onUnpin={(m) => void togglePin(m)}
               onJump={(id) => jumpTo(activeChannel!, id)}
               onClose={() => setPinsOpen(false)}
@@ -3116,6 +3341,9 @@ export function Chat({
           )}
         </div>
 
+        {activeDm && departedNotice(activeDm) && (
+          <div className="dm-notice">{departedNotice(activeDm)}</div>
+        )}
         {banner && <div className="banner">{banner}</div>}
         {notice && <div className="banner good">{notice}</div>}
 
@@ -3249,12 +3477,16 @@ export function Chat({
                           </div>
                         ) : (
                           <>
-                            <MessageContent
-                              content={m.content}
-                              attachments={m.attachments}
-                              edited={Boolean(m.editedAt)}
-                              lookupMention={lookupMention}
-                            />
+                            {m.sealedError ? (
+                              <div className="sealed-error">🔒 {m.sealedError}</div>
+                            ) : (
+                              <MessageContent
+                                content={m.content}
+                                attachments={m.attachments}
+                                edited={Boolean(m.editedAt)}
+                                lookupMention={lookupMention}
+                              />
+                            )}
                             {/* Under whatever the forwarder said about it,
                                 because the note is theirs and the card is
                                 somebody else's -- reading it the other way
@@ -3344,7 +3576,9 @@ export function Chat({
                                 ↩
                               </button>
                             )}
-                            {canQuote(m) && (
+                            {/* Never out of a DM: anywhere else its readers
+                                are not the people it was said to. */}
+                            {canQuote(m) && !activeDm && (
                               <button
                                 title="Forward to another channel"
                                 onClick={() => setForwarding(m)}
@@ -3549,8 +3783,8 @@ export function Chat({
               things you have to already know about. */}
           <button
             className="attach-btn"
-            title="Attach a file"
-            disabled={!activeChannelObj || activeChannelObj.kind !== 'TEXT'}
+            title={activeDm ? 'Files can’t be sent in direct messages yet' : 'Attach a file'}
+            disabled={!activeChannelObj || activeChannelObj.kind !== 'TEXT' || activeDm !== null}
             onClick={() => fileInputRef.current?.click()}
           >
             📎
@@ -3601,10 +3835,18 @@ export function Chat({
                     ? filesReady
                       ? 'Add a message, or press Enter to send'
                       : 'Checking the files…'
-                    : `Message #${activeChannelObj.name}`
+                    : activeDm
+                      ? activeDm.canSend
+                        ? `Message ${activeDm.kind === 'direct' ? '@' : ''}${activeChannelObj.name}`
+                        : 'You can read this conversation, but not send to it'
+                      : `Message #${activeChannelObj.name}`
                 : ''
             }
-            disabled={!activeChannelObj || activeChannelObj.kind !== 'TEXT'}
+            disabled={
+              !activeChannelObj ||
+              activeChannelObj.kind !== 'TEXT' ||
+              (activeDm !== null && !activeDm.canSend)
+            }
             onChange={(e) => onDraftChange(e.target.value, e.target.selectionStart)}
             onPaste={onPaste}
             // Moving the caret with the mouse or the arrow keys can land in or
@@ -3690,6 +3932,12 @@ export function Chat({
         onKick={askKick}
         onBan={askBan}
         voiceChannelOf={voiceChannelOf}
+        meId={me.id}
+        onMessage={(userId) =>
+          void openDmWith([userId]).catch((e: any) =>
+            setBanner(e?.message ?? 'Could not open that conversation.'),
+          )
+        }
       />
       <ScreenPicker voice={voice} />
       {startingParty && (
@@ -3817,6 +4065,45 @@ export function Chat({
       {showBans && guilds[0] && (
         <BansModal guildId={guilds[0].id} onClose={() => setShowBans(false)} />
       )}
+      {dmDialog?.mode === 'new' && (
+        <PickPeopleModal
+          members={members}
+          meId={me.id}
+          room={MAX_GROUP_DM - 1}
+          title="New message"
+          allowName
+          confirmLabel={(n) => (n >= 2 ? 'Create group' : 'Open conversation')}
+          onClose={() => setDmDialog(null)}
+          onDone={(ids, name) => openDmWith(ids, name)}
+        />
+      )}
+      {dmDialog?.mode === 'add' && (
+        <PickPeopleModal
+          members={members}
+          meId={me.id}
+          exclude={dmDialog.dm.users.map((u) => u.id)}
+          room={MAX_GROUP_DM - 1 - dmDialog.dm.users.length}
+          title={`Add people to ${dmTitle(dmDialog.dm)}`}
+          allowName={false}
+          confirmLabel={(n) => (n === 1 ? 'Add 1 person' : `Add ${n} people`)}
+          onClose={() => setDmDialog(null)}
+          onDone={async (ids) => {
+            const dm = await api.addToGroup(dmDialog.dm.channelId, ids);
+            forgetDevices(dm.channelId);
+            setDms((prev) => upsertDm(prev, dm));
+          }}
+        />
+      )}
+      {dmDialog?.mode === 'rename' && (
+        <RenameGroupModal
+          dm={dmDialog.dm}
+          onClose={() => setDmDialog(null)}
+          onDone={async (name) => {
+            const dm = await api.renameGroup(dmDialog.dm.channelId, name);
+            setDms((prev) => upsertDm(prev, dm));
+          }}
+        />
+      )}
       {confirmation && (
         <ConfirmModal
           confirmation={confirmation}
@@ -3826,4 +4113,38 @@ export function Chat({
       {removed && <RemovedModal removal={removed} onSignOut={() => void signOut()} />}
     </div>
   );
+}
+
+/** A DM as the text channel the rest of the view expects to be showing. */
+function dmChannel(dm: DirectMessageDto): ChannelDto {
+  return {
+    id: dm.channelId,
+    guildId: '',
+    name: dmTitle(dm),
+    kind: 'TEXT',
+    position: 0,
+    listenOnly: false,
+  };
+}
+
+/** Put one conversation into the list, newest first, replacing its old copy. */
+function upsertDm(list: DirectMessageDto[], dm: DirectMessageDto): DirectMessageDto[] {
+  const order = (d: DirectMessageDto) => d.lastMessageId ?? d.channelId;
+  return [dm, ...list.filter((d) => d.channelId !== dm.channelId)].sort((a, b) =>
+    order(b).localeCompare(order(a)),
+  );
+}
+
+/** What to say about the people in a DM who are no longer on the server. */
+function departedNotice(dm: DirectMessageDto): string | null {
+  const gone = dm.users.filter((u) => dm.departedIds.includes(u.id));
+  if (gone.length === 0) return null;
+  const names = gone.map((u) => u.displayName || u.username).join(', ');
+  if (dm.kind === 'direct') {
+    return `You no longer share a server with ${names}. You can still read this conversation, but you can’t send to it.`;
+  }
+  if (!dm.canSend) {
+    return 'Nobody else in this group is on your server any more. You can still read it, but you can’t send to it.';
+  }
+  return `${names} ${gone.length === 1 ? 'is' : 'are'} no longer on the server and won’t get new messages.`;
 }

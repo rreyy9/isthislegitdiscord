@@ -35,6 +35,7 @@ import { AuthGuard, CurrentUser, type SessionUser } from '../auth/auth.guard';
 import { PermissionService } from '../auth/permission.guard';
 import { ChatGateway } from '../gateway/chat.gateway';
 import { MentionsService } from '../mentions/mentions.service';
+import { DmsService } from '../dms/dms.service';
 import { ZodPipe } from '../common/zod.pipe';
 import { UploadLimitFilter } from '../common/upload-limit.filter';
 import { newId } from '../common/ids';
@@ -53,6 +54,7 @@ export class MessagesController {
     private readonly permissions: PermissionService,
     private readonly gateway: ChatGateway,
     private readonly mentions: MentionsService,
+    private readonly dms: DmsService,
   ) {}
 
   /**
@@ -253,18 +255,44 @@ export class MessagesController {
     }
 
     const replyTo = await this.resolveReply(channelId, body.replyToId);
+    // Null for a guild channel. Asked once here because three things below
+    // differ for a DM: forwards, tags, and who hears about it.
+    const participants = channel.guildId
+      ? null
+      : await this.dms.participantsOf(channelId);
     const forwardedFromId = await this.resolveForward(
+      channelId,
       channel.guildId,
+      participants,
       body.forwardedFromId,
     );
 
     const uploads = files ?? [];
+
+    // What a DM accepts is narrower, and refused rather than fixed up: the
+    // point of the encryption is lost the moment the server is willing to take
+    // the words in the clear.
+    if (participants) {
+      if (body.content.trim()) {
+        throw new BadRequestException('Messages in a direct message have to be encrypted.');
+      }
+      if (uploads.length > 0) {
+        // Files would arrive here readable, and a DM promises otherwise.
+        throw new BadRequestException('Files cannot be sent in a direct message yet.');
+      }
+      if (!body.sealed && !forwardedFromId) {
+        throw new BadRequestException('Nothing to send.');
+      }
+    } else if (body.sealed) {
+      throw new BadRequestException('Only a direct message carries an encrypted body.');
+    }
+
     // A message has to say something. Empty content is fine when a screenshot
     // is the message, which is why the schema allows it -- and fine when a
     // forwarded message is, for the same reason: the carried message is the
     // content, and being made to write a covering note to pass one on would be
     // a rule invented by this check rather than by anybody who wanted it.
-    if (!body.content.trim() && uploads.length === 0 && !forwardedFromId) {
+    if (!participants && !body.content.trim() && uploads.length === 0 && !forwardedFromId) {
       throw new BadRequestException('Nothing to send.');
     }
 
@@ -288,7 +316,8 @@ export class MessagesController {
         id: newId(),
         channelId,
         authorId: user.id,
-        content: body.content,
+        content: participants ? '' : body.content,
+        sealed: participants ? (body.sealed ?? null) : null,
         clientNonce: body.clientNonce ?? null,
         replyToId: replyTo?.id ?? null,
         forwardedFromId,
@@ -321,6 +350,17 @@ export class MessagesController {
       replyTo && body.replyPing !== false && replyTo.authorId !== user.id
         ? replyTo.authorId
         : null;
+
+    // A DM goes its own way from here. It has no tags -- the whole message is
+    // addressed to the other person, and the DM badge and toast say so -- and
+    // nobody outside it is told anything happened.
+    if (participants) {
+      const dto = { ...toDto(row), mentions: [] };
+      this.gateway.markActive(user.id);
+      this.gateway.broadcastMessage(dto, participants);
+      await this.dms.announce(dto, participants);
+      return dto;
+    }
 
     // Resolved after the row exists, because a mention is a row that points at
     // a message: there is nothing to hang it off until the message is saved.
@@ -392,9 +432,17 @@ export class MessagesController {
    * so `MessageRef` is never a quote of a quote. Doing it here, at the moment
    * of sending, is what makes that a property of the data rather than a depth
    * limit the renderer has to remember.
+   *
+   * **DMs.** The same rule -- nobody may be shown something they could not
+   * open -- gives two answers. Out of a DM, a message goes nowhere but back
+   * into the same DM: anywhere else its readers are not the two people it was
+   * said to. Into a DM, a guild message may go only when everybody in the DM
+   * is a member of that guild.
    */
   private async resolveForward(
-    guildId: string,
+    channelId: string,
+    guildId: string | null,
+    participants: string[] | null,
     forwardedFromId: string | undefined,
   ): Promise<string | null> {
     if (!forwardedFromId) return null;
@@ -404,6 +452,7 @@ export class MessagesController {
       select: {
         id: true,
         deletedAt: true,
+        channelId: true,
         channel: { select: { guildId: true } },
         // One level is all there can be: a stored forward always points at an
         // original, so following it once always arrives.
@@ -411,6 +460,7 @@ export class MessagesController {
           select: {
             id: true,
             deletedAt: true,
+            channelId: true,
             channel: { select: { guildId: true } },
           },
         },
@@ -422,7 +472,26 @@ export class MessagesController {
     if (original.deletedAt) {
       throw new BadRequestException('That message is gone and cannot be forwarded.');
     }
-    if (original.channel.guildId !== guildId) {
+    const from = original.channel.guildId;
+    if (from === null) {
+      if (original.channelId !== channelId) {
+        throw new ForbiddenException(
+          'A message from a direct message can only be forwarded within that conversation.',
+        );
+      }
+      return original.id;
+    }
+    if (guildId === null) {
+      for (const userId of participants ?? []) {
+        if (!(await this.permissions.membership(userId, from))) {
+          throw new ForbiddenException(
+            'Everybody in this conversation has to be in the server that message came from.',
+          );
+        }
+      }
+      return original.id;
+    }
+    if (from !== guildId) {
       throw new ForbiddenException(
         'A message can only be forwarded within the server it was sent in.',
       );
@@ -460,9 +529,20 @@ export class MessagesController {
     }
 
     const content = body.content.trim();
-    // Same rule as sending: text may be empty only when something else carries
-    // it -- files, or a forwarded message.
-    if (!content && existing.attachments.length === 0 && !existing.forwardedFromId) {
+    // The same split as sending. A DM message is edited by sending a new
+    // envelope, and its plain text stays empty.
+    // Asked of the channel, not of the row: a forward into a DM can have no
+    // envelope of its own, and must not become editable in the clear.
+    const inDm = (await this.dms.participantsOf(channelId)) !== null;
+    if (inDm) {
+      if (content || !body.sealed) {
+        throw new BadRequestException('Messages in a direct message have to be encrypted.');
+      }
+    } else if (body.sealed) {
+      throw new BadRequestException('Only a direct message carries an encrypted body.');
+    } else if (!content && existing.attachments.length === 0 && !existing.forwardedFromId) {
+      // Same rule as sending: text may be empty only when something else
+      // carries it -- files, or a forwarded message.
       throw new BadRequestException('A message cannot be empty. Delete it instead.');
     }
 
@@ -478,7 +558,9 @@ export class MessagesController {
 
     const row = await this.prisma.message.update({
       where: { id },
-      data: { content, editedAt: new Date() },
+      data: inDm
+        ? { sealed: body.sealed, editedAt: new Date() }
+        : { content, editedAt: new Date() },
       include: withAuthor,
     });
 
@@ -493,6 +575,8 @@ export class MessagesController {
     // sender wanted it was answered when they pressed send, and re-asking now
     // would let somebody ping a person by editing a reply they had explicitly
     // sent quietly.
+    // A DM has no tags to re-resolve; `MentionsService` finds no members in a
+    // channel without a guild, and answers with two empty lists.
     const { pinged, newlyPinged } = await this.mentions.sync(
       row.id,
       channelId,
@@ -550,7 +634,11 @@ export class MessagesController {
       data: { deletedAt: new Date(), deletedById: user.id },
     });
 
-    this.gateway.broadcastMessageDeleted(id, channelId);
+    this.gateway.broadcastMessageDeleted(
+      id,
+      channelId,
+      (await this.dms.participantsOf(channelId)) ?? undefined,
+    );
     return { ok: true };
   }
 

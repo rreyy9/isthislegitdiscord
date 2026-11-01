@@ -50,12 +50,14 @@ export class ChannelsService {
     });
 
     this.gateway.broadcastGuildChanged(guildId);
-    return this.toDto(channel);
+    return this.toDto({ ...channel, guildId });
   }
 
   async update(id: string, input: UpdateChannelInput): Promise<ChannelDto> {
     const existing = await this.prisma.channel.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundException('No such channel.');
+    // DMs are not managed through here; the controller already turned them
+    // away, and this is the type system being told so.
+    if (!existing?.guildId) throw new NotFoundException('No such channel.');
 
     const channel = await this.prisma.channel.update({
       where: { id },
@@ -66,12 +68,13 @@ export class ChannelsService {
     });
 
     this.gateway.broadcastGuildChanged(existing.guildId);
-    return this.toDto(channel);
+    return this.toDto({ ...channel, guildId: existing.guildId });
   }
 
   async remove(id: string): Promise<{ ok: true; guildId: string }> {
-    const channel = await this.prisma.channel.findUnique({ where: { id } });
-    if (!channel) throw new NotFoundException('No such channel.');
+    const found = await this.prisma.channel.findUnique({ where: { id } });
+    if (!found?.guildId) throw new NotFoundException('No such channel.');
+    const channel = { ...found, guildId: found.guildId };
 
     // The guard is on text channels specifically, not on the count of all of
     // them. A guild whose last text channel went would still have voice rooms
