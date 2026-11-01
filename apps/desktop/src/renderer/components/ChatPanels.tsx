@@ -311,15 +311,7 @@ export interface MemberMenu {
 
 /** The menu is drawn against the viewport, so its box has to be known up front. */
 const MENU_WIDTH = 158;
-const MENU_HEIGHT = 265;
-
-const MUTE_OPTIONS: { label: string; minutes: number | null }[] = [
-  { label: '5 minutes', minutes: 5 },
-  { label: '1 hour', minutes: 60 },
-  { label: '1 day', minutes: 60 * 24 },
-  { label: '1 week', minutes: 60 * 24 * 7 },
-  { label: 'Indefinitely', minutes: null },
-];
+const MENU_HEIGHT = 74;
 
 /** How long a pointer has to rest on a name before its card opens. */
 const CARD_OPEN_MS = 350;
@@ -356,8 +348,6 @@ export function MembersPanel({
   onMenuChange,
   canModerate,
   onShowBans,
-  onMute,
-  onUnmute,
   onKick,
   onBan,
   voiceChannelOf,
@@ -373,9 +363,6 @@ export function MembersPanel({
   /** Whether the moderation menu is offered at all for this member. */
   canModerate: (m: MemberDto) => boolean;
   onShowBans: () => void;
-  /** Null minutes is indefinitely; see MUTE_OPTIONS. */
-  onMute: (m: MemberDto, minutes: number | null) => void;
-  onUnmute: (m: MemberDto) => void;
   onKick: (m: MemberDto) => void;
   onBan: (m: MemberDto) => void;
   /** Name of the voice channel somebody is in, for their profile card. */
@@ -530,29 +517,9 @@ export function MembersPanel({
                         top: Math.min(menuFor.y + 4, window.innerHeight - MENU_HEIGHT),
                       }}
                     >
-                      <div className="menu-label">Mute microphone for</div>
-                      {MUTE_OPTIONS.map((o) => (
-                        <button
-                          key={o.label}
-                          onClick={() => {
-                            onMenuChange(null);
-                            onMute(m, o.minutes);
-                          }}
-                        >
-                          {o.label}
-                        </button>
-                      ))}
-                      {m.mutedUntil && (
-                        <button
-                          onClick={() => {
-                            onMenuChange(null);
-                            onUnmute(m);
-                          }}
-                        >
-                          Unmute
-                        </button>
-                      )}
-                      <div className="menu-sep" />
+                      {/* Kick and ban only: muting a microphone is offered
+                          where the microphone is, on their row in the voice
+                          channel. */}
                       <button
                         className="danger"
                         onClick={() => {

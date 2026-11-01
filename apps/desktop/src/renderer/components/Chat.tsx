@@ -4096,15 +4096,6 @@ export function Chat({
           onMenuChange={setMenuFor}
           canModerate={canModerate}
           onShowBans={() => setShowBans(true)}
-          onMute={(m, minutes) =>
-            void run(
-              () => api.mute(m.guildId, m.user.id, minutes),
-              'Could not mute them.',
-            )
-          }
-          onUnmute={(m) =>
-            void run(() => api.unmute(m.guildId, m.user.id), 'Could not unmute them.')
-          }
           onKick={askKick}
           onBan={askBan}
           voiceChannelOf={voiceChannelOf}
@@ -4136,6 +4127,27 @@ export function Chat({
           x={volumeFor.x}
           y={volumeFor.y}
           onChange={(v) => setUserVolume(volumeFor.userId, v)}
+          mute={(() => {
+            const m = members.find((x) => x.user.id === volumeFor.userId);
+            if (!m || !canModerate(m)) return undefined;
+            return {
+              mutedUntil: m.mutedUntil,
+              onMute: (minutes) => {
+                setVolumeFor(null);
+                void run(
+                  () => api.mute(m.guildId, m.user.id, minutes),
+                  'Could not mute them.',
+                );
+              },
+              onUnmute: () => {
+                setVolumeFor(null);
+                void run(
+                  () => api.unmute(m.guildId, m.user.id),
+                  'Could not unmute them.',
+                );
+              },
+            };
+          })()}
         />
       )}
       {accountMenu && (

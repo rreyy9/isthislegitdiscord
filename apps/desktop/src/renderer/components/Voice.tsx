@@ -14,7 +14,7 @@ import {
 } from '../api';
 import type { Updates } from '../updates';
 import { bridge } from '../bridge';
-import { channelIcon } from './chat-format';
+import { channelIcon, MUTE_OPTIONS } from './chat-format';
 import { PhoneAppSettings } from './PhoneApp';
 import { ProfileSettings } from './ProfileSettings';
 import { AppearanceSettings } from './AppearanceSettings';
@@ -280,6 +280,8 @@ export function ScreenStage({ voice }: { voice: Voice }) {
 /** The box is drawn against the viewport, so its size has to be known here. */
 const VOLUME_MENU_WIDTH = 208;
 const VOLUME_MENU_HEIGHT = 116;
+/** The separator, the label and one row per mute length, for a moderator. */
+const MUTE_SECTION_HEIGHT = 31 + MUTE_OPTIONS.length * 27;
 
 /**
  * Right-click somebody in a voice channel and turn them down.
@@ -289,6 +291,9 @@ const VOLUME_MENU_HEIGHT = 116;
  * worth solving is the one person who is twice as loud as everyone else, and
  * that is per person by definition. The setting is remembered and follows them
  * between calls.
+ *
+ * A moderator also gets the microphone mute here: it is about somebody's
+ * microphone, so it lives where their microphone is, not in the roster.
  */
 export function UserVolumeMenu({
   name,
@@ -296,6 +301,7 @@ export function UserVolumeMenu({
   x,
   y,
   onChange,
+  mute,
 }: {
   name: string;
   /** 0..1. */
@@ -303,14 +309,24 @@ export function UserVolumeMenu({
   x: number;
   y: number;
   onChange: (volume: number) => void;
+  /** Only for somebody the viewer may moderate. */
+  mute?: {
+    mutedUntil: string | null;
+    /** Null minutes is indefinitely. */
+    onMute: (minutes: number | null) => void;
+    onUnmute: () => void;
+  };
 }) {
   const pct = Math.round(volume * 100);
+  const height =
+    VOLUME_MENU_HEIGHT +
+    (mute ? MUTE_SECTION_HEIGHT + (mute.mutedUntil ? 27 : 0) : 0);
   return (
     <div
       className="menu volume-menu"
       style={{
         left: Math.min(x, window.innerWidth - VOLUME_MENU_WIDTH - 8),
-        top: Math.min(y, window.innerHeight - VOLUME_MENU_HEIGHT - 8),
+        top: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
         width: VOLUME_MENU_WIDTH,
       }}
       onClick={(e) => e.stopPropagation()}
@@ -330,6 +346,18 @@ export function UserVolumeMenu({
       </div>
       <div className="menu-sep" />
       <button onClick={() => onChange(1)}>Reset to 100%</button>
+      {mute && (
+        <>
+          <div className="menu-sep" />
+          <div className="menu-label">Mute microphone for</div>
+          {MUTE_OPTIONS.map((o) => (
+            <button key={o.label} onClick={() => mute.onMute(o.minutes)}>
+              {o.label}
+            </button>
+          ))}
+          {mute.mutedUntil && <button onClick={mute.onUnmute}>Unmute</button>}
+        </>
+      )}
     </div>
   );
 }

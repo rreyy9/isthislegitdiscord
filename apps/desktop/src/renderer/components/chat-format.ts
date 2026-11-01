@@ -92,6 +92,15 @@ export function channelIcon(channel: {
  */
 export const isForever = (iso: string) => new Date(iso).getFullYear() > 9000;
 
+/** What a moderator can mute a microphone for. Null minutes is indefinitely. */
+export const MUTE_OPTIONS: { label: string; minutes: number | null }[] = [
+  { label: '5 minutes', minutes: 5 },
+  { label: '1 hour', minutes: 60 },
+  { label: '1 day', minutes: 60 * 24 },
+  { label: '1 week', minutes: 60 * 24 * 7 },
+  { label: 'Indefinitely', minutes: null },
+];
+
 /**
  * What a mute says. "Microphone", explicitly, every time it is written: the
  * word "muted" on its own reads as "silenced everywhere", which is what this
