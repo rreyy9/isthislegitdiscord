@@ -425,12 +425,18 @@ export function DmProfilePanel({
           : 'Offline';
     return (
       <div className="col members dm-profile">
-        <div className="dm-banner" style={nameColorVar(nameOf(u))} />
-        <div className="dm-profile-body">
+        {/* The picture sits on the banner, outside the scrolling body: a
+            scroll box clips whatever reaches past its top edge, which cut
+            off the top of the picture and its ring, and this way it stays
+            put while the details under it scroll. */}
+        <div className="dm-profile-head">
+          <div className="dm-banner" style={nameColorVar(nameOf(u))} />
           <div className="dm-profile-avatar">
             <Avatar size={80} name={nameOf(u)} image={u.image} />
             {!gone && <span className={'mc-dot ' + status} />}
           </div>
+        </div>
+        <div className="dm-profile-body">
           <div className="mc-name">{nameOf(u)}</div>
           <div className="mc-user">@{u.username}</div>
           <div className="mc-badges">

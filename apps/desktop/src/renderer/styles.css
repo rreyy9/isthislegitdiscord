@@ -2150,11 +2150,11 @@ button { font-family: inherit; cursor: pointer; }
 .app.no-right { grid-template-columns: 220px 1fr; }
 .dm-profile { background: var(--bg2); }
 .dm-banner { height: 64px; flex: none; background: var(--c, var(--accent-dim)); opacity: .85; }
-/* The body starts 40px up inside the banner rather than the avatar reaching
-   up out of it: the body scrolls, and a scroll box clips anything a negative
-   margin pulls past its top edge -- which was the top of the picture. */
-.dm-profile-body { padding: 0 14px 14px; margin-top: -40px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
-.dm-profile-avatar { position: relative; width: max-content; margin-bottom: 8px; }
+/* Banner and picture are one block that does not scroll; the picture hangs
+   half over the banner's bottom edge, ringed in the panel colour. */
+.dm-profile-head { flex: none; }
+.dm-profile-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.dm-profile-avatar { position: relative; width: max-content; margin: -40px 0 8px 14px; }
 .dm-profile-avatar .avatar { box-shadow: 0 0 0 5px var(--bg2); font-size: 28px; }
 .dm-profile-avatar .mc-dot { border-color: var(--bg2); }
 .dm-profile-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }

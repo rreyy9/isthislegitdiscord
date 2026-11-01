@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import type { MemberDto, MessageDto } from '../api';
 import { MessageContent } from './MessageContent';
 import { Avatar } from './Avatar';
@@ -508,7 +509,14 @@ export function MembersPanel({
                   >
                     ⋯
                   </button>
-                  {menuFor?.userId === m.user.id && (
+                  {/* Portalled out of the row: an offline row is drawn at
+                      reduced opacity, and that makes the row its own layer
+                      -- a menu left inside it came out faded, with every
+                      row below it painted on top. React events still bubble
+                      through the portal, so the stopPropagation above
+                      still holds. */}
+                  {menuFor?.userId === m.user.id &&
+                    createPortal(
                     <div
                       className="menu"
                       style={{
@@ -538,7 +546,8 @@ export function MembersPanel({
                       >
                         Ban
                       </button>
-                    </div>
+                    </div>,
+                    document.body,
                   )}
                 </div>
               )}
