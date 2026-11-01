@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { AppState, Vibration, type AppStateStatus } from 'react-native';
 import { api, ApiError, configure } from './api';
+import { forgetDevices, initE2e, resetE2e } from './e2e';
 import { plainMentions, quoteLine } from './format';
 import { connectSocket, disconnectSocket, getSocket } from './socket';
 import { DEFAULT_PREFS, prefsStore, type Prefs } from './prefs';
@@ -17,6 +18,7 @@ import { DEFAULT_SERVER_URL, normaliseServerUrl, store } from './store';
 import { CLIENT_VERSION_CODE } from './version';
 import type {
   Channel,
+  DirectMessage,
   Guild,
   Me,
   Member,
@@ -160,6 +162,16 @@ interface SessionValue {
    */
   notice: Notice | null;
   dismissNotice: () => void;
+
+  /** This account's DMs, newest conversation first. */
+  dms: DirectMessage[];
+  dmById: (channelId: string) => DirectMessage | null;
+  /** Open (or start) a conversation; resolves to it. */
+  openDm: (userIds: string[]) => Promise<DirectMessage>;
+  /** Take one out of the list until its next message. */
+  hideDm: (channelId: string) => void;
+  /** Unread DM messages, for the Messages tab's badge. */
+  dmUnread: number;
 }
 
 /** One tag, on its way to the strip at the top of the screen. */
@@ -171,7 +183,8 @@ export interface Notice {
   authorName: string;
   /** Already resolved to names -- the strip has no member list of its own. */
   preview: string;
-  kind: 'mention' | 'reply';
+  /** `dm` is a direct message, where `channelName` is the conversation's title. */
+  kind: 'mention' | 'reply' | 'dm';
 }
 
 /** What the open channel screen wants told to it, if anything is open. */
@@ -226,6 +239,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [latest, setLatest] = useState<Record<string, string>>({});
   const [mentionCounts, setMentionCounts] = useState<Record<string, number>>({});
   const [voiceByChannel, setVoiceByChannel] = useState<Record<string, string[]>>({});
+  /**
+   * This account's DMs. Their unread counts live in `mentionCounts` beside the
+   * tags, as on the desktop: every DM message is addressed to you, and that is
+   * what puts them on the badges.
+   */
+  const [dms, setDms] = useState<DirectMessage[]>([]);
+  const dmsRef = useRef<DirectMessage[]>([]);
+  dmsRef.current = dms;
 
   const [prefs, setPrefsState] = useState<Prefs>(DEFAULT_PREFS);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -419,7 +440,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
       const counts: Record<string, number> = {};
       for (const t of tags) counts[t.channelId] = t.count;
-      setMentionCounts(counts);
+      // The DM counts come from `refreshDms` and must survive this.
+      setMentionCounts((current) => {
+        for (const d of dmsRef.current) {
+          if (current[d.channelId]) counts[d.channelId] = current[d.channelId];
+        }
+        return counts;
+      });
     } catch {
       // A dot that is briefly wrong is not worth a message on screen, and the
       // next reconnect asks again.
@@ -498,6 +525,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshDms = useCallback(async () => {
+    try {
+      const rows = await api.dms();
+      setDms(rows);
+      setLatest((current) => {
+        const next = { ...current };
+        for (const d of rows) {
+          if (d.lastMessageId && (!next[d.channelId] || next[d.channelId] < d.lastMessageId)) {
+            next[d.channelId] = d.lastMessageId;
+          }
+        }
+        return next;
+      });
+      setMentionCounts((current) => {
+        const next = { ...current };
+        for (const d of rows) {
+          next[d.channelId] = d.channelId === openChannel.current ? 0 : d.unread;
+        }
+        return next;
+      });
+    } catch {
+      // A server older than DMs has none to give.
+    }
+  }, []);
+
   const refreshConfig = useCallback(async () => {
     try {
       const next = await api.config();
@@ -523,12 +575,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!me) return;
+    // Keys before anything a DM could need opening with.
+    void initE2e(me.id);
+    void refreshDms();
     void refreshGuilds();
     void refreshMembers();
     void refreshConfig();
     void refreshUnread();
     void refreshVoice();
-  }, [me, refreshGuilds, refreshMembers, refreshConfig, refreshUnread, refreshVoice]);
+  }, [me, refreshGuilds, refreshMembers, refreshConfig, refreshUnread, refreshVoice, refreshDms]);
 
   /**
    * The heads, once the channel list is in.
@@ -593,6 +648,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setMentionCounts({});
     setVoiceByChannel({});
     setNotice(null);
+    setDms([]);
+    resetE2e();
   }, []);
 
   /* ------------------------------------------------------------- unread */
@@ -691,10 +748,46 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         void refreshConfig();
         void refreshUnread();
         void refreshVoice();
+        void refreshDms();
         // Throttled: a phone reconnects every time the screen goes off.
         void refreshHeads();
       },
       onServerRestarting: () => setRestarting(true),
+
+      onDmMessage: ({ dm, message }) => {
+        if (!message) forgetDevices(dm.channelId);
+        setDms((current) => upsertDm(current, dm));
+        if (!message) return;
+        setLatest((current) =>
+          !current[dm.channelId] || current[dm.channelId] < message.id
+            ? { ...current, [dm.channelId]: message.id }
+            : current,
+        );
+        if (message.author.id === me.id) return;
+        if (dm.channelId === openChannel.current) return;
+        setMentionCounts((current) => ({ ...current, [dm.channelId]: dm.unread }));
+
+        const settings = prefsRef.current;
+        if (!settings.mentionAlerts) return;
+        if (settings.vibrate) Vibration.vibrate(40);
+        setNotice({
+          channelId: dm.channelId,
+          messageId: message.id,
+          channelName: dmTitle(dm),
+          authorName: message.author.displayName || message.author.username,
+          preview: message.sealedError
+            ? `🔒 ${message.sealedError}`
+            : quoteLine(
+                plainMentions(message.content, (id) => {
+                  const user = byIdRef.current.get(id);
+                  return user ? user.displayName || user.username : null;
+                }),
+                message.attachments.length,
+                false,
+              ),
+          kind: 'dm',
+        });
+      },
 
       onMessage: (m) => {
         if (sink.current?.channelId === m.channelId) sink.current.onMessage(m);
@@ -813,6 +906,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         if (versionCode > CLIENT_VERSION_CODE) setUpdate({ version, versionCode });
       },
       onVoiceParticipants: ({ channelId, userIds }) =>
+        // A DM call. The phone has no voice yet, and counting it here would
+        // put somebody's private call into "N in voice" in the header.
+        dmsRef.current.some((d) => d.channelId === channelId) ||
         setVoiceByChannel((current) => {
           if (userIds.length === 0) {
             if (!(channelId in current)) return current;
@@ -832,6 +928,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     refreshUnread,
     refreshHeads,
     refreshVoice,
+    refreshDms,
     signOut,
   ]);
 
@@ -940,8 +1037,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [visibleVoice],
   );
 
+  const dmById = useCallback(
+    (channelId: string) => dms.find((d) => d.channelId === channelId) ?? null,
+    [dms],
+  );
+  const openDm = useCallback(async (userIds: string[]) => {
+    const dm = await api.openDm(userIds);
+    setDms((current) => upsertDm(current, dm));
+    return dm;
+  }, []);
+  const hideDm = useCallback((channelId: string) => {
+    setDms((current) => current.filter((d) => d.channelId !== channelId));
+    void api.hideDm(channelId).catch(() => undefined);
+  }, []);
+  const dmUnread = useMemo(
+    () => dms.reduce((sum, d) => sum + (mentionCounts[d.channelId] ?? 0), 0),
+    [dms, mentionCounts],
+  );
+
   const value = useMemo<SessionValue>(
     () => ({
+      dms,
+      dmById,
+      openDm,
+      hideDm,
+      dmUnread,
       me,
       loading,
       serverUrl,
@@ -1014,10 +1134,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       applyMe,
       notice,
       dismissNotice,
+      dms,
+      dmById,
+      openDm,
+      hideDm,
+      dmUnread,
     ],
   );
 
   return (
     <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
+  );
+}
+
+/** What a conversation is called: its person, or its group's name or people. */
+export function dmTitle(dm: DirectMessage): string {
+  const name = (u: PublicUser) => u.displayName || u.username;
+  if (dm.kind === 'direct') return dm.users[0] ? name(dm.users[0]) : 'Nobody';
+  if (dm.name) return dm.name;
+  return dm.users.length ? dm.users.map(name).join(', ') : 'Just you';
+}
+
+/** Put one conversation into the list, newest first, replacing its old copy. */
+function upsertDm(list: DirectMessage[], dm: DirectMessage): DirectMessage[] {
+  const order = (d: DirectMessage) => d.lastMessageId ?? d.channelId;
+  return [dm, ...list.filter((d) => d.channelId !== dm.channelId)].sort((a, b) =>
+    order(b).localeCompare(order(a)),
   );
 }

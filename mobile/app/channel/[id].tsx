@@ -28,7 +28,8 @@ import {
   typingStart,
   typingStop,
 } from '../../src/socket';
-import { useSession } from '../../src/session';
+import { seal } from '../../src/e2e';
+import { dmTitle, useSession } from '../../src/session';
 import {
   Composer,
   type EditTarget,
@@ -124,6 +125,7 @@ export default function ChannelScreen() {
     nameFor,
     userFor,
     channelById,
+    dmById,
     setMessageSink,
     markRead,
     reconnectCount,
@@ -133,7 +135,20 @@ export default function ChannelScreen() {
     lastReadIn,
   } = useSession();
 
-  const channel = channelById(channelId);
+  /**
+   * A DM is shown as the person in it, and everything else about this screen
+   * works on it unchanged: it is a text channel with an id. What differs --
+   * the title, encryption, files, forwarding -- asks `dm`.
+   */
+  const dm = dmById(channelId);
+  /** For the send path, which is a callback held across renders. */
+  const dmRef = useRef(dm);
+  dmRef.current = dm;
+  const channel =
+    channelById(channelId) ??
+    (dm
+      ? { id: dm.channelId, guildId: '', name: dmTitle(dm), kind: 'TEXT' as const, position: 0 }
+      : null);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [pending, setPending] = useState<Pending[]>([]);
@@ -206,13 +221,23 @@ export default function ChannelScreen() {
     navigation.setOptions({
       headerTitle: () => (
         <View style={styles.title}>
-          <Icon name="pound" size={20} color={theme.textMuted} />
+          <Icon
+            name={dm ? (dm.kind === 'group' ? 'account-group' : 'lock') : 'pound'}
+            size={20}
+            color={theme.textMuted}
+          />
           <View style={styles.titleText}>
             <Text style={styles.titleName} numberOfLines={1}>
               {channel?.name ?? ''}
             </Text>
             <Text style={styles.titleMeta} numberOfLines={1}>
-              {onlineCount} online
+              {dm
+                ? dm.kind === 'group'
+                  ? `${dm.users.length + 1} members · encrypted`
+                  : !dm.canSend
+                    ? 'Not on your server'
+                    : `${dm.users[0] && onlineIds.has(dm.users[0].id) ? 'Online' : 'Offline'} · encrypted`
+                : `${onlineCount} online`}
             </Text>
           </View>
         </View>
@@ -221,7 +246,9 @@ export default function ChannelScreen() {
       // Going back to the channel list and in again is two screens of animation
       // to do the thing the drawer does in one tap, and the back gesture still
       // works for anybody who reaches for it.
-      headerLeft: () => (
+      // A DM came from the Messages tab, and back is where it goes. Undefined
+      // hands the button back to the stack's own arrow.
+      headerLeft: dm ? undefined : () => (
         <Pressable
           onPress={() => drawer.open('channels')}
           hitSlop={12}
@@ -263,7 +290,7 @@ export default function ChannelScreen() {
         </View>
       ),
     });
-  }, [navigation, channel, drawer, onlineCount, totalMentions]);
+  }, [navigation, channel, dm, drawer, onlineCount, onlineIds, totalMentions]);
 
   /* ------------------------------------------------------ message state */
 
@@ -526,7 +553,14 @@ export default function ChannelScreen() {
                     p.map((x) => (x.nonce === nonce ? { ...x, progress: fraction } : x)),
                   ),
               )
-            : await api.send(channelId, attempt.content, nonce, extra);
+            : dmRef.current
+              ? // Sealed here, at the moment of sending, so a retry is sealed
+                // to whoever is in the conversation by then.
+                await api.send(channelId, '', nonce, {
+                  ...extra,
+                  sealed: await seal(channelId, { content: attempt.content }),
+                })
+              : await api.send(channelId, attempt.content, nonce, extra);
         // `upsert` drops the placeholder by nonce. The socket broadcast of the
         // same message arrives too and lands on the same id, which is why both
         // routes go through one function.
@@ -676,7 +710,11 @@ export default function ChannelScreen() {
     async (id: string, content: string) => {
       setEdit(null);
       try {
-        upsert(await api.editMessage(channelId, id, content));
+        upsert(
+          dmRef.current
+            ? await api.editMessage(channelId, id, '', await seal(channelId, { content }))
+            : await api.editMessage(channelId, id, content),
+        );
       } catch (e) {
         Alert.alert(
           'That edit did not save',
@@ -1080,9 +1118,27 @@ export default function ChannelScreen() {
 
       <TypingIndicator label={typingLabel} />
 
+      {dm && !dm.canSend && (
+        <Text style={styles.dmNotice}>
+          {dm.kind === 'direct'
+            ? `You no longer share a server with ${dm.users[0]?.displayName || dm.users[0]?.username}. You can read this conversation, but not send to it.`
+            : 'Nobody else in this group is on your server any more.'}
+        </Text>
+      )}
+
       <Composer
         channelName={channel?.name ?? 'channel'}
-        disabled={status !== 'connected'}
+        placeholder={
+          dm
+            ? dm.canSend
+              ? `Message ${dm.kind === 'direct' ? '@' : ''}${channel?.name ?? ''}`
+              : 'You can read this, but not send to it'
+            : undefined
+        }
+        // Files in a DM are encrypted before they leave; the desktop does that
+        // today and the phone does not yet.
+        noFiles={Boolean(dm)}
+        disabled={status !== 'connected' || (dm !== null && !dm.canSend)}
         people={people}
         enterSends={prefs.enterSends}
         maxUploadBytes={config?.maxUploadBytes ?? null}
@@ -1107,7 +1163,15 @@ export default function ChannelScreen() {
         onReply={beginReply}
         onEdit={beginEdit}
         onDelete={confirmDelete}
-        onForward={setForwarding}
+        onForward={
+          dm
+            ? () =>
+                Alert.alert(
+                  'Not from a direct message',
+                  'A message from a private conversation can only stay in it.',
+                )
+            : setForwarding
+        }
         onPin={togglePin}
         onReact={toggleReaction}
       />
@@ -1155,6 +1219,15 @@ interface Row {
 }
 
 const styles = StyleSheet.create({
+  dmNotice: {
+    color: theme.text,
+    fontSize: 13,
+    backgroundColor: theme.mention,
+    borderColor: theme.warning,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
   flex: { flex: 1, backgroundColor: theme.bg },
   listWrap: { flex: 1 },
   list: { flex: 1 },

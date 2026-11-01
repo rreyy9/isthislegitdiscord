@@ -68,6 +68,10 @@ export interface EditTarget {
 export interface ComposerProps {
   /** Placeholder, so the box says which channel it will post to. */
   channelName: string;
+  /** The whole placeholder, where `Message #name` is the wrong sentence: a DM. */
+  placeholder?: string;
+  /** Hide the attach button. A DM on the phone, until files are encrypted here. */
+  noFiles?: boolean;
   disabled?: boolean;
   /** Everyone who can be tagged. The member list, as the picker wants it. */
   people: MentionUser[];
@@ -98,6 +102,8 @@ const TYPING_IDLE_MS = 3000;
 
 export function Composer({
   channelName,
+  placeholder,
+  noFiles,
   disabled,
   people,
   enterSends,
@@ -504,7 +510,7 @@ export function Composer({
 
       {/* ---------------------------------------------------------- box */}
       <View style={styles.row}>
-        {!edit && (
+        {!edit && !noFiles && (
           <Pressable
             onPress={() => setAttachOpen(true)}
             disabled={picking || disabled}
@@ -541,7 +547,7 @@ export function Composer({
               ? 'Reconnecting…'
               : edit
                 ? 'Edit your message'
-                : `Message #${channelName}`
+                : (placeholder ?? `Message #${channelName}`)
           }
           placeholderTextColor={theme.textFaint}
           editable={!disabled}

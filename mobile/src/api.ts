@@ -17,7 +17,10 @@ import type {
   SendExtras,
   VoiceChannelState,
   ServerConfig,
+  DirectMessage,
+  DmDevice,
 } from './types';
+import { unsealMessage, unsealMessages } from './e2e';
 
 /**
  * The REST client. Bearer token in memory, mirrored into SecureStore by the
@@ -147,6 +150,15 @@ async function request<T>(
   return data as T;
 }
 
+/**
+ * A page of history with any DM envelopes opened, so nothing on screen ever
+ * holds a sealed message it forgot to open.
+ */
+async function pageOf(page: Promise<MessagePage>): Promise<MessagePage> {
+  const p = await page;
+  return { ...p, messages: await unsealMessages(p.messages) };
+}
+
 export const api = {
   /**
    * Health, against an address that has not been saved yet.
@@ -185,10 +197,10 @@ export const api = {
   members: () => request<Member[]>('/api/members'),
 
   history: (channelId: string, before?: string, limit = 50) =>
-    request<MessagePage>(
+    pageOf(request<MessagePage>(
       `/api/channels/${channelId}/messages?limit=${limit}` +
         (before ? `&before=${encodeURIComponent(before)}` : ''),
-    ),
+    )),
 
   /**
    * The next page of *newer* messages.
@@ -199,9 +211,9 @@ export const api = {
    * the live page and reconciling it.
    */
   historyAfter: (channelId: string, after: string, limit = 50) =>
-    request<MessagePage>(
+    pageOf(request<MessagePage>(
       `/api/channels/${channelId}/messages?limit=${limit}&after=${encodeURIComponent(after)}`,
-    ),
+    )),
 
   /**
    * A page centred on one message: what landing on a search result or a pin
@@ -214,9 +226,9 @@ export const api = {
    * two failures.
    */
   historyAround: (channelId: string, around: string, limit = 50) =>
-    request<MessagePage>(
+    pageOf(request<MessagePage>(
       `/api/channels/${channelId}/messages?limit=${limit}&around=${encodeURIComponent(around)}`,
-    ),
+    )),
 
   /**
    * Find a message. Scoped to one guild, newest first, paged by message id.
@@ -252,7 +264,7 @@ export const api = {
       // edit here. Absent keys are dropped by JSON.stringify, which is what
       // keeps an ordinary message an ordinary message on the wire.
       body: { content, clientNonce, ...extra },
-    }),
+    }).then(unsealMessage),
 
   /**
    * Send with files. Multipart rather than the JSON route, because upload and
@@ -297,11 +309,11 @@ export const api = {
     );
   },
 
-  editMessage: (channelId: string, id: string, content: string) =>
+  editMessage: (channelId: string, id: string, content: string, sealed?: string) =>
     request<Message>(`/api/channels/${channelId}/messages/${id}`, {
       method: 'PATCH',
-      body: { content },
-    }),
+      body: sealed ? { content: '', sealed } : { content },
+    }).then(unsealMessage),
 
   deleteMessage: (channelId: string, id: string) =>
     request<{ ok: boolean }>(`/api/channels/${channelId}/messages/${id}`, {
@@ -358,7 +370,25 @@ export const api = {
    * switch: the button in the header is always there regardless.
    */
   pins: (channelId: string) =>
-    request<Message[]>(`/api/channels/${channelId}/messages/pinned`),
+    request<Message[]>(`/api/channels/${channelId}/messages/pinned`).then(unsealMessages),
+
+  /* ---------------------------------------------------- direct messages */
+
+  dms: () => request<DirectMessage[]>('/api/dms'),
+  /** One person opens your DM with them; two or more start a new group. */
+  openDm: (userIds: string[], name?: string) =>
+    request<DirectMessage>('/api/dms', {
+      method: 'POST',
+      body: name ? { userIds, name } : { userIds },
+    }),
+  hideDm: (channelId: string) =>
+    request<{ ok: boolean }>(`/api/dms/${channelId}/hide`, { method: 'POST' }),
+  dmDevices: (channelId: string) => request<DmDevice[]>(`/api/dms/${channelId}/devices`),
+  registerDevice: (deviceId: string, keys: { encryptionKey: string; signingKey: string }) =>
+    request<{ ok: boolean }>(`/api/keys/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'PUT',
+      body: keys,
+    }),
   pinMessage: (channelId: string, id: string) =>
     request<Message>(`/api/channels/${channelId}/messages/${id}/pin`, {
       method: 'POST',

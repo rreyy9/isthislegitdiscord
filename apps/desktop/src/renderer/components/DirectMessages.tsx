@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import type { DirectMessageDto, MemberDto, PublicUserDto } from '../api';
 import { Avatar } from './Avatar';
+import { lastSeenLabel, stamp } from './chat-format';
+import { nameColorVar } from '../theme';
 
 /**
  * Direct messages in the sidebar, and the dialogs that start and change them.
@@ -39,11 +41,17 @@ export function DmSection({
   onOpen,
   onNew,
   onClose,
+  subtitle,
+  inCall,
 }: {
   dms: DirectMessageDto[];
   activeChannel: string | null;
   /** For the presence dot on a one-to-one row. */
   members: MemberDto[];
+  /** The second line: what they are doing, or when they were last around. */
+  subtitle: (dm: DirectMessageDto) => string;
+  /** Whether somebody is in this conversation's call right now. */
+  inCall: (channelId: string) => boolean;
   unreadCount: (channelId: string) => number;
   isUnread: (channelId: string) => boolean;
   onOpen: (channelId: string) => void;
@@ -91,7 +99,7 @@ export function DmSection({
                 ) : (
                   <>
                     <Avatar
-                      className="tiny"
+                      size={28}
                       name={first ? nameOf(first) : '?'}
                       image={first?.image}
                     />
@@ -99,7 +107,15 @@ export function DmSection({
                   </>
                 )}
               </span>
-              <span className="dm-name">{dmTitle(dm)}</span>
+              <span className="dm-text">
+                <span className="dm-name">{dmTitle(dm)}</span>
+                <span className="dm-sub">{subtitle(dm)}</span>
+              </span>
+              {inCall(dm.channelId) && (
+                <span className="dm-call-mark" title="A call is going on">
+                  📞
+                </span>
+              )}
               {count > 0 ? (
                 <span className="ping-badge" title={`${count} unread`}>
                   {count > 99 ? '99+' : count}
@@ -251,8 +267,8 @@ export function PickPeopleModal({
           )}
           <p className="hint">
             🔒 Messages are end-to-end encrypted. Only the people in the conversation can
-            read them, on devices that were set up before the message was sent. Files
-            can’t be sent in direct messages yet.
+            read them, on devices that were set up before the message was sent. That
+            includes files and pictures.
           </p>
         </div>
         <div className="modal-foot">
@@ -320,6 +336,229 @@ export function RenameGroupModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** What somebody is doing, for the profile panel and the sidebar row. */
+export function presenceOf(m: MemberDto | undefined): 'on' | 'away' | 'off' {
+  return !m?.online ? 'off' : m.away ? 'away' : 'on';
+}
+
+/**
+ * The top of a conversation, once there is nothing older to load: who this
+ * is with, and what "private" means here.
+ */
+export function DmIntro({ dm }: { dm: DirectMessageDto }) {
+  const first = dm.users[0];
+  return (
+    <div className="dm-intro">
+      {dm.kind === 'direct' && first ? (
+        <Avatar size={72} name={nameOf(first)} image={first.image} />
+      ) : (
+        <span className="dm-intro-group">👥</span>
+      )}
+      <h2>{dmTitle(dm)}</h2>
+      <p>
+        {dm.kind === 'direct' && first ? (
+          <>
+            This is the start of your direct messages with <b>@{first.username}</b>. Only the
+            two of you can read this conversation.
+          </>
+        ) : (
+          <>This is the start of the group. Only the {dm.users.length + 1} of you can read it.</>
+        )}{' '}
+        Messages and files are end-to-end encrypted on your devices.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * The right-hand column while a DM is open, in place of the member list.
+ *
+ * One-to-one: the other person's profile. A group: who is in it, and the
+ * group's own controls.
+ */
+export function DmProfilePanel({
+  dm,
+  members,
+  now,
+  voiceChannelOf,
+  callUserIds,
+  inThisCall,
+  onCall,
+  onAdd,
+  onRename,
+  onLeave,
+  onClose,
+}: {
+  dm: DirectMessageDto;
+  members: MemberDto[];
+  now: number;
+  voiceChannelOf: (userId: string) => string | null;
+  /** Who is in this conversation's call, possibly nobody. */
+  callUserIds: string[];
+  inThisCall: boolean;
+  onCall: () => void;
+  onAdd: () => void;
+  onRename: () => void;
+  onLeave: () => void;
+  onClose: () => void;
+}) {
+  const memberOf = (id: string) => members.find((m) => m.user.id === id);
+  const callLabel = inThisCall ? 'Leave call' : callUserIds.length > 0 ? 'Join call' : 'Call';
+
+  if (dm.kind === 'direct' && dm.users[0]) {
+    const u = dm.users[0];
+    const m = memberOf(u.id);
+    const gone = dm.departedIds.includes(u.id);
+    const status = gone ? 'off' : presenceOf(m);
+    const lastActive = m?.lastActiveAt ?? null;
+    const inVoice = gone ? null : voiceChannelOf(u.id);
+    const statusText = gone
+      ? 'Not on your server'
+      : status === 'on'
+        ? 'Online'
+        : status === 'away'
+          ? 'Away'
+          : 'Offline';
+    return (
+      <div className="col members dm-profile">
+        <div className="dm-banner" style={nameColorVar(nameOf(u))} />
+        <div className="dm-profile-body">
+          <div className="dm-profile-avatar">
+            <Avatar size={80} name={nameOf(u)} image={u.image} />
+            {!gone && <span className={'mc-dot ' + status} />}
+          </div>
+          <div className="mc-name">{nameOf(u)}</div>
+          <div className="mc-user">@{u.username}</div>
+          <div className="mc-badges">
+            <span className={'mc-status ' + status}>{statusText}</span>
+            {m?.role === 'ADMIN' && <span className="mc-role">Admin</span>}
+          </div>
+          <dl className="mc-rows">
+            {inVoice && (
+              <div className="mc-row">
+                <dt>In voice</dt>
+                <dd>🔊 {inVoice}</dd>
+              </div>
+            )}
+            {!gone && (
+              <div className="mc-row">
+                <dt>Last active</dt>
+                <dd title={lastActive ? stamp(lastActive) : undefined}>
+                  {status === 'on'
+                    ? 'Now'
+                    : lastActive
+                      ? lastSeenLabel(lastActive, now)
+                      : 'Unknown'}
+                </dd>
+              </div>
+            )}
+            {m?.joinedAt && (
+              <div className="mc-row">
+                <dt>Member since</dt>
+                <dd>
+                  {new Date(m.joinedAt).toLocaleDateString([], {
+                    day: 'numeric',
+                    month: 'short',
+                    year: 'numeric',
+                  })}
+                </dd>
+              </div>
+            )}
+            <div className="mc-row">
+              <dt>Privacy</dt>
+              <dd>🔒 End-to-end encrypted</dd>
+            </div>
+          </dl>
+          <div className="dm-profile-actions">
+            {dm.canSend && (
+              <button className={inThisCall ? 'danger' : 'primary'} onClick={onCall}>
+                📞 {callLabel}
+              </button>
+            )}
+            <button onClick={onClose}>Close conversation</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="col members dm-profile">
+      <div className="sb-head row" style={{ fontSize: 13 }}>
+        {dm.users.length + 1} members
+      </div>
+      <div className="sb-scroll">
+        {dm.users.map((user) => {
+          const gone = dm.departedIds.includes(user.id);
+          const st = gone ? 'off' : presenceOf(memberOf(user.id));
+          return (
+            <div key={user.id} className="mem dm-member">
+              <Avatar className="tiny" name={nameOf(user)} image={user.image} />
+              <div className="dm-member-text">
+                <div className="dm-member-name">{nameOf(user)}</div>
+                {gone && <div className="mem-seen">Not on the server</div>}
+                {callUserIds.includes(user.id) && <div className="mem-seen">📞 In the call</div>}
+              </div>
+              <div className={'pdot ' + st} />
+            </div>
+          );
+        })}
+        <div className="dm-profile-actions">
+          {dm.canSend && (
+            <button className={inThisCall ? 'danger' : 'primary'} onClick={onCall}>
+              📞 {callLabel}
+            </button>
+          )}
+          {dm.canSend && dm.users.length + 1 < MAX_GROUP_DM && (
+            <button onClick={onAdd}>Add people</button>
+          )}
+          <button onClick={onRename}>Rename group</button>
+          <button className="danger" onClick={onLeave}>
+            Leave group
+          </button>
+        </div>
+        <p className="dm-profile-note">
+          🔒 Messages and files in this group are end-to-end encrypted.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Somebody started a call in one of your DMs and you are not in it. Drawn
+ * over the top right of the window until you answer, decline, or it ends.
+ */
+export function IncomingCall({
+  dm,
+  callerName,
+  callerImage,
+  onJoin,
+  onDecline,
+}: {
+  dm: DirectMessageDto;
+  callerName: string;
+  callerImage: string | null;
+  onJoin: () => void;
+  onDecline: () => void;
+}) {
+  return (
+    <div className="incoming-call" role="alertdialog" aria-label={`${callerName} is calling`}>
+      <Avatar size={44} name={callerName} image={callerImage} />
+      <div className="incoming-text">
+        <b>{callerName}</b>
+        <span>{dm.kind === 'group' ? `is calling ${dmTitle(dm)}` : 'is calling you'}</span>
+      </div>
+      <button className="incoming-decline" title="Decline" onClick={onDecline}>
+        ✕
+      </button>
+      <button className="incoming-join" title="Join the call" onClick={onJoin}>
+        📞
+      </button>
     </div>
   );
 }

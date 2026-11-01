@@ -479,6 +479,13 @@ export const SendMessageInput = z.object({
    * instead of quietly sending the words in the clear.
    */
   sealed: z.string().max(MAX_SEALED_CHARS).optional(),
+  /**
+   * In a DM, the uploaded names of the files to keep rather than expire,
+   * comma separated. The server cannot see that an encrypted file is a
+   * picture, so the sender says so -- pictures are kept, everything else goes
+   * after `EPHEMERAL_FILE_HOURS`, the same rule as anywhere else.
+   */
+  sealedKeep: z.string().max(2000).optional(),
   // Empty content is allowed when there are attachments: a pasted screenshot
   // with nothing typed is a normal thing to send.
   content: z.string().max(MAX_MESSAGE_CHARS),

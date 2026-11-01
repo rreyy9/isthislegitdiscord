@@ -1,6 +1,6 @@
 {
   "name": "@isthislegit/mobile",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "private": true,
   "description": "Android client for a self-hosted isthislegit server",
   "main": "expo-router/entry",
@@ -15,11 +15,15 @@
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
     "expo": "~57.0.24",
     "expo-application": "~57.0.3",
     "expo-build-properties": "~57.0.21",
     "expo-clipboard": "~57.0.2",
     "expo-constants": "~57.0.19",
+    "expo-crypto": "~57.0.4",
     "expo-document-picker": "~57.0.2",
     "expo-file-system": "~57.0.7",
     "expo-font": "~57.0.4",

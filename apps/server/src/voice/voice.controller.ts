@@ -49,10 +49,12 @@ export class VoiceController {
 
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
-      select: { kind: true, listenOnly: true },
+      select: { kind: true, listenOnly: true, guildId: true },
     });
     if (!channel) throw new NotFoundException('No such channel.');
-    if (channel.kind !== 'VOICE') {
+    // A DM is a text channel that can also be called. `voice.join` above
+    // already asked whether this person is in it and can still reach anyone.
+    if (channel.kind !== 'VOICE' && channel.guildId !== null) {
       throw new ForbiddenException('That is not a voice channel.');
     }
 

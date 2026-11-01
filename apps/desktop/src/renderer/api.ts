@@ -1,5 +1,5 @@
 import { bridge } from './bridge';
-import { unsealMessage, unsealMessages } from './e2e';
+import { decryptFile, unsealMessage, unsealMessages } from './e2e';
 
 /**
  * Thin API client. Holds the bearer token in memory and mirrors it into the
@@ -205,6 +205,11 @@ export interface AttachmentDto {
   /** Set once the deadline passed and the bytes went. The row stays. */
   expiredAt?: string | null;
   /**
+   * A DM file's key, from the message's envelope. The bytes on the server
+   * are ciphertext; the view decrypts them with this. Never on the wire.
+   */
+  sealed?: { key: string; iv: string };
+  /**
    * Whether the server will hand this back as something drawable. Absent from
    * an older server, where every attachment was a picture — so undefined
    * means "decide from the content type", which is what this build used to do
@@ -253,6 +258,8 @@ export interface SendExtrasDto {
   forwardedFromId?: string;
   /** The encrypted envelope, in a DM. `content` is then empty. */
   sealed?: string;
+  /** In a DM, which uploaded file names are pictures to keep. Comma separated. */
+  sealedKeep?: string;
 }
 
 export interface MessageDto {
@@ -607,6 +614,8 @@ export const api = {
     // screenshot on it comes this way rather than as JSON.
     if (extra.replyToId) form.append('replyToId', extra.replyToId);
     if (extra.replyPing === false) form.append('replyPing', 'false');
+    if (extra.sealed) form.append('sealed', extra.sealed);
+    if (extra.sealedKeep) form.append('sealedKeep', extra.sealedKeep);
     if (extra.forwardedFromId) {
       form.append('forwardedFromId', extra.forwardedFromId);
     }
@@ -814,7 +823,12 @@ export function avatarUrl(image: string): Promise<string> {
   return attachmentUrl(image, image);
 }
 
-export function attachmentUrl(id: string, path: string): Promise<string> {
+export function attachmentUrl(
+  id: string,
+  path: string,
+  /** For a DM file: how to decrypt it, and what it really is. */
+  sealed?: { key: string; iv: string; contentType: string },
+): Promise<string> {
   const cached = objectUrls.get(id);
   if (cached) return cached;
 
@@ -823,7 +837,9 @@ export function attachmentUrl(id: string, path: string): Promise<string> {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
-    return URL.createObjectURL(await res.blob());
+    if (!sealed) return URL.createObjectURL(await res.blob());
+    const plain = await decryptFile(await res.arrayBuffer(), sealed);
+    return URL.createObjectURL(new Blob([plain], { type: sealed.contentType }));
   })();
 
   objectUrls.set(id, pending);
@@ -845,7 +861,10 @@ export function attachmentUrl(id: string, path: string): Promise<string> {
  * send, and a save that silently lands in Downloads is not what "Save" means
  * on a desktop application.
  */
-export async function fetchAttachmentBytes(path: string): Promise<ArrayBuffer> {
+export async function fetchAttachmentBytes(
+  path: string,
+  sealed?: { key: string; iv: string },
+): Promise<ArrayBuffer> {
   const res = await send(`${serverUrl}${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
@@ -853,5 +872,6 @@ export async function fetchAttachmentBytes(path: string): Promise<ArrayBuffer> {
     throw new ApiError(410, 'That file expired and is no longer on the server.');
   }
   if (!res.ok) throw new ApiError(res.status, `Could not download that file.`);
-  return res.arrayBuffer();
+  const bytes = await res.arrayBuffer();
+  return sealed ? decryptFile(bytes, sealed) : bytes;
 }

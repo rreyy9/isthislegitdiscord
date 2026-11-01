@@ -80,6 +80,7 @@ import {
   describeBytes,
   guessReactions,
   isForever,
+  lastSeenLabel,
   muteLabel,
   quoteLine,
   sameDay,
@@ -106,13 +107,17 @@ import {
 } from './ChatModals';
 import { ForwardCard, ReplyStrip, requoted, toRef } from './MessageRefs';
 import {
+  DmIntro,
+  DmProfilePanel,
   DmSection,
+  IncomingCall,
   MAX_GROUP_DM,
   PickPeopleModal,
   RenameGroupModal,
   dmTitle,
+  presenceOf,
 } from './DirectMessages';
-import { forgetDevices, initE2e, seal } from '../e2e';
+import { encryptFile, forgetDevices, initE2e, seal, unsealMessage } from '../e2e';
 
 
 
@@ -320,6 +325,17 @@ export function Chat({
   const [dms, setDms] = useState<DirectMessageDto[]>([]);
   /** Whether the list has been asked for, so an open DM is not taken for gone. */
   const [dmsLoaded, setDmsLoaded] = useState(false);
+  /** The profile column beside an open DM; toggled from its header. */
+  const [dmProfileOpen, setDmProfileOpen] = useState(true);
+  /**
+   * A call somebody started in one of your DMs that you are not in. Raised by
+   * the voice roster going from nobody to somebody, cleared when you answer,
+   * decline, or the call ends.
+   */
+  const [incomingCall, setIncomingCall] = useState<{
+    channelId: string;
+    callerId: string;
+  } | null>(null);
   const [dmDialog, setDmDialog] = useState<
     | { mode: 'new' }
     | { mode: 'add'; dm: DirectMessageDto }
@@ -631,6 +647,9 @@ export function Chat({
   /** Same reason: the socket handlers ask which channels are DMs. */
   const dmsRef = useRef<DirectMessageDto[]>(dms);
   dmsRef.current = dms;
+  /** The roster before an event changes it, to tell a ring from an update. */
+  const voiceByChannelRef = useRef<Record<string, string[]>>({});
+  voiceByChannelRef.current = voiceByChannel;
 
   const activeDm = dms.find((d) => d.channelId === activeChannel) ?? null;
   /**
@@ -1166,14 +1185,29 @@ export function Chat({
       },
       // Forwarded to the update banner, which lives above this component.
       onUpdateAvailable: ({ version }) => noteUpdateAvailable(version),
-      onVoiceParticipants: ({ channelId, userIds }) =>
+      onVoiceParticipants: ({ channelId, userIds }) => {
+        const before = voiceByChannelRef.current[channelId] ?? [];
+        voiceByChannelRef.current = { ...voiceByChannelRef.current, [channelId]: userIds };
+        const dm = dmsRef.current.find((d) => d.channelId === channelId);
+        if (dm) {
+          // A ring is a DM call going from nobody to somebody who is not us.
+          // Only DM calls reach this client at all; the server sends them to
+          // the people in the conversation and nobody else.
+          if (before.length === 0 && userIds.length > 0 && !userIds.includes(me.id)) {
+            setIncomingCall({ channelId, callerId: userIds[0] });
+            announceCall(dm, userIds[0]);
+          } else if (userIds.length === 0 || userIds.includes(me.id)) {
+            setIncomingCall((prev) => (prev?.channelId === channelId ? null : prev));
+          }
+        }
         setVoiceByChannel((prev) => {
           if (userIds.length === 0) {
             const { [channelId]: _gone, ...rest } = prev;
             return rest;
           }
           return { ...prev, [channelId]: userIds };
-        }),
+        });
+      },
       onTyping: ({ channelId, userId, typing }) => {
         if (channelId !== activeChannelRef.current || userId === me.id) return;
         setTypingUsers((prev) => {
@@ -1427,7 +1461,12 @@ export function Chat({
     // The call is already over — the server closes the room with the channel —
     // but this client would sit in it holding a dead track and a panel naming
     // somewhere that no longer exists.
-    if (voice.channelId && !channels.some((c) => c.id === voice.channelId)) {
+    if (
+      voice.channelId &&
+      !channels.some((c) => c.id === voice.channelId) &&
+      dmsLoaded &&
+      !dms.some((d) => d.channelId === voice.channelId)
+    ) {
       leaveVoice();
     }
   }, [guilds, activeChannel, voice.channelId, dms, dmsLoaded]);
@@ -1694,6 +1733,43 @@ export function Chat({
       channelId: message.channelId,
       messageId: message.id,
     });
+  }
+
+  /** Somebody is calling: the same switches a DM message answers to. */
+  function announceCall(dm: DirectMessageDto, callerId: string) {
+    const settings = notificationsRef.current;
+    if (settings.sound) playPing();
+    if (!settings.mentions) return;
+    const caller = dm.users.find((u) => u.id === callerId);
+    const who = caller ? caller.displayName || caller.username : 'Somebody';
+    void bridge.notifyMention({
+      title: `${who} is calling`,
+      body: dm.kind === 'group' ? `In ${dmTitle(dm)}` : 'Open the app to answer',
+      channelId: dm.channelId,
+      messageId: '',
+    });
+  }
+
+  /** Start, join or leave a conversation's call. */
+  function toggleDmCall(dm: DirectMessageDto) {
+    setIncomingCall((prev) => (prev?.channelId === dm.channelId ? null : prev));
+    if (voice.channelId === dm.channelId) leaveVoice();
+    else joinVoice(dm.channelId);
+  }
+
+  /** The second line of a DM row. */
+  function dmSubtitle(dm: DirectMessageDto): string {
+    if (dm.kind === 'group') return `${dm.users.length + 1} members`;
+    const u = dm.users[0];
+    if (!u) return '';
+    if (dm.departedIds.includes(u.id)) return 'Not on your server';
+    const m = members.find((x) => x.user.id === u.id);
+    const where = voiceChannelOf(u.id);
+    if (m?.online && where) return `In ${where}`;
+    const st = presenceOf(m);
+    if (st === 'on') return 'Online';
+    if (st === 'away') return 'Away';
+    return m?.lastActiveAt ? `Last active ${lastSeenLabel(m.lastActiveAt, now)}` : 'Offline';
   }
 
   /** Open (or start) a conversation and go to it. */
@@ -2154,11 +2230,6 @@ export function Chat({
    */
   function addFiles(files: File[]) {
     if (files.length === 0) return;
-    // Files would reach the server readable, and a DM promises otherwise.
-    if (activeDm) {
-      setBanner('Files can’t be sent in direct messages yet: they would not be encrypted.');
-      return;
-    }
     // Built before the state update rather than inside it. The updater has to
     // be a pure function of the previous list -- React is free to call it more
     // than once -- and this one makes object URLs and starts the checks, both
@@ -2375,6 +2446,41 @@ export function Chat({
   }
 
   /**
+   * Send to a DM: every file encrypted under its own key, the text and the
+   * files' real names and keys sealed into one envelope, and only opaque
+   * bytes uploaded. Pictures are named in `sealedKeep` so the server keeps
+   * them the way it keeps any other picture.
+   */
+  async function sendSealed(
+    channelId: string,
+    content: string,
+    nonce: string,
+    files: File[],
+    extra: SendExtrasDto,
+    onProgress: (f: number) => void,
+  ): Promise<MessageDto> {
+    const encrypted = await Promise.all(files.map(encryptFile));
+    const sealed = await seal(channelId, {
+      content,
+      files: encrypted.map((e) => e.meta),
+    });
+    if (encrypted.length === 0) return api.send(channelId, '', nonce, { ...extra, sealed });
+    const keep = encrypted
+      .filter((e) => e.meta.contentType.startsWith('image/'))
+      .map((e) => e.meta.name)
+      .join(',');
+    const saved = await api.sendWithFiles(
+      channelId,
+      '',
+      nonce,
+      encrypted.map((e) => e.upload),
+      { ...extra, sealed, ...(keep ? { sealedKeep: keep } : {}) },
+      onProgress,
+    );
+    return unsealMessage(saved);
+  }
+
+  /**
    * Post one outbox entry and reconcile the optimistic row with what came back.
    *
    * A failure leaves the row where it is, marked with the reason and offering
@@ -2393,29 +2499,18 @@ export function Chat({
     // arriving on the first progress event would be a visible stutter.
     if (files.length) setUploads((prev) => ({ ...prev, [nonce]: 0 }));
     try {
-      const saved = files.length
-        ? await api.sendWithFiles(
-            channelId,
-            row.content,
-            nonce,
-            files,
-            extra,
-            (f) =>
-              setUploads((prev) =>
-                // Never backwards. A retry starts a second request whose early
-                // events would otherwise drag the ring back to nothing.
-                prev[nonce] === undefined || f > prev[nonce]
-                  ? { ...prev, [nonce]: f }
-                  : prev,
-              ),
-          )
-        : dmsRef.current.some((d) => d.channelId === channelId)
-          ? // Sealed here rather than when it was typed, so a retry is sealed
-            // to whoever is in the conversation by then.
-            await api.send(channelId, '', nonce, {
-              ...extra,
-              sealed: await seal(channelId, { content: row.content }),
-            })
+      const progress = (f: number) =>
+        setUploads((prev) =>
+          // Never backwards. A retry starts a second request whose early
+          // events would otherwise drag the ring back to nothing.
+          prev[nonce] === undefined || f > prev[nonce] ? { ...prev, [nonce]: f } : prev,
+        );
+      const saved = dmsRef.current.some((d) => d.channelId === channelId)
+        ? // Sealed here rather than when it was typed, so a retry is sealed to
+          // whoever is in the conversation by then.
+          await sendSealed(channelId, row.content, nonce, files, extra, progress)
+        : files.length
+          ? await api.sendWithFiles(channelId, row.content, nonce, files, extra, progress)
           : await api.send(channelId, row.content, nonce, extra);
       outboxRef.current.delete(nonce);
       for (const url of row.previews ?? []) URL.revokeObjectURL(url);
@@ -2907,9 +3002,10 @@ export function Chat({
   const imageOfUser = (id: string) =>
     members.find((m) => m.user.id === id)?.user.image ?? null;
 
-  const voiceChannelObj = guilds
-    .flatMap((g) => g.channels)
-    .find((c) => c.id === voice.channelId);
+  const voiceDm = dms.find((d) => d.channelId === voice.channelId) ?? null;
+  const voiceChannelObj =
+    guilds.flatMap((g) => g.channels).find((c) => c.id === voice.channelId) ??
+    (voiceDm ? { ...dmChannel(voiceDm), name: `Call with ${dmTitle(voiceDm)}` } : undefined);
 
   /** Live speaking/muted state exists only for the room we are actually in. */
   const peerFor = (channelId: string, userId: string) =>
@@ -2973,7 +3069,7 @@ export function Chat({
   );
 
   return (
-    <div className="app">
+    <div className={'app' + (activeDm && !dmProfileOpen ? ' no-right' : '')}>
       {titleSlot &&
         createPortal(
           <>
@@ -2985,6 +3081,10 @@ export function Chat({
       {/* -------- sidebar -------- */}
       <div className="col sidebar">
         <div className="sb-head">{guilds[0]?.name ?? 'isthislegit'}</div>
+        {/* The channels and the DMs stack from the top, each scrolling on its
+            own once it is long, so the DMs sit straight under the watch party
+            rather than being pushed down onto the voice panel. */}
+        <div className="sb-stack">
         <div className="sb-scroll">
           {guilds.map((g) => (
             <div key={g.id}>
@@ -3190,7 +3290,10 @@ export function Chat({
           onOpen={setActiveChannel}
           onNew={() => setDmDialog({ mode: 'new' })}
           onClose={closeDm}
+          subtitle={dmSubtitle}
+          inCall={(id) => (voiceByChannel[id] ?? []).length > 0}
         />
+        </div>
 
         {/* Above the voice panel, and the same shape as it: both say "here is
             something you are currently in", and one glance should answer it
@@ -3259,42 +3362,75 @@ export function Chat({
       {/* -------- chat -------- */}
       <div className="col chat">
         <div className="chat-head">
-          <span className="hash" style={{ color: 'var(--faint)' }}>
-            {activeDm
-              ? activeDm.kind === 'group'
-                ? '👥'
-                : '@'
-              : activeChannelObj
-                ? channelIcon(activeChannelObj)
-                : '#'}
-          </span>
+          {activeDm?.kind === 'direct' && activeDm.users[0] ? (
+            <span className="dm-head-avatar">
+              <Avatar
+                size={26}
+                name={activeChannelObj?.name ?? '?'}
+                image={activeDm.users[0].image}
+              />
+              {!activeDm.departedIds.includes(activeDm.users[0].id) && (
+                <span
+                  className={
+                    'dm-dot ' +
+                    presenceOf(members.find((m) => m.user.id === activeDm.users[0].id))
+                  }
+                />
+              )}
+            </span>
+          ) : (
+            <span className="hash" style={{ color: 'var(--faint)' }}>
+              {activeDm ? '👥' : activeChannelObj ? channelIcon(activeChannelObj) : '#'}
+            </span>
+          )}
           {activeChannelObj?.name ?? '—'}
+          {activeDm && (
+            <span className="dm-head-sub">
+              {activeDm.kind === 'direct'
+                ? `@${activeDm.users[0]?.username ?? ''}`
+                : `${activeDm.users.length + 1} members`}
+            </span>
+          )}
           {activeDm && (
             <span
               className="e2e-chip"
               title={
                 'Only the people in this conversation can read it, on devices that were ' +
-                'set up before each message was sent. The server cannot. Who is talking ' +
-                'to whom, and when, is not hidden.'
+                'set up before each message was sent. That includes files. The server ' +
+                'cannot. Who is talking to whom, and when, is not hidden.'
               }
             >
-              🔒 End-to-end encrypted
+              🔒 Private
             </span>
           )}
-          {activeDm?.kind === 'group' && (
-            <span className="dm-actions">
-              {activeDm.canSend && activeDm.users.length + 1 < MAX_GROUP_DM && (
-                <button onClick={() => setDmDialog({ mode: 'add', dm: activeDm })}>
-                  Add people
-                </button>
-              )}
-              <button onClick={() => setDmDialog({ mode: 'rename', dm: activeDm })}>
-                Rename
-              </button>
-              <button className="danger" onClick={() => askLeaveGroup(activeDm)}>
-                Leave
-              </button>
-            </span>
+          {activeDm?.canSend && (
+            <button
+              className={'dm-call-btn' + (voice.channelId === activeDm.channelId ? ' live' : '')}
+              title={
+                voice.channelId === activeDm.channelId
+                  ? 'Leave the call'
+                  : (voiceByChannel[activeDm.channelId] ?? []).length > 0
+                    ? 'Join the call'
+                    : 'Start a call'
+              }
+              onClick={() => toggleDmCall(activeDm)}
+            >
+              📞{' '}
+              {voice.channelId === activeDm.channelId
+                ? 'Leave'
+                : (voiceByChannel[activeDm.channelId] ?? []).length > 0
+                  ? 'Join call'
+                  : 'Call'}
+            </button>
+          )}
+          {activeDm && (
+            <button
+              className={'pin-btn' + (dmProfileOpen ? ' on' : '')}
+              title={dmProfileOpen ? 'Hide profile' : 'Show profile'}
+              onClick={() => setDmProfileOpen((open) => !open)}
+            >
+              👤
+            </button>
           )}
           {/* Always there, whether or not anything is pinned: an icon that
               came and went with the board's contents would be a control
@@ -3341,6 +3477,24 @@ export function Chat({
           )}
         </div>
 
+        {activeDm && (voiceByChannel[activeDm.channelId] ?? []).length > 0 && (
+          <div className="dm-call-strip">
+            <span className="dm-call-pulse" />
+            {voice.channelId === activeDm.channelId
+              ? (voiceByChannel[activeDm.channelId] ?? []).filter((id) => id !== me.id).length > 0
+                ? `In a call with ${(voiceByChannel[activeDm.channelId] ?? [])
+                    .filter((id) => id !== me.id)
+                    .map(nameOfUser)
+                    .join(', ')}`
+                : 'Ringing…'
+              : `${(voiceByChannel[activeDm.channelId] ?? []).map(nameOfUser).join(', ')} ${
+                  (voiceByChannel[activeDm.channelId] ?? []).length === 1 ? 'is' : 'are'
+                } in a call`}
+            {activeDm.canSend && voice.channelId !== activeDm.channelId && (
+              <button onClick={() => toggleDmCall(activeDm)}>Join</button>
+            )}
+          </div>
+        )}
         {activeDm && departedNotice(activeDm) && (
           <div className="dm-notice">{departedNotice(activeDm)}</div>
         )}
@@ -3363,7 +3517,8 @@ export function Chat({
                 Load earlier messages
               </button>
             )}
-            {messages.length === 0 ? (
+            {!cursor && activeDm && <DmIntro dm={activeDm} />}
+            {messages.length === 0 && !activeDm ? (
               <div className="empty">No messages yet. Say something.</div>
             ) : (
               messages.map((m, i) => {
@@ -3783,8 +3938,12 @@ export function Chat({
               things you have to already know about. */}
           <button
             className="attach-btn"
-            title={activeDm ? 'Files can’t be sent in direct messages yet' : 'Attach a file'}
-            disabled={!activeChannelObj || activeChannelObj.kind !== 'TEXT' || activeDm !== null}
+            title={activeDm ? 'Attach a file (encrypted before it leaves this device)' : 'Attach a file'}
+            disabled={
+              !activeChannelObj ||
+              activeChannelObj.kind !== 'TEXT' ||
+              (activeDm !== null && !activeDm.canSend)
+            }
             onClick={() => fileInputRef.current?.click()}
           >
             📎
@@ -3911,34 +4070,52 @@ export function Chat({
         </div>
       </div>
 
-      {/* -------- members -------- */}
-      <MembersPanel
-        members={members}
-        now={now}
-        iAmAdmin={iAmAdmin}
-        menuFor={menuFor}
-        onMenuChange={setMenuFor}
-        canModerate={canModerate}
-        onShowBans={() => setShowBans(true)}
-        onMute={(m, minutes) =>
-          void run(
-            () => api.mute(m.guildId, m.user.id, minutes),
-            'Could not mute them.',
-          )
-        }
-        onUnmute={(m) =>
-          void run(() => api.unmute(m.guildId, m.user.id), 'Could not unmute them.')
-        }
-        onKick={askKick}
-        onBan={askBan}
-        voiceChannelOf={voiceChannelOf}
-        meId={me.id}
-        onMessage={(userId) =>
-          void openDmWith([userId]).catch((e: any) =>
-            setBanner(e?.message ?? 'Could not open that conversation.'),
-          )
-        }
-      />
+      {/* -------- members, or who the DM is with -------- */}
+      {activeDm ? (
+        dmProfileOpen && (
+          <DmProfilePanel
+            dm={activeDm}
+            members={members}
+            now={now}
+            voiceChannelOf={voiceChannelOf}
+            callUserIds={voiceByChannel[activeDm.channelId] ?? []}
+            inThisCall={voice.channelId === activeDm.channelId}
+            onCall={() => toggleDmCall(activeDm)}
+            onAdd={() => setDmDialog({ mode: 'add', dm: activeDm })}
+            onRename={() => setDmDialog({ mode: 'rename', dm: activeDm })}
+            onLeave={() => askLeaveGroup(activeDm)}
+            onClose={() => closeDm(activeDm)}
+          />
+        )
+      ) : (
+        <MembersPanel
+          members={members}
+          now={now}
+          iAmAdmin={iAmAdmin}
+          menuFor={menuFor}
+          onMenuChange={setMenuFor}
+          canModerate={canModerate}
+          onShowBans={() => setShowBans(true)}
+          onMute={(m, minutes) =>
+            void run(
+              () => api.mute(m.guildId, m.user.id, minutes),
+              'Could not mute them.',
+            )
+          }
+          onUnmute={(m) =>
+            void run(() => api.unmute(m.guildId, m.user.id), 'Could not unmute them.')
+          }
+          onKick={askKick}
+          onBan={askBan}
+          voiceChannelOf={voiceChannelOf}
+          meId={me.id}
+          onMessage={(userId) =>
+            void openDmWith([userId]).catch((e: any) =>
+              setBanner(e?.message ?? 'Could not open that conversation.'),
+            )
+          }
+        />
+      )}
       <ScreenPicker voice={voice} />
       {startingParty && (
         <StartPartyModal
@@ -4065,6 +4242,24 @@ export function Chat({
       {showBans && guilds[0] && (
         <BansModal guildId={guilds[0].id} onClose={() => setShowBans(false)} />
       )}
+      {incomingCall &&
+        (() => {
+          const dm = dms.find((d) => d.channelId === incomingCall.channelId);
+          if (!dm) return null;
+          const caller = dm.users.find((u) => u.id === incomingCall.callerId);
+          return (
+            <IncomingCall
+              dm={dm}
+              callerName={caller ? caller.displayName || caller.username : 'Somebody'}
+              callerImage={caller?.image ?? null}
+              onJoin={() => {
+                setActiveChannel(dm.channelId);
+                toggleDmCall(dm);
+              }}
+              onDecline={() => setIncomingCall(null)}
+            />
+          );
+        })()}
       {dmDialog?.mode === 'new' && (
         <PickPeopleModal
           members={members}

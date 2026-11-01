@@ -7,6 +7,7 @@ import { saveAttachment } from '../download';
 import { describeBytes } from '../format';
 import { radius, spacing, theme } from '../theme';
 import type { Attachment } from '../types';
+import { b64, decryptFile } from '../e2e';
 import { Icon } from './Icon';
 import { useImageViewer } from './ImageViewer';
 
@@ -80,10 +81,80 @@ export const AttachmentView = memo(function AttachmentView({
   // Expired is not a failure and gets the same card a file does: the row
   // outlives the bytes, so the message can still say what was there.
   if (file.expiredAt) return <AttachmentFile file={file} />;
+  // A DM file: ciphertext on the server, opened here. Pictures are drawn; the
+  // rest say what they are, since saving one means decrypting it to disk.
+  if (file.sealed) {
+    return /^image\//i.test(file.contentType) ? (
+      <SealedImage file={file} />
+    ) : (
+      <SealedFile file={file} />
+    );
+  }
   if (!drawInline(file)) return <AttachmentFile file={file} />;
   if (isVideo(file)) return <AttachmentVideo file={file} />;
   return <AttachmentImage file={file} />;
 });
+
+/* ------------------------------------------------------ encrypted, DM */
+
+/**
+ * A picture from a DM: fetched as the ciphertext it is, decrypted with the key
+ * from its message, and handed to the image view as a data URI. Never written
+ * to disk.
+ */
+function SealedImage({ file }: { file: Attachment }) {
+  const [uri, setUri] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const viewer = useImageViewer();
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const res = await fetch(absoluteUrl(file.url), { headers: authHeaders() });
+      if (!res.ok) throw new Error(String(res.status));
+      const plain = decryptFile(new Uint8Array(await res.arrayBuffer()), file.sealed!);
+      if (live) setUri(`data:${file.contentType};base64,${b64(plain)}`);
+    })().catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [file.id, file.url, file.contentType, file.sealed]);
+
+  if (failed) {
+    return (
+      <View style={styles.failed}>
+        <Text style={styles.failedText}>Could not open {file.fileName}</Text>
+      </View>
+    );
+  }
+  const ratio = file.width && file.height ? file.width / file.height : undefined;
+  return (
+    <Pressable
+      style={[styles.picture, ratio ? { aspectRatio: ratio } : styles.pictureFallback]}
+      onPress={() => uri && viewer.open({ uri, name: file.fileName })}
+      accessibilityRole="imagebutton"
+      accessibilityLabel={file.fileName}
+    >
+      {uri ? (
+        <Image style={StyleSheet.absoluteFill} source={{ uri }} contentFit="cover" />
+      ) : (
+        <ActivityIndicator style={StyleSheet.absoluteFill} color={theme.textMuted} />
+      )}
+    </Pressable>
+  );
+}
+
+/** Any other DM file: what it is, and where it can be opened for now. */
+function SealedFile({ file }: { file: Attachment }) {
+  return (
+    <View style={styles.failed}>
+      <Text style={styles.failedText}>
+        🔒 {file.fileName} · {describeBytes(file.size)}
+      </Text>
+      <Text style={styles.failedText}>Encrypted. Open it in the desktop app to save it.</Text>
+    </View>
+  );
+}
 
 /* -------------------------------------------------------------- picture */
 

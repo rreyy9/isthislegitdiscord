@@ -420,8 +420,25 @@ export class VoiceService implements OnModuleInit, OnModuleDestroy {
     if (userIds.length) this.byChannel.set(channelId, userIds);
     else this.byChannel.delete(channelId);
 
-    this.gateway.broadcastVoiceParticipants(channelId, userIds);
+    // Who is in a DM call is as private as the DM. Looked up here rather than
+    // remembered, and chained so two quick changes cannot arrive out of order.
+    this.broadcasts = this.broadcasts
+      .then(async () => {
+        const dm = await this.prisma.channel.findUnique({
+          where: { id: channelId },
+          select: { guildId: true, participants: { select: { userId: true } } },
+        });
+        const privateTo =
+          dm && dm.guildId === null ? dm.participants.map((p) => p.userId) : undefined;
+        this.gateway.broadcastVoiceParticipants(channelId, userIds, privateTo);
+      })
+      .catch((err: Error) =>
+        this.log.warn(`could not announce voice for ${channelId}: ${err.message}`),
+      );
   }
+
+  /** Keeps `apply`'s announcements in the order the changes happened. */
+  private broadcasts: Promise<void> = Promise.resolve();
 
   /** Every channel that currently has someone in it. */
   state(): VoiceChannelState[] {

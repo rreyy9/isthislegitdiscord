@@ -63,6 +63,11 @@ export interface Attachment {
   expiredAt?: string | null;
   /** Whether the server will hand this back as something drawable. */
   inline?: boolean;
+  /**
+   * A DM file's key, from its message's envelope: the bytes on the server are
+   * ciphertext. Filled in by `e2e.ts`, never on the wire.
+   */
+  sealed?: { key: string; iv: string };
 }
 
 /** A message quoted by another: what a reply shows above itself. */
@@ -76,6 +81,8 @@ export interface MessageRef {
   editedAt: string | null;
   attachments: Attachment[];
   deleted: boolean;
+  /** The quoted DM message's encrypted envelope. */
+  sealed?: string | null;
 }
 
 export interface Reaction {
@@ -88,6 +95,13 @@ export interface Message {
   channelId: string;
   author: PublicUser;
   content: string;
+  /**
+   * A DM message's end-to-end encrypted envelope. `content` is empty on the
+   * wire and filled in once `e2e.ts` has opened it.
+   */
+  sealed?: string | null;
+  /** Why a DM message could not be opened on this phone. Never on the wire. */
+  sealedError?: string;
   createdAt: string;
   editedAt: string | null;
   deletedAt: string | null;
@@ -163,6 +177,8 @@ export interface SearchPage {
 
 /** What a send may say about other messages: an answer, or a forward. */
 export interface SendExtras {
+  /** The encrypted envelope, in a DM. `content` is then empty. */
+  sealed?: string;
   /** The message being answered. Must be in the channel being sent to. */
   replyToId?: string;
   /**
@@ -182,4 +198,28 @@ export interface Ban {
   bannedBy: string | null;
   reason: string | null;
   createdAt: string;
+}
+
+/** One DM conversation as this account sees it. See `DirectMessage` in shared. */
+export interface DirectMessage {
+  channelId: string;
+  kind: 'direct' | 'group';
+  /** A group's chosen name, or null to list its people. */
+  name: string | null;
+  /** Everybody in it but you. */
+  users: PublicUser[];
+  /** Of `users`, who no longer shares a server with you. */
+  departedIds: string[];
+  lastMessageId: string | null;
+  unread: number;
+  canSend: boolean;
+}
+
+/** A device a DM message is sealed to, or verified against. */
+export interface DmDevice {
+  userId: string;
+  deviceId: string;
+  encryptionKey: string;
+  signingKey: string;
+  recipient: boolean;
 }

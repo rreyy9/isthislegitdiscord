@@ -636,7 +636,7 @@ export function AttachmentImage({ file }: { file: AttachmentDto }) {
 
   useEffect(() => {
     let live = true;
-    attachmentUrl(file.id, file.url).then(
+    attachmentUrl(file.id, file.url, sealedOf(file)).then(
       (url) => live && setSrc(url),
       () => live && setFailed(true),
     );
@@ -709,7 +709,7 @@ export function AttachmentVideo({ file }: { file: AttachmentDto }) {
   function load() {
     if (loading || src) return;
     setLoading(true);
-    attachmentUrl(file.id, file.url).then(
+    attachmentUrl(file.id, file.url, sealedOf(file)).then(
       (url) => {
         setSrc(url);
         setLoading(false);
@@ -782,6 +782,10 @@ const RENDERABLE = /^image\/(png|jpeg|gif|webp)$/i;
  * attachment was a picture. Falling back to the content type is what this
  * build did before being told, so an old server behaves as it always did.
  */
+/** A DM file's key and real type, for the fetch that decrypts it. */
+const sealedOf = (file: AttachmentDto) =>
+  file.sealed ? { ...file.sealed, contentType: file.contentType } : undefined;
+
 const drawInline = (file: AttachmentDto): boolean =>
   file.inline ?? RENDERABLE.test(file.contentType);
 
@@ -851,7 +855,7 @@ export function AttachmentFile({ file }: { file: AttachmentDto }) {
     setBusy(true);
     setError(null);
     try {
-      const bytes = await fetchAttachmentBytes(file.url);
+      const bytes = await fetchAttachmentBytes(file.url, file.sealed);
       const path = await bridge.saveFile({ name: file.fileName, bytes });
       // Null is a cancelled dialog, which is not a failure and gets no
       // message: the person who cancelled it knows what they did.

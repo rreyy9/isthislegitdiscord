@@ -1,4 +1,10 @@
-import { api, type DmDeviceDto, type MessageDto, type MessageRefDto } from './api';
+import {
+  api,
+  type AttachmentDto,
+  type DmDeviceDto,
+  type MessageDto,
+  type MessageRefDto,
+} from './api';
 import { bridge } from './bridge';
 
 /**
@@ -41,6 +47,79 @@ import { bridge } from './bridge';
 /** What goes inside an envelope. An object so there is room to grow. */
 export interface SealedBody {
   content: string;
+  /** The files that went with it, each encrypted under a key of its own. */
+  files?: SealedFile[];
+}
+
+/**
+ * One encrypted file, as the envelope describes it. The server stores the
+ * bytes under `name` -- a random token -- and knows nothing else about them:
+ * not the real name, not the type, not that it is a picture.
+ */
+export interface SealedFile {
+  name: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+  width: number | null;
+  height: number | null;
+  /** AES-GCM, raw, base64. Only ever inside a sealed envelope. */
+  key: string;
+  iv: string;
+}
+
+/**
+ * Encrypt one file for upload. What goes up is opaque bytes under a random
+ * name; what it really is goes into the envelope as a `SealedFile`.
+ *
+ * A picture's size is measured here, before encryption, because the server
+ * cannot -- and without it the message list jumps as each one decrypts.
+ */
+export async function encryptFile(file: File): Promise<{ upload: File; meta: SealedFile }> {
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, [
+    'encrypt',
+  ]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, await file.arrayBuffer());
+
+  let width: number | null = null;
+  let height: number | null = null;
+  if (file.type.startsWith('image/')) {
+    try {
+      const bmp = await createImageBitmap(file);
+      width = bmp.width;
+      height = bmp.height;
+      bmp.close();
+    } catch {
+      /* not decodable here; it is drawn without a reserved size */
+    }
+  }
+
+  const name = `sealed-${crypto.randomUUID()}.bin`;
+  return {
+    upload: new File([ct], name, { type: 'application/octet-stream' }),
+    meta: {
+      name,
+      fileName: file.name || 'file',
+      contentType: file.type || 'application/octet-stream',
+      size: file.size,
+      width,
+      height,
+      key: b64(await crypto.subtle.exportKey('raw', key)),
+      iv: b64(iv),
+    },
+  };
+}
+
+/** Open the bytes of one encrypted file, fetched as they were stored. */
+export async function decryptFile(
+  bytes: ArrayBuffer,
+  sealed: { key: string; iv: string },
+): Promise<ArrayBuffer> {
+  const key = await crypto.subtle.importKey('raw', unb64(sealed.key), 'AES-GCM', false, [
+    'decrypt',
+  ]);
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(sealed.iv) }, key, bytes);
 }
 
 interface Envelope {
@@ -364,7 +443,10 @@ export async function open(
       unb64(env.ct),
     );
     const body = JSON.parse(new TextDecoder().decode(plain)) as SealedBody;
-    return { content: typeof body.content === 'string' ? body.content : '' };
+    return {
+      content: typeof body.content === 'string' ? body.content : '',
+      files: Array.isArray(body.files) ? body.files : [],
+    };
   } catch {
     throw new SealedError('This message could not be decrypted.');
   }
@@ -380,7 +462,9 @@ export async function unsealMessage(m: MessageDto): Promise<MessageDto> {
   const out: MessageDto = { ...m };
   if (m.sealed) {
     try {
-      out.content = (await open(m.channelId, m.author.id, m.sealed)).content;
+      const body = await open(m.channelId, m.author.id, m.sealed);
+      out.content = body.content;
+      out.attachments = m.attachments.map((a) => withSealedFile(a, body.files ?? []));
     } catch (err) {
       out.content = '';
       out.sealedError = err instanceof SealedError ? err.message : 'This message could not be decrypted.';
@@ -392,6 +476,27 @@ export async function unsealMessage(m: MessageDto): Promise<MessageDto> {
 
 export function unsealMessages(ms: MessageDto[]): Promise<MessageDto[]> {
   return Promise.all(ms.map(unsealMessage));
+}
+
+/**
+ * An attachment as the envelope says it really is. The key rides along so the
+ * view can decrypt the bytes when it fetches them; an attachment the envelope
+ * does not describe is left as the server sent it, which draws as a file
+ * card nobody can open -- the truth about it.
+ */
+function withSealedFile(a: AttachmentDto, files: SealedFile[]): AttachmentDto {
+  const f = files.find((x) => x.name === a.fileName);
+  if (!f) return a;
+  const { inline: _serverSaid, ...rest } = a;
+  return {
+    ...rest,
+    fileName: f.fileName,
+    contentType: f.contentType,
+    size: f.size,
+    width: f.width,
+    height: f.height,
+    sealed: { key: f.key, iv: f.iv },
+  };
 }
 
 async function unsealRef(ref: MessageRefDto): Promise<MessageRefDto> {

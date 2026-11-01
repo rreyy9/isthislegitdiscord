@@ -156,14 +156,18 @@ export const MessageRow = memo(function MessageRow({
           </View>
         )}
 
-        <MessageContent
-          content={message.content}
-          attachments={message.attachments}
-          edited={Boolean(message.editedAt)}
-          lookupMention={lookupMention}
-          showEmbeds={showEmbeds}
-          autoplayEmbeds={autoplayEmbeds}
-        />
+        {message.sealedError ? (
+          <Text style={styles.sealedError}>🔒 {message.sealedError}</Text>
+        ) : (
+          <MessageContent
+            content={message.content}
+            attachments={message.attachments}
+            edited={Boolean(message.editedAt)}
+            lookupMention={lookupMention}
+            showEmbeds={showEmbeds}
+            autoplayEmbeds={autoplayEmbeds}
+          />
+        )}
 
         {reactions.length > 0 && (
           <View style={styles.reactions}>
@@ -259,6 +263,7 @@ function RefLine({
 }
 
 const styles = StyleSheet.create({
+  sealedError: { color: theme.textFaint, fontStyle: 'italic', fontSize: 14 },
   row: {
     flexDirection: 'row',
     paddingHorizontal: spacing.md,

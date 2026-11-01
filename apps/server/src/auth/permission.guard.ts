@@ -74,6 +74,9 @@ const DM_ACTIONS: ReadonlySet<Action> = new Set<Action>([
   'channel.write',
   'message.react',
   'message.pin',
+  // A call. The same LiveKit room per channel a voice channel has, named
+  // after the DM's id, so nothing about voice had to learn what a DM is.
+  'voice.join',
 ]);
 
 /**
@@ -85,6 +88,7 @@ const WRITE_IN_DM: ReadonlySet<Action> = new Set<Action>([
   'channel.write',
   'message.react',
   'message.pin',
+  'voice.join',
 ]);
 
 /** The key that makes a one-to-one DM unique: both ids, in a fixed order. */

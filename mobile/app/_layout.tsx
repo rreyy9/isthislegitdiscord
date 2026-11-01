@@ -80,7 +80,10 @@ function Gate() {
           gestureEnabled: true,
         }}
       >
-        <Stack.Screen name="index" options={{ title: 'Channels' }} />
+        {/* The two tabs replace each other, so they swap without a slide. */}
+        <Stack.Screen name="index" options={{ title: 'Channels', animation: 'none' }} />
+        <Stack.Screen name="dms" options={{ title: 'Messages', animation: 'none' }} />
+        <Stack.Screen name="new-message" options={{ title: 'New message' }} />
         <Stack.Screen name="sign-in" options={{ headerShown: false }} />
         <Stack.Screen name="channel/[id]" options={{ title: '' }} />
         <Stack.Screen name="settings" options={{ title: 'Settings' }} />

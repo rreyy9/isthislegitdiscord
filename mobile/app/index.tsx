@@ -17,7 +17,8 @@ import {
 } from '../src/components/ChannelList';
 import { useDrawer, useSwipeToOpenDrawer } from '../src/components/Drawer';
 import { Icon } from '../src/components/Icon';
-import { ServerMark, UserBar, useServerName } from '../src/components/Identity';
+import { ServerMark, useServerName } from '../src/components/Identity';
+import { BottomTabs } from '../src/components/BottomTabs';
 import { VoiceSheet } from '../src/components/VoiceSheet';
 import { useSession } from '../src/session';
 import { radius, spacing, TAP_TARGET, theme } from '../src/theme';
@@ -203,11 +204,7 @@ export default function Channels() {
         )}
       />
 
-      <UserBar
-        onPress={() => router.push('/settings')}
-        surface={theme.surface}
-        bottomInset={insets.bottom}
-      />
+      <BottomTabs active="channels" bottomInset={insets.bottom} />
 
       <VoiceSheet channel={voiceFor} onClose={() => setVoiceFor(null)} />
     </View>

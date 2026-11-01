@@ -210,6 +210,8 @@ describe('direct messages', () => {
     expect(await p.canInChannel('a', 'dm', 'channel.read')).toBe(true);
     expect(await p.canInChannel('b', 'dm', 'channel.write')).toBe(true);
     expect(await p.canInChannel('a', 'dm', 'message.pin')).toBe(true);
+    // A call is the DM's own voice room.
+    expect(await p.canInChannel('a', 'dm', 'voice.join')).toBe(true);
   });
 
   it('refuses everybody else, admins included', async () => {
@@ -225,7 +227,6 @@ describe('direct messages', () => {
   it('has no moderation, even for the people in it', async () => {
     const p = dmService({ participants: { dm: ['a', 'b'] }, shared: [['a', 'b']] });
     expect(await p.canInChannel('a', 'dm', 'message.moderate')).toBe(false);
-    expect(await p.canInChannel('a', 'dm', 'voice.join')).toBe(false);
     expect(await p.canInChannel('a', 'dm', 'channel.manage')).toBe(false);
   });
 
@@ -234,6 +235,7 @@ describe('direct messages', () => {
     expect(await p.canInChannel('a', 'dm', 'channel.read')).toBe(true);
     expect(await p.canInChannel('a', 'dm', 'channel.write')).toBe(false);
     expect(await p.canInChannel('a', 'dm', 'message.react')).toBe(false);
+    expect(await p.canInChannel('a', 'dm', 'voice.join')).toBe(false);
   });
 
   it('lets a group carry on when one person has gone', async () => {

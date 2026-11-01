@@ -276,9 +276,14 @@ export class MessagesController {
       if (body.content.trim()) {
         throw new BadRequestException('Messages in a direct message have to be encrypted.');
       }
+      // Files in a DM are encrypted on the device before they are sent, so all
+      // that can be checked here is that they look it: opaque bytes, and an
+      // envelope saying what they are.
       if (uploads.length > 0) {
-        // Files would arrive here readable, and a DM promises otherwise.
-        throw new BadRequestException('Files cannot be sent in a direct message yet.');
+        if (!body.sealed) {
+          throw new BadRequestException('Files in a direct message have to be encrypted.');
+        }
+        for (const f of uploads) f.mimetype = 'application/octet-stream';
       }
       if (!body.sealed && !forwardedFromId) {
         throw new BadRequestException('Nothing to send.');
@@ -310,6 +315,11 @@ export class MessagesController {
     const expiresAt = new Date(
       Date.now() + EPHEMERAL_FILE_HOURS * 60 * 60 * 1000,
     );
+    // In a DM only: which of the encrypted files are pictures. See
+    // `sealedKeep` in shared.
+    const keep = new Set(
+      participants ? (body.sealedKeep ?? '').split(',').filter(Boolean) : [],
+    );
 
     const row = await this.prisma.message.create({
       data: {
@@ -334,7 +344,7 @@ export class MessagesController {
             // Pictures are the conversation and are kept. Everything else is
             // being handed to somebody, and goes when that has had time to
             // happen.
-            expiresAt: f.isImage ? null : expiresAt,
+            expiresAt: f.isImage || keep.has(f.fileName) ? null : expiresAt,
           })),
         },
       },

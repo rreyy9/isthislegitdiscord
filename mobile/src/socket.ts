@@ -1,7 +1,8 @@
 import { io, type Socket } from 'socket.io-client';
 import { getServerUrl, getToken } from './api';
 import { CLIENT_PLATFORM, CLIENT_VERSION } from './version';
-import type { Message, PublicUser } from './types';
+import type { DirectMessage, Message, PublicUser } from './types';
+import { unsealMessage } from './e2e';
 
 /**
  * Socket lifecycle.
@@ -24,6 +25,11 @@ import type { Message, PublicUser } from './types';
  */
 
 export interface SocketEvents {
+  /**
+   * One of your DMs changed: a message in it (already decrypted), or -- with
+   * `message` null -- it was opened, or its people or name changed.
+   */
+  onDmMessage: (p: { dm: DirectMessage; message: Message | null }) => void;
   onMessage: (m: Message) => void;
   onMessageUpdated: (m: Message) => void;
   onMessageDeleted: (p: { id: string; channelId: string }) => void;
@@ -113,8 +119,20 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('disconnect', () => events.onStatus('disconnected'));
   socket.io.on('reconnect_attempt', () => events.onStatus('connecting'));
 
-  socket.on('message:new', events.onMessage);
-  socket.on('message:updated', events.onMessageUpdated);
+  // Through one queue, so a DM message that takes a moment to decrypt cannot
+  // be overtaken by the one sent after it.
+  socket.on('message:new', (m: Message) => inOrder(unsealMessage(m), events.onMessage));
+  socket.on('message:updated', (m: Message) =>
+    inOrder(unsealMessage(m), events.onMessageUpdated),
+  );
+  socket.on('dm:message', (p: { dm: DirectMessage; message: Message | null }) =>
+    inOrder(
+      p.message
+        ? unsealMessage(p.message).then((message) => ({ ...p, message }))
+        : Promise.resolve(p),
+      events.onDmMessage,
+    ),
+  );
   socket.on('message:deleted', events.onMessageDeleted);
   socket.on('channel:activity', events.onChannelActivity);
   socket.on('mention:new', events.onMention);
@@ -128,6 +146,13 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('server:restarting', () => events.onServerRestarting());
 
   return socket;
+}
+
+let queue: Promise<void> = Promise.resolve();
+
+/** Hand each result over in the order the events arrived. */
+function inOrder<T>(work: Promise<T>, deliver: (value: T) => void) {
+  queue = queue.then(() => work.then(deliver)).catch(() => undefined);
 }
 
 export function getSocket(): Socket | null {

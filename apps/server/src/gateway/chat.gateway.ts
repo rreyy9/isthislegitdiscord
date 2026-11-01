@@ -1050,7 +1050,7 @@ export class ChatGateway
    * anybody walking in -- writing it to the database for people whose sockets
    * have not come back yet would stamp them all active at the same instant.
    */
-  broadcastVoiceParticipants(channelId: string, userIds: string[]) {
+  broadcastVoiceParticipants(channelId: string, userIds: string[], privateTo?: string[]) {
     const before = this.voiceRooms.get(channelId) ?? [];
     for (const id of userIds) {
       if (!before.includes(id) && this.sessions.has(id)) this.markActive(id);
@@ -1058,6 +1058,8 @@ export class ChatGateway
     if (userIds.length) this.voiceRooms.set(channelId, userIds);
     else this.voiceRooms.delete(channelId);
 
-    this.server.emit('voice:participants', { channelId, userIds });
+    // A DM call goes to its participants only. Their client is also what
+    // turns "somebody is now in it" into a ring.
+    this.audience(privateTo).emit('voice:participants', { channelId, userIds });
   }
 }

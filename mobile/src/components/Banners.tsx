@@ -269,11 +269,18 @@ export function MentionNotice() {
           );
         }}
         accessibilityRole="button"
-        accessibilityLabel={`${notice.authorName} tagged you in ${notice.channelName}`}
+        accessibilityLabel={
+          notice.kind === 'dm'
+            ? `Message from ${notice.authorName}`
+            : `${notice.authorName} tagged you in ${notice.channelName}`
+        }
       >
         <Text style={styles.noticeHead} numberOfLines={1}>
-          {notice.authorName} {notice.kind === 'reply' ? 'replied' : 'tagged you'} in #
-          {notice.channelName}
+          {notice.kind === 'dm'
+            ? notice.channelName === notice.authorName
+              ? notice.authorName
+              : `${notice.authorName} in ${notice.channelName}`
+            : `${notice.authorName} ${notice.kind === 'reply' ? 'replied' : 'tagged you'} in #${notice.channelName}`}
         </Text>
         <Text style={styles.noticeText} numberOfLines={2}>
           {notice.preview}

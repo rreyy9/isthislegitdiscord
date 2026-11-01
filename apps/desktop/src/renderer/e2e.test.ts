@@ -76,7 +76,7 @@ describe('e2e', () => {
     expect(sealed).not.toContain('see you');
 
     const bob = await as('bob');
-    expect(await bob.open('dm1', 'alice', sealed)).toEqual({ content: 'see you at 8' });
+    expect(await bob.open('dm1', 'alice', sealed)).toEqual({ content: 'see you at 8', files: [] });
     // The sender's own device can read its own message back.
     const aliceAgain = await as('alice');
     expect((await aliceAgain.open('dm1', 'alice', sealed)).content).toBe('see you at 8');
@@ -133,6 +133,49 @@ describe('e2e', () => {
     );
     const bobAgain = await as('bob');
     await expect(bobAgain.open('dm1', 'alice', sealed)).rejects.toThrow(/keys changed/);
+  });
+
+  it('puts an encrypted file back to what it really is, with its key', async () => {
+    await as('bob');
+    const alice = await as('alice');
+    const photo = new File([new Uint8Array([9, 8, 7])], 'beach.png', { type: 'image/png' });
+    const { upload, meta } = await alice.encryptFile(photo);
+    // What the server is given says nothing about the picture.
+    expect(upload.name).toMatch(/^sealed-.+\.bin$/);
+    expect(upload.type).toBe('application/octet-stream');
+    const sealed = await alice.seal('dm1', { content: '', files: [meta] });
+
+    const bob = await as('bob');
+    const m = await bob.unsealMessage({
+      id: 'm2',
+      channelId: 'dm1',
+      author: { id: 'alice', username: 'alice', displayName: null, image: null },
+      content: '',
+      sealed,
+      createdAt: '',
+      editedAt: null,
+      deletedAt: null,
+      clientNonce: null,
+      attachments: [
+        {
+          id: 'a1',
+          fileName: upload.name,
+          contentType: 'application/octet-stream',
+          size: 3,
+          width: null,
+          height: null,
+          url: '/api/attachments/a1',
+          inline: false,
+        },
+      ],
+    });
+    const [a] = m.attachments;
+    expect(a.fileName).toBe('beach.png');
+    expect(a.contentType).toBe('image/png');
+    // The server's "not drawable" was about ciphertext; the real type decides.
+    expect(a.inline).toBeUndefined();
+    const bytes = await bob.decryptFile(await upload.arrayBuffer(), a.sealed!);
+    expect([...new Uint8Array(bytes)]).toEqual([9, 8, 7]);
   });
 
   it('turns a failure into a line to draw, never an exception', async () => {
