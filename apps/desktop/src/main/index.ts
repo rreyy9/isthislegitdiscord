@@ -32,6 +32,11 @@ import {
   registerNotifications,
   setNotificationIdentity,
 } from './notifications';
+import {
+  defaultNotificationSettings,
+  normalizeNotifications,
+  type NotificationSettings,
+} from '../sound-events';
 
 /**
  * Main process. Deliberately small: no mTLS in this build, so the renderer can
@@ -84,19 +89,6 @@ interface VoiceSettings {
   rejoinLastChannel: boolean;
 }
 
-/**
- * What the app is allowed to do when somebody tags you.
- *
- * Both default on, because a tag that arrives silently is a tag that did not
- * work — but both are switches, because the one thing worse than missing a
- * ping is one you cannot turn off.
- */
-interface NotificationSettings {
-  /** Raise an OS notification and flash the taskbar. */
-  mentions: boolean;
-  /** Play the short two-tone blip. Independent: some people want one, not both. */
-  sound: boolean;
-}
 
 /**
  * Where the window was when it was last closed.
@@ -194,7 +186,9 @@ const defaultSettings: Settings = {
   rejoinAfterUpdate: null,
   lastTextChannelId: null,
   chatPositions: {},
-  notifications: { mentions: true, sound: true },
+  // Tags and DMs on, sound on: a ping that arrives silently did not work. The
+  // per-event table is in sound-events.ts, where the settings page reads it.
+  notifications: defaultNotificationSettings(),
   // Nothing bound by default. A global input binding that nobody asked for is
   // a key that stops working in every other program on the machine.
   keybinds: [],
@@ -339,10 +333,10 @@ function loadSettings(): Settings {
         ...knownVoiceKeys(stored.voice),
       },
       keybinds: migrateKeybinds(stored),
-      notifications: {
-        ...defaultSettings.notifications,
-        ...(stored.notifications ?? {}),
-      },
+      // Cleaned rather than merged: the switch table and the per-server map
+      // are nested, and a shallow merge would leave an event added since the
+      // file was written reading undefined.
+      notifications: normalizeNotifications(stored.notifications),
     };
   } catch {
     return defaultSettings;

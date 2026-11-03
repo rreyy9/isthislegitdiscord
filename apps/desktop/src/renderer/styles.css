@@ -1308,6 +1308,42 @@ button { font-family: inherit; cursor: pointer; }
 .settings .row-label:first-of-type { margin-top: 11px; }
 .settings select { max-width: 420px; }
 
+/* ---------------------------------------------------------------- sounds */
+/* One row per event, Mumble-style: the switch and its name on the left, a
+   button to hear it on the right. Dimmed as a whole while the master switch
+   is off -- the play buttons still work, so a sound can be heard before
+   deciding to turn sounds back on. */
+.sound-table { margin-top: 6px; max-width: 520px; }
+.sound-table.off .sound-row label { opacity: .5; }
+.sound-group { margin-top: 14px; }
+.sound-group > h5 {
+  margin: 0 0 4px; font-size: 11.5px; font-weight: 600;
+  color: var(--dim); text-transform: uppercase; letter-spacing: .04em;
+}
+.sound-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.modal .sound-row label {
+  flex: 1; display: flex; align-items: center; gap: 8px; margin: 0;
+  color: var(--text); font-size: 13px;
+}
+.sound-play {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+  width: 26px; height: 22px; border-radius: 5px; font-size: 10px; line-height: 1;
+  flex: none;
+}
+.sound-play:hover { background: var(--panel3); color: var(--text); }
+.sound-crowd {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 14px; font-size: 13px;
+}
+.sound-crowd input {
+  width: 64px; background: var(--bg); border: 1px solid var(--line);
+  color: var(--text); padding: 4px 6px; border-radius: 6px; font-size: 13px;
+}
+.sound-guild { margin-top: 12px; }
+.sound-guild-head { display: flex; align-items: center; gap: 12px; }
+.sound-guild-name { flex: 1; font-size: 13.5px; }
+.settings .sound-guild-head select { width: 180px; }
+
 /* ----------------------------------------------------------- keybindings */
 /* The heading and its Add button share a line: the button belongs to the
    action above it, and putting it below the bindings would read as belonging

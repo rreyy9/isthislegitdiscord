@@ -1287,6 +1287,22 @@ the OS notification is held back for a message already in front of you. Both are
 switches under Settings → Notifications, because the only thing worse than a missed ping
 is one that cannot be turned off.
 
+**Sound effects work like Mumble's.** Joining and leaving a call, someone else joining or
+leaving yours, a dropped and restored connection, mute, deafen, push-to-talk, talking into
+a muted mic, screen shares, tags, DMs, calls, other messages, reactions, watch parties and
+moderation each have a sound and a switch, under one master switch, one volume and a
+crowd limit that quiets join/leave in a busy channel. A server can follow the global table,
+be silent, or have its own; DMs are in no server and always follow the global one. The
+table lives in `apps/desktop/src/sound-events.ts`, which main, preload and the renderer
+all read, so the settings page and the player cannot disagree. Voice sounds are worked out
+by comparing two snapshots of the call's state (`renderer/voice-sounds.ts`), not from LiveKit
+events, so a reconnect that rebuilds the participant list does not sound like a room full of
+people arriving. The files are Kenney's *Interface Sounds* and *UI Audio* packs (CC0), shipped
+in `renderer/public/sounds` with their licences. They play through `<audio>` elements rather
+than Web Audio, because a packaged renderer is on `file://`, where `fetch` is refused, and
+an element can be pointed at the call's output device with `setSinkId`. Like Mumble, they
+still play while you are deafened.
+
 **Unread tags are a table, not a text search.** `MessageMention` stores nothing that
 could not be recovered by reading every message ever sent — it is an index. "How many
 unread tags in each channel" is asked on every launch and after every read, and against

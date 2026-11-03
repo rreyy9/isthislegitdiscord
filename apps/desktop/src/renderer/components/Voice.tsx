@@ -18,6 +18,7 @@ import { channelIcon, MUTE_OPTIONS } from './chat-format';
 import { PhoneAppSettings } from './PhoneApp';
 import { ProfileSettings } from './ProfileSettings';
 import { AppearanceSettings } from './AppearanceSettings';
+import { NotificationSettingsPage } from './NotificationSettings';
 import {
   listAudioDevices,
   PTT_RELEASE_DELAY_MAX_MS,
@@ -752,7 +753,7 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   {
     id: 'notifications',
     label: 'Notifications',
-    blurb: 'What happens when somebody tags you by name.',
+    blurb: 'What happens when somebody tags you, and every sound the app makes. Each one can be switched off, everywhere or per server.',
   },
   {
     id: 'behaviour',
@@ -775,6 +776,7 @@ export function SettingsModal({
   me,
   settings,
   notifications,
+  guilds,
   keybinds,
   voice,
   onChange,
@@ -787,6 +789,8 @@ export function SettingsModal({
   me: Me;
   settings: VoiceSettings;
   notifications: NotificationSettings;
+  /** For the per-server sound settings. */
+  guilds: { id: string; name: string }[];
   keybinds: Keybind[];
   voice: Voice;
   onChange: (patch: Partial<VoiceSettings>) => void;
@@ -1087,40 +1091,11 @@ export function SettingsModal({
             )}
 
             {section === 'notifications' && (
-              <section className="set-group">
-                <h4>When someone tags you</h4>
-                <label className="row-label">
-                  <input
-                    type="checkbox"
-                    checked={notifications.mentions}
-                    onChange={(e) =>
-                      onNotificationsChange({ mentions: e.target.checked })
-                    }
-                  />
-                  Show a desktop notification
-                </label>
-                <label className="row-label">
-                  <input
-                    type="checkbox"
-                    checked={notifications.sound}
-                    onChange={(e) =>
-                      onNotificationsChange({ sound: e.target.checked })
-                    }
-                  />
-                  Play a sound
-                </label>
-                <div className="hint">
-                  Only for messages that name you — everything else stays a
-                  quiet unread mark. The notification is held back for a message
-                  already on screen in a window you are looking at; the sound is
-                  not, since that is the half people react to.
-                </div>
-                <div className="hint">
-                  Nothing here can override the operating system. If notifications
-                  are switched off for this app in Windows settings, the taskbar
-                  button still flashes and the sound still plays.
-                </div>
-              </section>
+              <NotificationSettingsPage
+                notifications={notifications}
+                guilds={guilds}
+                onChange={onNotificationsChange}
+              />
             )}
 
             {section === 'behaviour' && (

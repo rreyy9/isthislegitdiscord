@@ -55,15 +55,14 @@ export interface VoiceSettings {
   rejoinLastChannel: boolean;
 }
 
-/**
- * What the app may do when somebody tags you. Both default on: a ping that
- * arrives silently did not work. Both are switches, because the only thing
- * worse than a missed ping is one that cannot be turned off.
- */
-export interface NotificationSettings {
-  mentions: boolean;
-  sound: boolean;
-}
+/** What the app may do when something happens. See sound-events.ts. */
+export type {
+  GuildSoundOverride,
+  NotificationSettings,
+  SoundEvent,
+  SoundSwitches,
+} from '../sound-events';
+import type { NotificationSettings } from '../sound-events';
 
 /**
  * Where the window was when it last closed. Written by main and never by the

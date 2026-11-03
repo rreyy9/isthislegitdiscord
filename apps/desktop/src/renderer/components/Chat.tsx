@@ -40,7 +40,9 @@ import {
   type EmojiQuery,
 } from '../emoji-utils';
 import { EMOJI_PAIRS, emojiFor } from '../emoji-data';
-import { playPing } from '../ping';
+import { configureSounds, playSound, preloadSounds } from '../sound-player';
+import { voiceCues, type VoiceSnapshot } from '../voice-sounds';
+import { defaultNotificationSettings } from '../../sound-events';
 import {
   connectSocket,
   disconnectSocket,
@@ -342,11 +344,10 @@ export function Chat({
     | { mode: 'rename'; dm: DirectMessageDto }
     | null
   >(null);
-  /** What the app may do when somebody tags you. Persisted in settings.json. */
-  const [notifications, setNotifications] = useState<NotificationSettings>({
-    mentions: true,
-    sound: true,
-  });
+  /** What the app may do when something happens. Persisted in settings.json. */
+  const [notifications, setNotifications] = useState<NotificationSettings>(
+    defaultNotificationSettings,
+  );
   /**
    * The tag or shortcode being typed in the composer, and which row of the
    * list is selected. Null whenever the popup is closed, which is most of the
@@ -478,7 +479,54 @@ export function Chat({
 
   // `leaveVoice` is a hoisted declaration below, and is only ever called from
   // an event, so it is assigned long before anything can press the key.
-  const voice = useVoice(voiceSettings, keybinds, iAmMuted, leaveVoice);
+  const voice = useVoice(voiceSettings, keybinds, iAmMuted, leaveVoice, () =>
+    playSound('mutedSpeech', { guildId: guildOfChannel(voice.channelId) }),
+  );
+
+  /**
+   * Sound effects for the call, worked out from the state the call shows
+   * rather than from LiveKit's events -- see voice-sounds.ts.
+   */
+  const voiceSnapRef = useRef<VoiceSnapshot | null>(null);
+  const peerKey = voice.peers
+    .filter((p) => !p.isLocal)
+    .map((p) => p.identity)
+    .sort()
+    .join(',');
+  const shareKey = voice.screenShares
+    .map((s) => s.identity)
+    .sort()
+    .join(',');
+  useEffect(() => {
+    const snap: VoiceSnapshot = {
+      channelId: voice.channelId,
+      status: voice.status,
+      muted: voice.muted,
+      deafened: voice.deafened,
+      talking: voice.talking,
+      pushToTalk: voiceSettings.pushToTalk,
+      peers: peerKey ? peerKey.split(',') : [],
+      shares: shareKey ? shareKey.split(',') : [],
+    };
+    const cues = voiceCues(voiceSnapRef.current, snap);
+    // The leave sound belongs to the channel that was left.
+    const guildId = guildOfChannel(
+      voice.channelId ?? voiceSnapRef.current?.channelId ?? null,
+    );
+    voiceSnapRef.current = snap;
+    for (const cue of cues) {
+      playSound(cue, { guildId, crowd: snap.peers.length + 1 });
+    }
+  }, [
+    voice.channelId,
+    voice.status,
+    voice.muted,
+    voice.deafened,
+    voice.talking,
+    voiceSettings.pushToTalk,
+    peerKey,
+    shareKey,
+  ]);
 
   /**
    * The watch party, which this file barely touches.
@@ -489,6 +537,36 @@ export function Chat({
    * naming dialog is open, and whether the separate window is up.
    */
   const party = useWatchParty(me.id);
+
+  /**
+   * Watch party sounds. "Started" is a party this client has not seen before
+   * with only its host in it -- which is also what tells a party starting now
+   * from one discovered already running when the app opens with people in it.
+   * Comings and goings only for a party we are in.
+   */
+  const partySeenRef = useRef<{ id: string; watchers: string[] } | null>(null);
+  const partyWatchers = party.party?.watchers.join(',') ?? '';
+  useEffect(() => {
+    const p = party.party;
+    const seen = partySeenRef.current;
+    partySeenRef.current = p ? { id: p.id, watchers: p.watchers } : null;
+    if (!p) return;
+    if (seen?.id !== p.id) {
+      if (p.hostId !== me.id && p.watchers.length <= 1) {
+        playSound('partyStarted', { guildId: p.guildId });
+      }
+      return;
+    }
+    if (!p.watchers.includes(me.id)) return;
+    const others = (ids: string[]) => ids.filter((id) => id !== me.id);
+    if (others(p.watchers).some((id) => !seen.watchers.includes(id))) {
+      playSound('partyJoin', { guildId: p.guildId });
+    }
+    if (others(seen.watchers).some((id) => !p.watchers.includes(id))) {
+      playSound('partyLeave', { guildId: p.guildId });
+    }
+  }, [party.party?.id, partyWatchers]);
+
   const [startingParty, setStartingParty] = useState(false);
   const [partyWindowOpen, setPartyWindowOpen] = useState(false);
 
@@ -647,6 +725,12 @@ export function Chat({
   /** Same reason: the socket handlers ask which channels are DMs. */
   const dmsRef = useRef<DirectMessageDto[]>(dms);
   dmsRef.current = dms;
+  /** Same reason: a sound asks which server the channel it is about is in. */
+  const guildsRef = useRef<GuildDto[]>(guilds);
+  guildsRef.current = guilds;
+  /** Same reason: a reaction sound asks whose message was reacted to. */
+  const messagesRef = useRef<Msg[]>(messages);
+  messagesRef.current = messages;
   /** The roster before an event changes it, to tell a ring from an update. */
   const voiceByChannelRef = useRef<Record<string, string[]>>({});
   voiceByChannelRef.current = voiceByChannel;
@@ -752,7 +836,18 @@ export function Chat({
       positionsRef.current = s.chatPositions;
       setSettingsReady(true);
     });
+    preloadSounds();
   }, []);
+
+  /**
+   * The player keeps its own copy, because half of what plays a sound is a
+   * socket handler registered once on mount. Out of the call's own output
+   * device, so a headset gets the sounds and not the speakers beside it.
+   */
+  useEffect(
+    () => configureSounds(notifications, voiceSettings.outputDeviceId),
+    [notifications, voiceSettings.outputDeviceId],
+  );
 
   /** Clicking a notification takes you to the message it was about. */
   useEffect(
@@ -841,6 +936,19 @@ export function Chat({
     setLastVoiceChannelId(null);
     void bridge.setSettings({ lastVoiceChannelId: null });
     void voice.leave();
+  }
+
+  /**
+   * The server a channel is in, for its per-server sound settings. Null for a
+   * DM, which is in none, and for a channel this client has not heard of.
+   * Read through the ref because socket handlers call it.
+   */
+  function guildOfChannel(channelId: string | null): string | null {
+    if (!channelId) return null;
+    return (
+      guildsRef.current.find((g) => g.channels.some((c) => c.id === channelId))
+        ?.id ?? null
+    );
   }
 
   /**
@@ -1006,12 +1114,22 @@ export function Chat({
       // What makes the unread dot appear on a channel you are not looking at.
       // `onMessage` cannot do it: the server only sends a message to the room
       // for the channel that is open, and this client is in no other.
-      onChannelActivity: ({ channelId, messageId }) =>
+      onChannelActivity: ({ channelId, messageId }) => {
         setLatest((prev) =>
           !prev[channelId] || messageId > prev[channelId]
             ? { ...prev, [channelId]: messageId }
             : prev,
-        ),
+        );
+        // The open channel has its own sound, from `onMessage`, and a DM has
+        // the DM sound. The payload names no author, so a message of our own
+        // sent from another device ticks too -- rare, and off by default.
+        if (
+          channelId !== activeChannelRef.current &&
+          !dmsRef.current.some((d) => d.channelId === channelId)
+        ) {
+          playSound('messageElsewhere', { guildId: guildOfChannel(channelId) });
+        }
+      },
       onMessage: (m) => {
         setLatest((prev) =>
           !prev[m.channelId] || m.id > prev[m.channelId]
@@ -1019,6 +1137,15 @@ export function Chat({
             : prev,
         );
         if (m.channelId !== activeChannelRef.current) return;
+        // Only while the window is in the background: a message landing in
+        // front of somebody who is looking at it needs no sound to be seen.
+        if (
+          m.author.id !== me.id &&
+          !document.hasFocus() &&
+          !dmsRef.current.some((d) => d.channelId === m.channelId)
+        ) {
+          playSound('messageHere', { guildId: guildOfChannel(m.channelId) });
+        }
         setMessages((prev) => {
           // Replace our own optimistic copy when the echo arrives (matched by
           // clientNonce); otherwise append. Guard against double-delivery.
@@ -1078,6 +1205,20 @@ export function Chat({
       },
       onReactionChanged: ({ channelId, messageId, emoji, userIds }) => {
         if (channelId !== activeChannelRef.current) return;
+        // Somebody else adding to a pile on one of our messages. Only for the
+        // open channel, because that is the only one these arrive for.
+        const target = messagesRef.current.find((x) => x.id === messageId);
+        if (target?.author.id === me.id) {
+          const before =
+            target.reactions?.find((r) => r.emoji === emoji)?.userIds ?? [];
+          if (userIds.some((id) => id !== me.id && !before.includes(id))) {
+            playSound('reaction', {
+              guildId: dmsRef.current.some((d) => d.channelId === channelId)
+                ? null
+                : guildOfChannel(channelId),
+            });
+          }
+        }
         setMessages((prev) =>
           prev.map((x) => {
             if (x.id !== messageId) return x;
@@ -1113,11 +1254,23 @@ export function Chat({
         }
         announceMention(message, channelName, kind ?? 'mention');
       },
-      onMemberUpdated: ({ userId, mutedUntil }) =>
+      onMemberUpdated: ({ guildId, userId, mutedUntil }) => {
+        // A mute landing on us, heard as it lands. Taken from the event rather
+        // than from the member list changing, which also changes on every
+        // launch when the list first loads.
+        if (
+          userId === me.id &&
+          mutedUntil &&
+          new Date(mutedUntil) > new Date()
+        ) {
+          playSound('moderated', { guildId });
+        }
         setMembers((prev) =>
           prev.map((m) => (m.user.id === userId ? { ...m, mutedUntil } : m)),
-        ),
+        );
+      },
       onRemoved: (p) => {
+        playSound('moderated', { guildId: p.guildId });
         // The server has already cut the socket loose; stop reconnecting to a
         // guild we are no longer in.
         setRemoved({ kind: p.kind, reason: p.reason });
@@ -1716,7 +1869,8 @@ export function Chat({
    */
   function announceDm(message: MessageDto, dm: DirectMessageDto) {
     const settings = notificationsRef.current;
-    if (settings.sound) playPing();
+    // A DM is in no server, so it answers to the global table alone.
+    playSound('dm', { guildId: null });
     if (!settings.mentions) return;
     if (message.channelId === activeChannelRef.current && document.hasFocus()) return;
 
@@ -1738,7 +1892,7 @@ export function Chat({
   /** Somebody is calling: the same switches a DM message answers to. */
   function announceCall(dm: DirectMessageDto, callerId: string) {
     const settings = notificationsRef.current;
-    if (settings.sound) playPing();
+    playSound('call', { guildId: null });
     if (!settings.mentions) return;
     const caller = dm.users.find((u) => u.id === callerId);
     const who = caller ? caller.displayName || caller.username : 'Somebody';
@@ -1826,7 +1980,7 @@ export function Chat({
     kind: 'mention' | 'reply' = 'mention',
   ) {
     const settings = notificationsRef.current;
-    if (settings.sound) playPing();
+    playSound('mention', { guildId: guildOfChannel(message.channelId) });
     if (!settings.mentions) return;
 
     // Already in front of them: the message is on screen and the window has
@@ -4243,6 +4397,7 @@ export function Chat({
           keybinds={keybinds}
           onKeybindsChange={updateKeybinds}
           notifications={notifications}
+          guilds={guilds}
           voice={voice}
           onChange={(patch) => void updateVoiceSettings(patch)}
           onNotificationsChange={(patch) => void updateNotifications(patch)}

@@ -451,6 +451,13 @@ export function useVoice(
    * otherwise the two do visibly different things a restart later.
    */
   onDisconnect?: () => void,
+  /**
+   * Somebody is talking into a microphone they muted themselves. Called on
+   * every loud meter tick, so whoever listens does their own rate limiting.
+   * Not for a server mute: that was not their choice and a reminder of it
+   * would only be nagging.
+   */
+  onMutedSpeech?: () => void,
 ) {
   const [state, setState] = useState<VoiceState>({
     channelId: null,
@@ -521,6 +528,8 @@ export function useVoice(
   // tearing down and re-registering the keybinding listener each time.
   const onDisconnectRef = useRef(onDisconnect);
   onDisconnectRef.current = onDisconnect;
+  const onMutedSpeechRef = useRef(onMutedSpeech);
+  onMutedSpeechRef.current = onMutedSpeech;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const audioRef = useRef<VoiceAudioDto | null>(null);
@@ -1178,6 +1187,20 @@ export function useVoice(
         // Talking keeps you from going away. Same rule as the light: being
         // loud while nothing is going out is not talking to anybody.
         if (loud && live) reportVoiceActivity();
+        // Mumble's mute cue. Push-to-mute is left out -- holding that key
+        // while making noise is the point of it -- and so is deafened:
+        // deafening mutes too, and somebody who cannot hear the call is not
+        // trying to talk to it.
+        if (
+          loud &&
+          mutedRef.current &&
+          !pushMutedRef.current &&
+          !deafenedRef.current &&
+          !serverMutedRef.current &&
+          micSettleRef.current === 0
+        ) {
+          onMutedSpeechRef.current?.();
+        }
       },
       // Essential, not an optimisation: see TrackMeter.
       { clone: true },
