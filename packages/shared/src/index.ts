@@ -621,8 +621,10 @@ export type RemoveMemberInput = z.infer<typeof RemoveMemberInput>;
 /* ------------------------------------------------------------ event sounds */
 
 /**
- * Sounds an admin sets for the whole server, played to everybody else in the
- * voice channel when somebody joins it, leaves it, or goes away while in it.
+ * Sounds an admin gives to particular people: when that person joins a voice
+ * channel, leaves it, or goes away while in it, everybody else in the channel
+ * hears the sound the admin picked for them. People with none set get nothing
+ * from here, and the listener's own join and leave sounds play as usual.
  *
  * Unlike the sound effects each person picks for themselves (sound-events.ts
  * in the desktop app), these are not the listener's to switch off: no master
@@ -693,12 +695,20 @@ export const EventSoundSlot = z.discriminatedUnion('source', [
 ]);
 export type EventSoundSlot = z.infer<typeof EventSoundSlot>;
 
-/** Null means no sound for that event. */
-export type EventSoundsConfig = Record<EventSoundEvent, EventSoundSlot | null>;
+/** One person's sounds. Null means no sound for that event. */
+export type UserEventSounds = Record<EventSoundEvent, EventSoundSlot | null>;
 
 /**
- * Setting one event's sound. `custom` keeps the file already uploaded for that
- * event and changes only its volume -- uploading is its own route, because it
+ * Everybody who has sounds, by user id. Somebody with all three cleared is
+ * dropped from the table rather than kept as a row of nulls.
+ */
+export interface EventSoundsConfig {
+  users: Record<string, UserEventSounds>;
+}
+
+/**
+ * Setting one event's sound for one person. `custom` keeps the file already
+ * uploaded for that person and event and changes only its volume -- uploading is its own route, because it
  * is multipart.
  */
 export const SetEventSoundInput = z.discriminatedUnion('source', [

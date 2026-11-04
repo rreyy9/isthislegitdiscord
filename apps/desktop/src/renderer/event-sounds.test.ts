@@ -4,59 +4,99 @@ import {
   BUILTIN_EVENT_SOUNDS,
   awaySoundFor,
   emptyEventSounds,
-  eventSoundFor,
+  peerEventSounds,
   type EventSoundsConfig,
 } from './event-sounds';
 
 const join = { source: 'builtin', file: 'bong_001.wav', volume: 0.5 } as const;
 const leave = { source: 'custom', id: 'x', name: 'bye.mp3', volume: 1 } as const;
 const away = { source: 'builtin', file: 'glass_006.wav', volume: 0.7 } as const;
-const all: EventSoundsConfig = { join, leave, away };
+/** Bob has all three; Carol has only a join sound; Dave has none. */
+const config: EventSoundsConfig = {
+  users: {
+    bob: { join, leave, away },
+    carol: { join, leave: null, away: null },
+  },
+};
 
-describe('eventSoundFor', () => {
-  it("replaces somebody else's join and leave in a server channel", () => {
-    expect(eventSoundFor(all, 'peerJoin', 'g1')).toBe(join);
-    expect(eventSoundFor(all, 'peerLeave', 'g1')).toBe(leave);
+describe('peerEventSounds', () => {
+  it("plays the sound of the person who joined, instead of the listener's own", () => {
+    expect(peerEventSounds(config, 'peerJoin', 'g1', ['carol'], ['carol', 'bob'])).toEqual({
+      sounds: [{ userId: 'bob', event: 'join', slot: join }],
+      ownSound: false,
+    });
   });
 
-  it('leaves a DM call to its own sounds', () => {
-    expect(eventSoundFor(all, 'peerJoin', null)).toBeNull();
+  it('plays the leave sound of the person who left', () => {
+    expect(peerEventSounds(config, 'peerLeave', 'g1', ['bob', 'dave'], ['dave'])).toEqual({
+      sounds: [{ userId: 'bob', event: 'leave', slot: leave }],
+      ownSound: false,
+    });
   });
 
-  it('leaves every other cue alone, your own join included', () => {
-    expect(eventSoundFor(all, 'selfJoin', 'g1')).toBeNull();
-    expect(eventSoundFor(all, 'mute', 'g1')).toBeNull();
+  it('keeps the usual sound for somebody without one', () => {
+    expect(peerEventSounds(config, 'peerJoin', 'g1', [], ['dave'])).toEqual({
+      sounds: [],
+      ownSound: true,
+    });
+    // Carol has a join sound but no leave sound.
+    expect(peerEventSounds(config, 'peerLeave', 'g1', ['carol'], [])).toEqual({
+      sounds: [],
+      ownSound: true,
+    });
   });
 
-  it('falls back to your own sound where the admin set none', () => {
-    expect(eventSoundFor(emptyEventSounds(), 'peerJoin', 'g1')).toBeNull();
+  it('plays both when one with a sound and one without arrive together', () => {
+    expect(peerEventSounds(config, 'peerJoin', 'g1', [], ['bob', 'dave'])).toEqual({
+      sounds: [{ userId: 'bob', event: 'join', slot: join }],
+      ownSound: true,
+    });
+  });
+
+  it('gives each of two people with sounds their own', () => {
+    const out = peerEventSounds(config, 'peerJoin', 'g1', [], ['bob', 'carol']);
+    expect(out.sounds.map((s) => s.userId)).toEqual(['bob', 'carol']);
+    expect(out.ownSound).toBe(false);
+  });
+
+  it('leaves a DM call, and every other cue, to their own sounds', () => {
+    expect(peerEventSounds(config, 'peerJoin', null, [], ['bob'])).toEqual({
+      sounds: [],
+      ownSound: true,
+    });
+    expect(peerEventSounds(config, 'selfJoin', 'g1', [], ['bob'])).toEqual({
+      sounds: [],
+      ownSound: true,
+    });
   });
 });
 
 describe('awaySoundFor', () => {
   const call = { status: 'connected', guildId: 'g1', peers: ['bob', 'carol'] };
 
-  it('plays when somebody else in the same server channel goes away', () => {
-    expect(awaySoundFor(all, call, 'bob', 'me')).toBe(away);
+  it('plays when somebody with an away sound goes away in the same channel', () => {
+    expect(awaySoundFor(config, call, 'bob', 'me')).toBe(away);
+  });
+
+  it('is silent for somebody in the channel without an away sound', () => {
+    expect(awaySoundFor(config, call, 'carol', 'me')).toBeNull();
   });
 
   it('is silent for somebody not in the channel', () => {
-    expect(awaySoundFor(all, call, 'dave', 'me')).toBeNull();
+    expect(awaySoundFor(config, { ...call, peers: ['carol'] }, 'bob', 'me')).toBeNull();
   });
 
   it('is silent when this client is not in a channel at all', () => {
-    expect(awaySoundFor(all, null, 'bob', 'me')).toBeNull();
-    expect(awaySoundFor(all, { ...call, status: 'idle' }, 'bob', 'me')).toBeNull();
+    expect(awaySoundFor(config, null, 'bob', 'me')).toBeNull();
+    expect(awaySoundFor(config, { ...call, status: 'idle' }, 'bob', 'me')).toBeNull();
   });
 
   it('is silent in a DM call, and for yourself', () => {
-    expect(awaySoundFor(all, { ...call, guildId: null }, 'bob', 'me')).toBeNull();
-    expect(
-      awaySoundFor(all, { ...call, peers: ['me', 'bob'] }, 'me', 'me'),
-    ).toBeNull();
+    expect(awaySoundFor(config, { ...call, guildId: null }, 'bob', 'me')).toBeNull();
+    expect(awaySoundFor(config, call, 'bob', 'bob')).toBeNull();
   });
 
-  it('is silent when no away sound is set', () => {
+  it('is silent when nobody has sounds', () => {
     expect(awaySoundFor(emptyEventSounds(), call, 'bob', 'me')).toBeNull();
   });
 });

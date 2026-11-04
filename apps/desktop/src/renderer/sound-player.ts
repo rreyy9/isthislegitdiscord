@@ -189,11 +189,17 @@ function start(event: SoundEvent) {
 const lastEventPlayed = new Map<string, number>();
 const EVENT_GAP_MS = 250;
 
-export function playEventSound(event: EventSoundEvent, slot: EventSoundSlot) {
+export function playEventSound(
+  userId: string,
+  event: EventSoundEvent,
+  slot: EventSoundSlot,
+) {
   const now = Date.now();
-  // Two people walking in together is one sound, as with `peerJoin`.
-  if (now - (lastEventPlayed.get(event) ?? 0) < EVENT_GAP_MS) return;
-  lastEventPlayed.set(event, now);
+  // Per person: two people walking in together each get their own sound, but
+  // one person's connection flapping is not a burst of them.
+  const key = `${userId}:${event}`;
+  if (now - (lastEventPlayed.get(key) ?? 0) < EVENT_GAP_MS) return;
+  lastEventPlayed.set(key, now);
   void startEventSound(slot);
 }
 

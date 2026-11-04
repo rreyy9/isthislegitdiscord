@@ -5,15 +5,18 @@ import {
   type EventSoundEvent,
   type EventSoundsConfig,
   type SetEventSoundInput,
+  type UserEventSounds,
 } from '@isthislegit/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { ChatGateway } from '../gateway/chat.gateway';
 import { newId } from '../common/ids';
 
 /** Where the table lives in ServerSetting. */
-const CONFIG_KEY = 'eventSounds';
+const CONFIG_KEY = 'userEventSounds';
 /** One row per uploaded file, beside the table. */
 const FILE_KEY = (id: string) => `eventSoundFile:${id}`;
+/** User and file ids are ours, so anything not shaped like one is not worth a query. */
+const ID_SHAPE = /^[A-Za-z0-9_-]{1,64}$/;
 
 interface StoredFile {
   contentType: string;
@@ -22,21 +25,31 @@ interface StoredFile {
   data: string;
 }
 
-export function emptyEventSounds(): EventSoundsConfig {
+export function emptyUserSounds(): UserEventSounds {
   return { join: null, leave: null, away: null };
 }
+
+const isEmpty = (sounds: UserEventSounds) =>
+  EVENT_SOUND_EVENTS.every((e) => sounds[e] === null);
 
 /**
  * Whatever the row held, as something every field of can be trusted. A slot
  * that no longer parses -- a built-in file this version stopped shipping, say
- * -- becomes no sound rather than a broken one.
+ * -- becomes no sound rather than a broken one, and a person left with no
+ * sounds at all is dropped.
  */
 export function normalizeEventSounds(stored: unknown): EventSoundsConfig {
-  const out = emptyEventSounds();
-  if (!stored || typeof stored !== 'object') return out;
-  for (const event of EVENT_SOUND_EVENTS) {
-    const parsed = EventSoundSlot.safeParse((stored as Record<string, unknown>)[event]);
-    if (parsed.success) out[event] = parsed.data;
+  const out: EventSoundsConfig = { users: {} };
+  const users = (stored as { users?: unknown } | null | undefined)?.users;
+  if (!users || typeof users !== 'object') return out;
+  for (const [userId, raw] of Object.entries(users as Record<string, unknown>)) {
+    if (!ID_SHAPE.test(userId) || !raw || typeof raw !== 'object') continue;
+    const sounds = emptyUserSounds();
+    for (const event of EVENT_SOUND_EVENTS) {
+      const parsed = EventSoundSlot.safeParse((raw as Record<string, unknown>)[event]);
+      if (parsed.success) sounds[event] = parsed.data;
+    }
+    if (!isEmpty(sounds)) out.users[userId] = sounds;
   }
   return out;
 }
@@ -63,14 +76,13 @@ export function sniffAudio(bytes: Buffer): string | null {
 }
 
 /**
- * The server's event sounds: which sound plays to a voice channel when
- * somebody joins it, leaves it or goes away in it.
+ * The server's event sounds: for particular people, which sound plays to the
+ * rest of a voice channel when they join it, leave it or go away in it.
  *
  * Stored in ServerSetting, uploads included, rather than in the upload
- * directory: the files are small, at most three are in use at once, they
- * belong in the database backup with the table that points at them, and the
- * upload sweeper deletes anything in that directory that no Attachment row or
- * avatar points at.
+ * directory: the files are small, they belong in the database backup with the
+ * table that points at them, and the upload sweeper deletes anything in that
+ * directory that no Attachment row or avatar points at.
  *
  * The server only keeps the table. Each client plays the sound itself, from
  * what LiveKit and presence already tell it -- see the desktop's Chat.tsx.
@@ -90,32 +102,37 @@ export class EventSoundsService {
   }
 
   async set(
+    userId: string,
     event: EventSoundEvent,
     input: SetEventSoundInput,
   ): Promise<EventSoundsConfig> {
+    await this.mustExist(userId);
     const config = await this.config();
-    const current = config[event];
+    const sounds = config.users[userId] ?? emptyUserSounds();
+    const current = sounds[event];
 
     if (input.source === 'none') {
-      config[event] = null;
+      sounds[event] = null;
     } else if (input.source === 'builtin') {
-      config[event] = { source: 'builtin', file: input.file, volume: input.volume };
+      sounds[event] = { source: 'builtin', file: input.file, volume: input.volume };
     } else {
       if (current?.source !== 'custom') {
         throw new BadRequestException('Upload a sound for this event first.');
       }
-      config[event] = { ...current, volume: input.volume };
+      sounds[event] = { ...current, volume: input.volume };
     }
 
+    put(config, userId, sounds);
     await this.save(config);
-    if (current?.source === 'custom' && config[event]?.source !== 'custom') {
+    if (current?.source === 'custom' && sounds[event]?.source !== 'custom') {
       await this.dropFile(current.id);
     }
     return config;
   }
 
-  /** Store an uploaded file and make it this event's sound. */
+  /** Store an uploaded file and make it this person's sound for the event. */
   async upload(
+    userId: string,
     event: EventSoundEvent,
     file: { buffer: Buffer; originalname: string },
   ): Promise<EventSoundsConfig> {
@@ -125,9 +142,11 @@ export class EventSoundsService {
         'That is not a sound file this app can play (WAV, MP3, OGG, FLAC, M4A or WebM).',
       );
     }
+    await this.mustExist(userId);
 
     const config = await this.config();
-    const previous = config[event];
+    const sounds = config.users[userId] ?? emptyUserSounds();
+    const previous = sounds[event];
     const id = newId();
     // Shown on the settings page and nowhere else; trimmed so a path or a
     // very long name cannot crowd the row.
@@ -142,7 +161,7 @@ export class EventSoundsService {
       data: { key: FILE_KEY(id), value: stored as never },
     });
 
-    config[event] = {
+    sounds[event] = {
       source: 'custom',
       id,
       name,
@@ -150,16 +169,28 @@ export class EventSoundsService {
       // sound, not a reason to start the slider over.
       volume: previous?.volume ?? 0.6,
     };
+    put(config, userId, sounds);
     await this.save(config);
     if (previous?.source === 'custom') await this.dropFile(previous.id);
     return config;
   }
 
-  async file(id: string): Promise<{ contentType: string; bytes: Buffer }> {
-    // Ids are ours, so anything not shaped like one is not worth a query.
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
-      throw new NotFoundException('No such sound.');
+  /** Take all of one person's sounds away, uploads included. */
+  async clear(userId: string): Promise<EventSoundsConfig> {
+    const config = await this.config();
+    const sounds = config.users[userId];
+    if (!sounds) return config;
+    delete config.users[userId];
+    await this.save(config);
+    for (const event of EVENT_SOUND_EVENTS) {
+      const slot = sounds[event];
+      if (slot?.source === 'custom') await this.dropFile(slot.id);
     }
+    return config;
+  }
+
+  async file(id: string): Promise<{ contentType: string; bytes: Buffer }> {
+    if (!ID_SHAPE.test(id)) throw new NotFoundException('No such sound.');
     const row = await this.prisma.serverSetting.findUnique({
       where: { key: FILE_KEY(id) },
     });
@@ -171,6 +202,17 @@ export class EventSoundsService {
       contentType: value.contentType,
       bytes: Buffer.from(value.data, 'base64'),
     };
+  }
+
+  /** Sounds for somebody who is not an account would never play. */
+  private async mustExist(userId: string) {
+    const user = ID_SHAPE.test(userId)
+      ? await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { id: true },
+        })
+      : null;
+    if (!user) throw new NotFoundException('No such person.');
   }
 
   private async save(config: EventSoundsConfig) {
@@ -188,4 +230,10 @@ export class EventSoundsService {
       .deleteMany({ where: { key: FILE_KEY(id) } })
       .catch(() => undefined);
   }
+}
+
+/** A person with every sound cleared leaves the table. */
+function put(config: EventSoundsConfig, userId: string, sounds: UserEventSounds) {
+  if (isEmpty(sounds)) delete config.users[userId];
+  else config.users[userId] = sounds;
 }

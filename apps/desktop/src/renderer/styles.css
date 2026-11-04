@@ -2252,3 +2252,7 @@ button { font-family: inherit; cursor: pointer; }
 .event-sound-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .settings .event-sound-row select { flex: 1; max-width: 300px; }
 .modal .hint.event-sound-error { color: var(--bad); }
+.event-sound-person-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.event-sound-person-head h4 { flex: 1; margin: 0; }
+.event-sound-event { margin-top: 14px; }
+.event-sound-event .row-label:first-child { font-weight: 600; }

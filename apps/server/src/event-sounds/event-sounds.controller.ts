@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Header,
   Param,
@@ -34,7 +35,7 @@ const EventParam = new ParseEnumPipe(
 );
 
 /**
- * The server's event sounds. Anybody signed in may read the table and fetch
+ * The server's event sounds, per person. Anybody signed in may read the table and fetch
  * the files -- every client has to, to play them. Only an admin may change
  * them; see AdminGuard for what "admin" means on this server.
  */
@@ -66,16 +67,17 @@ export class EventSoundsController {
     return new StreamableFile(bytes);
   }
 
-  @Put(':event')
+  @Put('users/:userId/:event')
   @UseGuards(AdminGuard)
   set(
+    @Param('userId') userId: string,
     @Param('event', EventParam) event: EventSoundEvent,
     @Body(new ZodPipe(SetEventSoundInput)) body: SetEventSoundInput,
   ): Promise<EventSoundsConfig> {
-    return this.sounds.set(event, body);
+    return this.sounds.set(userId, event, body);
   }
 
-  @Post(':event/file')
+  @Post('users/:userId/:event/file')
   @UseGuards(AdminGuard)
   @UseInterceptors(
     FileInterceptor('file', {
@@ -84,10 +86,17 @@ export class EventSoundsController {
     }),
   )
   upload(
+    @Param('userId') userId: string,
     @Param('event', EventParam) event: EventSoundEvent,
     @UploadedFile() file?: Express.Multer.File,
   ): Promise<EventSoundsConfig> {
     if (!file) throw new BadRequestException('No sound file was sent.');
-    return this.sounds.upload(event, file);
+    return this.sounds.upload(userId, event, file);
+  }
+
+  @Delete('users/:userId')
+  @UseGuards(AdminGuard)
+  clear(@Param('userId') userId: string): Promise<EventSoundsConfig> {
+    return this.sounds.clear(userId);
   }
 }

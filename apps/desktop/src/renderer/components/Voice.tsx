@@ -19,7 +19,7 @@ import { PhoneAppSettings } from './PhoneApp';
 import { ProfileSettings } from './ProfileSettings';
 import { AppearanceSettings } from './AppearanceSettings';
 import { NotificationSettingsPage } from './NotificationSettings';
-import { ServerSoundSettings } from './ServerSoundSettings';
+import { ServerSoundSettings, type SoundPerson } from './ServerSoundSettings';
 import type { EventSoundsConfig } from '../event-sounds';
 import {
   listAudioDevices,
@@ -787,6 +787,7 @@ export function SettingsModal({
   guilds,
   isAdmin,
   eventSounds,
+  soundPeople,
   onEventSoundsChange,
   keybinds,
   voice,
@@ -805,6 +806,8 @@ export function SettingsModal({
   /** Whether the Server sounds page is shown at all. */
   isAdmin: boolean;
   eventSounds: EventSoundsConfig;
+  /** Everybody on the server, for the Server sounds page to pick from. */
+  soundPeople: SoundPerson[];
   onEventSoundsChange: (next: EventSoundsConfig) => void;
   keybinds: Keybind[];
   voice: Voice;
@@ -1119,6 +1122,7 @@ export function SettingsModal({
             {active.id === 'serverSounds' && (
               <ServerSoundSettings
                 config={eventSounds}
+                people={soundPeople}
                 onChange={onEventSoundsChange}
               />
             )}

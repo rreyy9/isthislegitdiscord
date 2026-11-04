@@ -26,21 +26,34 @@ describe('sniffAudio', () => {
 });
 
 describe('normalizeEventSounds', () => {
-  it('starts with no sounds', () => {
-    expect(normalizeEventSounds(null)).toEqual({ join: null, leave: null, away: null });
+  const bong = { source: 'builtin', file: 'bong_001.wav', volume: 0.5 } as const;
+
+  it('starts with nobody', () => {
+    expect(normalizeEventSounds(null)).toEqual({ users: {} });
+    expect(normalizeEventSounds({ join: bong })).toEqual({ users: {} });
   });
 
-  it('keeps what parses and drops what does not', () => {
+  it("keeps what parses of each person's sounds and drops what does not", () => {
     const out = normalizeEventSounds({
-      join: { source: 'builtin', file: 'bong_001.wav', volume: 0.5 },
-      leave: { source: 'builtin', file: '../../etc/passwd', volume: 0.5 },
-      away: { source: 'custom', id: 'abc', name: 'x.mp3', volume: 2 },
-      extra: { source: 'builtin', file: 'bong_001.wav', volume: 0.5 },
+      users: {
+        bob: {
+          join: bong,
+          leave: { source: 'builtin', file: '../../etc/passwd', volume: 0.5 },
+          away: { source: 'custom', id: 'abc', name: 'x.mp3', volume: 2 },
+          extra: bong,
+        },
+      },
     });
-    expect(out).toEqual({
-      join: { source: 'builtin', file: 'bong_001.wav', volume: 0.5 },
-      leave: null,
-      away: null,
+    expect(out).toEqual({ users: { bob: { join: bong, leave: null, away: null } } });
+  });
+
+  it('drops people with nothing left, and ids that are not ids', () => {
+    const out = normalizeEventSounds({
+      users: {
+        carol: { join: null, leave: { source: 'builtin', file: 'nope.wav', volume: 1 } },
+        '../x': { join: bong },
+      },
     });
+    expect(out).toEqual({ users: {} });
   });
 });

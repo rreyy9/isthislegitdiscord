@@ -1304,12 +1304,13 @@ an element can be pointed at the call's output device with `setSinkId`. Like Mum
 still play while you are deafened.
 
 **Server sounds are the admin's, not the listener's.** Under Settings → Server sounds
-(shown to admins only) an admin picks a sound — one of the built-in files or an upload of
-up to 1 MB — for somebody joining a voice channel, leaving it, or going away while in it.
-Everybody else in that channel hears it, and nobody can turn it off: no master switch,
-per-event switch, volume or deafen of theirs applies, only the admin's volume. Where one is
-set it replaces each listener's own join or leave sound, so nobody hears both. Only people
-in the channel hear anything, and DM calls are untouched. The server only keeps the table
+(shown to admins only) an admin picks particular people and gives each a sound — one of
+the built-in files or an upload of up to 1 MB — for when *that person* joins a voice
+channel, leaves it, or goes away while in it. Everybody else in that channel hears it, and
+nobody can turn it off: no master switch, per-event switch, volume or deafen of theirs
+applies, only the admin's volume. It replaces the listener's own join or leave sound for
+that person, so nobody hears both; people with no sound set get the usual ones. Only
+people in the channel hear anything, and DM calls are untouched. The server only keeps the table
 (`ServerSetting` rows, uploads included, so they are in the database backup and out of the
 upload sweeper's way) and broadcasts `eventsounds:changed`; each client plays the sound
 itself from the same call snapshots and `presence:changed` events it already has

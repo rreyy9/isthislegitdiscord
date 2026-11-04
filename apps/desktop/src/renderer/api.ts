@@ -808,23 +808,33 @@ export const api = {
   /** The server's join, leave and away sounds. The socket keeps it current. */
   eventSounds: () => request<EventSoundsConfig>('/api/event-sounds'),
   /** Admin only. Answers with the whole table. */
-  setEventSound: (event: EventSoundEvent, body: SetEventSoundBody) =>
-    request<EventSoundsConfig>(`/api/event-sounds/${event}`, {
-      method: 'PUT',
-      body,
-    }),
-  /** Admin only. Makes the file this event's sound; answers with the table. */
+  setEventSound: (userId: string, event: EventSoundEvent, body: SetEventSoundBody) =>
+    request<EventSoundsConfig>(
+      `/api/event-sounds/users/${encodeURIComponent(userId)}/${event}`,
+      { method: 'PUT', body },
+    ),
+  /** Admin only. Takes every sound away from one person; answers with the table. */
+  clearEventSounds: (userId: string) =>
+    request<EventSoundsConfig>(
+      `/api/event-sounds/users/${encodeURIComponent(userId)}`,
+      { method: 'DELETE' },
+    ),
+  /** Admin only. Makes the file this person's sound for the event; answers with the table. */
   uploadEventSound: async (
+    userId: string,
     event: EventSoundEvent,
     file: File,
   ): Promise<EventSoundsConfig> => {
     const form = new FormData();
     form.append('file', file, file.name);
-    const res = await send(`${serverUrl}/api/event-sounds/${event}/file`, {
-      method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      body: form,
-    });
+    const res = await send(
+      `${serverUrl}/api/event-sounds/users/${encodeURIComponent(userId)}/${event}/file`,
+      {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: form,
+      },
+    );
     const text = await res.text();
     let data: any = {};
     try {

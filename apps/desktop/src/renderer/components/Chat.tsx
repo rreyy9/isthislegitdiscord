@@ -49,7 +49,7 @@ import {
 import {
   awaySoundFor,
   emptyEventSounds,
-  eventSoundFor,
+  peerEventSounds,
   type EventSoundsConfig,
 } from '../event-sounds';
 import { voiceCues, type VoiceSnapshot } from '../voice-sounds';
@@ -529,6 +529,7 @@ export function Chat({
       peers: peerKey ? peerKey.split(',') : [],
       shares: shareKey ? shareKey.split(',') : [],
     };
+    const prevPeers = voiceSnapRef.current?.peers ?? [];
     const cues = voiceCues(voiceSnapRef.current, snap);
     // The leave sound belongs to the channel that was left.
     const guildId = guildOfChannel(
@@ -537,15 +538,19 @@ export function Chat({
     voiceSnapRef.current = snap;
     voiceGuildRef.current = guildOfChannel(voice.channelId);
     for (const cue of cues) {
-      // In a server's channel, an admin's join or leave sound replaces this
-      // person's own -- two sounds for one person walking in would be noise,
-      // and the server's is the one that cannot be switched off.
-      const server = eventSoundFor(eventSoundsRef.current, cue, guildId);
-      if (server) {
-        playEventSound(cue === 'peerJoin' ? 'join' : 'leave', server);
-        continue;
-      }
-      playSound(cue, { guildId, crowd: snap.peers.length + 1 });
+      // In a server's channel, somebody an admin gave a join or leave sound
+      // gets that sound instead of this person's own -- two sounds for one
+      // person walking in would be noise, and the admin's is the one that
+      // cannot be switched off.
+      const { sounds, ownSound } = peerEventSounds(
+        eventSoundsRef.current,
+        cue,
+        guildId,
+        prevPeers,
+        snap.peers,
+      );
+      for (const s of sounds) playEventSound(s.userId, s.event, s.slot);
+      if (ownSound) playSound(cue, { guildId, crowd: snap.peers.length + 1 });
     }
   }, [
     voice.channelId,
@@ -1353,7 +1358,7 @@ export function Chat({
             userId,
             me.id,
           );
-          if (slot) playEventSound('away', slot);
+          if (slot) playEventSound(userId, 'away', slot);
         }
         // Applied here rather than waited for: the dot and the duration under
         // a name are the whole of what this event changes, and all of it is in
@@ -4458,6 +4463,11 @@ export function Chat({
           guilds={guilds}
           isAdmin={iAmAdmin}
           eventSounds={eventSounds}
+          soundPeople={members.map((m) => ({
+            id: m.user.id,
+            name: m.user.displayName || m.user.username,
+            image: m.user.image,
+          }))}
           onEventSoundsChange={setEventSounds}
           voice={voice}
           onChange={(patch) => void updateVoiceSettings(patch)}
