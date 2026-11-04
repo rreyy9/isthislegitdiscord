@@ -21,6 +21,7 @@ import type {
   ClientPlatform,
   ConnectedClient,
   DirectMessage,
+  EventSoundsConfig,
   Message,
   PublicUser,
   WatchPartyAction,
@@ -1038,6 +1039,14 @@ export class ChatGateway
    */
   broadcastGuildChanged(guildId: string) {
     this.server.emit('guild:changed', { guildId });
+  }
+
+  /**
+   * The server's event sounds changed. To everyone, because whoever is in a
+   * voice channel right now has to play the new ones from the next join on.
+   */
+  broadcastEventSounds(config: EventSoundsConfig) {
+    this.server.emit('eventsounds:changed', config);
   }
 
   /**

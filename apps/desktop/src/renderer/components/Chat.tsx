@@ -40,7 +40,18 @@ import {
   type EmojiQuery,
 } from '../emoji-utils';
 import { EMOJI_PAIRS, emojiFor } from '../emoji-data';
-import { configureSounds, playSound, preloadSounds } from '../sound-player';
+import {
+  configureSounds,
+  playEventSound,
+  playSound,
+  preloadSounds,
+} from '../sound-player';
+import {
+  awaySoundFor,
+  emptyEventSounds,
+  eventSoundFor,
+  type EventSoundsConfig,
+} from '../event-sounds';
 import { voiceCues, type VoiceSnapshot } from '../voice-sounds';
 import { defaultNotificationSettings } from '../../sound-events';
 import {
@@ -349,6 +360,14 @@ export function Chat({
     defaultNotificationSettings,
   );
   /**
+   * The server's join, leave and away sounds, which an admin sets and nobody
+   * can switch off. Loaded with everything else and kept current by the
+   * socket; read through the ref by the handlers registered once on mount.
+   */
+  const [eventSounds, setEventSounds] = useState<EventSoundsConfig>(emptyEventSounds);
+  const eventSoundsRef = useRef(eventSounds);
+  eventSoundsRef.current = eventSounds;
+  /**
    * The tag or shortcode being typed in the composer, and which row of the
    * list is selected. Null whenever the popup is closed, which is most of the
    * time.
@@ -488,6 +507,8 @@ export function Chat({
    * rather than from LiveKit's events -- see voice-sounds.ts.
    */
   const voiceSnapRef = useRef<VoiceSnapshot | null>(null);
+  /** The server the call is in, for the away sound; null for a DM call. */
+  const voiceGuildRef = useRef<string | null>(null);
   const peerKey = voice.peers
     .filter((p) => !p.isLocal)
     .map((p) => p.identity)
@@ -514,7 +535,16 @@ export function Chat({
       voice.channelId ?? voiceSnapRef.current?.channelId ?? null,
     );
     voiceSnapRef.current = snap;
+    voiceGuildRef.current = guildOfChannel(voice.channelId);
     for (const cue of cues) {
+      // In a server's channel, an admin's join or leave sound replaces this
+      // person's own -- two sounds for one person walking in would be noise,
+      // and the server's is the one that cannot be switched off.
+      const server = eventSoundFor(eventSoundsRef.current, cue, guildId);
+      if (server) {
+        playEventSound(cue === 'peerJoin' ? 'join' : 'leave', server);
+        continue;
+      }
       playSound(cue, { guildId, crowd: snap.peers.length + 1 });
     }
   }, [
@@ -1079,6 +1109,7 @@ export function Chat({
       // A client starting up mid-call would otherwise see empty voice channels
       // until the next person joined or left.
       await loadVoiceState();
+      void loadEventSounds();
       await loadReads(gs);
       await loadMentions();
     })();
@@ -1308,6 +1339,22 @@ export function Chat({
       },
       onPresence: (p) => {
         const { userId, online, lastSeenAt } = p;
+        // The server only says `away: true` on the way into away, so each one
+        // is somebody going, never somebody staying gone.
+        if (p.away === true) {
+          const snap = voiceSnapRef.current;
+          const slot = awaySoundFor(
+            eventSoundsRef.current,
+            snap && {
+              status: snap.status,
+              guildId: voiceGuildRef.current,
+              peers: snap.peers,
+            },
+            userId,
+            me.id,
+          );
+          if (slot) playEventSound('away', slot);
+        }
         // Applied here rather than waited for: the dot and the duration under
         // a name are the whole of what this event changes, and all of it is in
         // the payload, so none of it has to sit wrong for a round trip. The
@@ -1338,6 +1385,7 @@ export function Chat({
       },
       // Forwarded to the update banner, which lives above this component.
       onUpdateAvailable: ({ version }) => noteUpdateAvailable(version),
+      onEventSoundsChanged: (config) => setEventSounds(config),
       onVoiceParticipants: ({ channelId, userIds }) => {
         const before = voiceByChannelRef.current[channelId] ?? [];
         voiceByChannelRef.current = { ...voiceByChannelRef.current, [channelId]: userIds };
@@ -1376,6 +1424,7 @@ export function Chat({
         if (ch) void backfill(ch);
         void loadMembers();
         void loadVoiceState();
+        void loadEventSounds();
         // Channels added or removed while this client was away produced an
         // event nobody was there to hear, so the list is re-asked for rather
         // than repaired -- and it carries the unread marks with it, which is
@@ -2040,6 +2089,15 @@ export function Chat({
     const read = reads[channelId];
     return !read || head > read;
   };
+
+  async function loadEventSounds() {
+    try {
+      setEventSounds(await api.eventSounds());
+    } catch {
+      // A server older than event sounds, or a blip: no server sounds, and
+      // everybody's own sounds play exactly as before.
+    }
+  }
 
   async function loadVoiceState() {
     try {
@@ -4398,6 +4456,9 @@ export function Chat({
           onKeybindsChange={updateKeybinds}
           notifications={notifications}
           guilds={guilds}
+          isAdmin={iAmAdmin}
+          eventSounds={eventSounds}
+          onEventSoundsChange={setEventSounds}
           voice={voice}
           onChange={(patch) => void updateVoiceSettings(patch)}
           onNotificationsChange={(patch) => void updateNotifications(patch)}

@@ -1,5 +1,10 @@
 import { bridge } from './bridge';
 import { decryptFile, unsealMessage, unsealMessages } from './e2e';
+import type {
+  EventSoundEvent,
+  EventSoundsConfig,
+  SetEventSoundBody,
+} from './event-sounds';
 
 /**
  * Thin API client. Holds the bearer token in memory and mirrors it into the
@@ -797,7 +802,56 @@ export const api = {
     }),
   /** Who is already in voice. After this the socket keeps it current. */
   voiceState: () => request<VoiceChannelStateDto[]>('/api/voice/state'),
+
+  /* ------------------------------------------------------- event sounds */
+
+  /** The server's join, leave and away sounds. The socket keeps it current. */
+  eventSounds: () => request<EventSoundsConfig>('/api/event-sounds'),
+  /** Admin only. Answers with the whole table. */
+  setEventSound: (event: EventSoundEvent, body: SetEventSoundBody) =>
+    request<EventSoundsConfig>(`/api/event-sounds/${event}`, {
+      method: 'PUT',
+      body,
+    }),
+  /** Admin only. Makes the file this event's sound; answers with the table. */
+  uploadEventSound: async (
+    event: EventSoundEvent,
+    file: File,
+  ): Promise<EventSoundsConfig> => {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    const res = await send(`${serverUrl}/api/event-sounds/${event}/file`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+    const text = await res.text();
+    let data: any = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      // Not JSON: the status line below is the answer.
+    }
+    if (!res.ok) {
+      throw new ApiError(
+        res.status,
+        res.status === 413
+          ? 'That file is over the 1 MB limit for a sound.'
+          : data.message || `HTTP ${res.status}`,
+      );
+    }
+    return data as EventSoundsConfig;
+  },
 };
+
+/**
+ * An uploaded event sound, as an object URL -- behind the bearer token like
+ * everything else, so an <audio src> cannot fetch it directly. Same cache as
+ * attachments; ids are new on every upload, so an entry never goes stale.
+ */
+export function eventSoundUrl(id: string): Promise<string> {
+  return attachmentUrl(`eventsound:${id}`, `/api/event-sounds/files/${encodeURIComponent(id)}`);
+}
 
 /* --------------------------------------------------------- attachments */
 

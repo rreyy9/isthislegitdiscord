@@ -1303,6 +1303,19 @@ than Web Audio, because a packaged renderer is on `file://`, where `fetch` is re
 an element can be pointed at the call's output device with `setSinkId`. Like Mumble, they
 still play while you are deafened.
 
+**Server sounds are the admin's, not the listener's.** Under Settings → Server sounds
+(shown to admins only) an admin picks a sound — one of the built-in files or an upload of
+up to 1 MB — for somebody joining a voice channel, leaving it, or going away while in it.
+Everybody else in that channel hears it, and nobody can turn it off: no master switch,
+per-event switch, volume or deafen of theirs applies, only the admin's volume. Where one is
+set it replaces each listener's own join or leave sound, so nobody hears both. Only people
+in the channel hear anything, and DM calls are untouched. The server only keeps the table
+(`ServerSetting` rows, uploads included, so they are in the database backup and out of the
+upload sweeper's way) and broadcasts `eventsounds:changed`; each client plays the sound
+itself from the same call snapshots and `presence:changed` events it already has
+(`renderer/event-sounds.ts`). Uploads are identified from their first bytes, not their name,
+and served with `nosniff` like attachments.
+
 **Unread tags are a table, not a text search.** `MessageMention` stores nothing that
 could not be recovered by reading every message ever sent — it is an index. "How many
 unread tags in each channel" is asked on every launch and after every read, and against

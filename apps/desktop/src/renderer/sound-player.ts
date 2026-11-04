@@ -7,6 +7,8 @@ import {
   type NotificationSettings,
   type SoundEvent,
 } from '../sound-events';
+import { eventSoundUrl } from './api';
+import type { EventSoundEvent, EventSoundSlot } from './event-sounds';
 
 /**
  * The app's sound effects: one short file per event, in the spirit of
@@ -171,6 +173,54 @@ function start(event: SoundEvent) {
     }
   } catch {
     if (PRIORITY.has(event)) fallbackPing(volume);
+  }
+}
+
+/* --------------------------------------------------------- server sounds */
+
+/**
+ * The server's join, leave and away sounds -- see event-sounds.ts.
+ *
+ * Deliberately outside everything above: no master switch, no per-event or
+ * per-server switch, no crowd limit and none of this person's volume. The
+ * admin's volume is the only one that applies. The output device does, since
+ * it is where the call is coming out.
+ */
+const lastEventPlayed = new Map<string, number>();
+const EVENT_GAP_MS = 250;
+
+export function playEventSound(event: EventSoundEvent, slot: EventSoundSlot) {
+  const now = Date.now();
+  // Two people walking in together is one sound, as with `peerJoin`.
+  if (now - (lastEventPlayed.get(event) ?? 0) < EVENT_GAP_MS) return;
+  lastEventPlayed.set(event, now);
+  void startEventSound(slot);
+}
+
+/** The settings page's play button. */
+export function previewEventSound(slot: EventSoundSlot) {
+  void startEventSound(slot);
+}
+
+async function startEventSound(slot: EventSoundSlot) {
+  const volume = Math.min(1, Math.max(0, slot.volume));
+  if (volume === 0) return;
+  try {
+    let el: HTMLAudioElement;
+    if (slot.source === 'builtin') {
+      el = base(slot.file).cloneNode(true) as HTMLAudioElement;
+    } else {
+      // Fetched once with the bearer token and kept as an object URL.
+      el = new Audio(await eventSoundUrl(slot.id));
+    }
+    el.volume = volume;
+    if (sinkId && typeof el.setSinkId === 'function') {
+      await el.setSinkId(sinkId).catch(() => {});
+    }
+    await el.play();
+  } catch {
+    // A sound that cannot be fetched or played is a missing sound, not a
+    // broken app.
   }
 }
 

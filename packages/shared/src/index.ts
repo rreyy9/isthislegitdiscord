@@ -618,6 +618,100 @@ export const RemoveMemberInput = z.object({
 });
 export type RemoveMemberInput = z.infer<typeof RemoveMemberInput>;
 
+/* ------------------------------------------------------------ event sounds */
+
+/**
+ * Sounds an admin sets for the whole server, played to everybody else in the
+ * voice channel when somebody joins it, leaves it, or goes away while in it.
+ *
+ * Unlike the sound effects each person picks for themselves (sound-events.ts
+ * in the desktop app), these are not the listener's to switch off: no master
+ * switch, no per-event switch, no volume slider of theirs applies. What does
+ * apply is being in that voice channel -- nobody outside it hears anything.
+ *
+ * Guild voice channels only. A DM call belongs to its two people, not to the
+ * server, so it keeps the listener's own sounds.
+ */
+export const EVENT_SOUND_EVENTS = ['join', 'leave', 'away'] as const;
+export const EventSoundEvent = z.enum(EVENT_SOUND_EVENTS);
+export type EventSoundEvent = z.infer<typeof EventSoundEvent>;
+
+/**
+ * The files the desktop app ships under renderer/public/sounds. A closed list,
+ * so a stored name can only ever point at one of them.
+ */
+export const BUILTIN_EVENT_SOUND_FILES = [
+  'bong_001.wav',
+  'close_002.wav',
+  'confirmation_001.wav',
+  'confirmation_004.wav',
+  'drop_002.wav',
+  'drop_004.wav',
+  'error_003.wav',
+  'error_006.wav',
+  'glass_006.wav',
+  'maximize_006.wav',
+  'maximize_008.wav',
+  'maximize_009.wav',
+  'minimize_006.wav',
+  'minimize_008.wav',
+  'minimize_009.wav',
+  'mouseclick1.wav',
+  'mouserelease1.wav',
+  'open_002.wav',
+  'question_004.wav',
+  'switch_002.wav',
+  'switch_003.wav',
+  'switch_005.wav',
+  'switch_006.wav',
+  'tick_002.wav',
+  'tick_004.wav',
+] as const;
+
+/**
+ * An uploaded sound's ceiling. A notification is a second or two; anything
+ * near this is a song, and every client in the channel fetches it.
+ */
+export const MAX_EVENT_SOUND_BYTES = 1024 * 1024;
+
+const EventSoundVolume = z.number().min(0).max(1);
+
+export const EventSoundSlot = z.discriminatedUnion('source', [
+  z.object({
+    source: z.literal('builtin'),
+    file: z.enum(BUILTIN_EVENT_SOUND_FILES),
+    volume: EventSoundVolume,
+  }),
+  z.object({
+    source: z.literal('custom'),
+    /** Served at `/api/event-sounds/files/:id`. New on every upload. */
+    id: z.string(),
+    /** The uploaded file's name, for the settings page. */
+    name: z.string(),
+    volume: EventSoundVolume,
+  }),
+]);
+export type EventSoundSlot = z.infer<typeof EventSoundSlot>;
+
+/** Null means no sound for that event. */
+export type EventSoundsConfig = Record<EventSoundEvent, EventSoundSlot | null>;
+
+/**
+ * Setting one event's sound. `custom` keeps the file already uploaded for that
+ * event and changes only its volume -- uploading is its own route, because it
+ * is multipart.
+ */
+export const SetEventSoundInput = z.discriminatedUnion('source', [
+  z.object({ source: z.literal('none') }),
+  z.object({
+    source: z.literal('builtin'),
+    file: z.enum(BUILTIN_EVENT_SOUND_FILES),
+    volume: EventSoundVolume,
+  }),
+  z.object({ source: z.literal('custom'), volume: EventSoundVolume }),
+]);
+export type SetEventSoundInput = z.infer<typeof SetEventSoundInput>;
+
 /* ------------------------------------------------------------ admin inputs */
 
 export const AdminCreateUserInput = z.object({
@@ -1433,6 +1527,11 @@ export interface ServerToClientEvents {
     channelId: string;
     userIds: string[];
   }) => void;
+  /**
+   * An admin changed the server's event sounds. The whole table, so a client
+   * that missed one change is right again after the next.
+   */
+  'eventsounds:changed': (config: EventSoundsConfig) => void;
   /**
    * A newer desktop build has been published. Sent on connect to a client that
    * is already behind, and broadcast when one is published so an app that has

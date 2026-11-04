@@ -19,6 +19,8 @@ import { PhoneAppSettings } from './PhoneApp';
 import { ProfileSettings } from './ProfileSettings';
 import { AppearanceSettings } from './AppearanceSettings';
 import { NotificationSettingsPage } from './NotificationSettings';
+import { ServerSoundSettings } from './ServerSoundSettings';
+import type { EventSoundsConfig } from '../event-sounds';
 import {
   listAudioDevices,
   PTT_RELEASE_DELAY_MAX_MS,
@@ -715,6 +717,7 @@ type Section =
   | 'input'
   | 'keybinds'
   | 'notifications'
+  | 'serverSounds'
   | 'behaviour'
   | 'phone'
   | 'about';
@@ -756,6 +759,11 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
     blurb: 'What happens when somebody tags you, and every sound the app makes. Each one can be switched off, everywhere or per server.',
   },
   {
+    id: 'serverSounds',
+    label: 'Server sounds',
+    blurb: 'Admin only. Sounds everybody in a voice channel hears when someone joins, leaves or goes away. Nobody can switch them off.',
+  },
+  {
     id: 'behaviour',
     label: 'Behaviour',
     blurb: 'What the app does on its own when you open it.',
@@ -777,6 +785,9 @@ export function SettingsModal({
   settings,
   notifications,
   guilds,
+  isAdmin,
+  eventSounds,
+  onEventSoundsChange,
   keybinds,
   voice,
   onChange,
@@ -791,6 +802,10 @@ export function SettingsModal({
   notifications: NotificationSettings;
   /** For the per-server sound settings. */
   guilds: { id: string; name: string }[];
+  /** Whether the Server sounds page is shown at all. */
+  isAdmin: boolean;
+  eventSounds: EventSoundsConfig;
+  onEventSoundsChange: (next: EventSoundsConfig) => void;
   keybinds: Keybind[];
   voice: Voice;
   onChange: (patch: Partial<VoiceSettings>) => void;
@@ -823,17 +838,20 @@ export function SettingsModal({
 
   /** Push-to-talk keys, for the summary the Input page shows. */
   const pttRows = keybinds.filter((k) => k.action === 'ptt' && k.enabled);
-  const active = SECTIONS.find((s) => s.id === section)!;
+  // Admin pages are left out of the nav rather than drawn disabled: a member
+  // has nothing to do there, and the server refuses the changes regardless.
+  const sections = SECTIONS.filter((s) => s.id !== 'serverSounds' || isAdmin);
+  const active = sections.find((s) => s.id === section) ?? sections[0];
 
   return (
     <div className="modal-wrap" onClick={onClose}>
       <div className="modal settings" onClick={(e) => e.stopPropagation()}>
         <div className="settings-nav">
           <div className="settings-title">Settings</div>
-          {SECTIONS.map((s) => (
+          {sections.map((s) => (
             <button
               key={s.id}
-              className={s.id === section ? 'on' : ''}
+              className={s.id === active.id ? 'on' : ''}
               onClick={() => setSection(s.id)}
             >
               {s.label}
@@ -1095,6 +1113,13 @@ export function SettingsModal({
                 notifications={notifications}
                 guilds={guilds}
                 onChange={onNotificationsChange}
+              />
+            )}
+
+            {active.id === 'serverSounds' && (
+              <ServerSoundSettings
+                config={eventSounds}
+                onChange={onEventSoundsChange}
               />
             )}
 

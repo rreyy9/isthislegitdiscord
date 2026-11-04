@@ -22,6 +22,8 @@ import { ChannelsModule } from './channels/channels.module';
 import { WatchPartyModule } from './watchparty/watch-party.module';
 import { SearchController } from './search/search.controller';
 import { DmsModule } from './dms/dms.module';
+import { EventSoundsController } from './event-sounds/event-sounds.controller';
+import { EventSoundsService } from './event-sounds/event-sounds.service';
 
 @Module({
   imports: [
@@ -51,7 +53,11 @@ import { DmsModule } from './dms/dms.module';
     ModerationController,
     ProfileController,
     SearchController,
+    EventSoundsController,
   ],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    EventSoundsService,
+  ],
 })
 export class AppModule {}

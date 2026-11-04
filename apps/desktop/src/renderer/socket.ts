@@ -2,6 +2,7 @@ import { io, type Socket } from 'socket.io-client';
 import { getClientVersion, getServerUrl, getToken } from './api';
 import type { DirectMessageDto, MessageDto, PublicUserDto } from './api';
 import { unsealMessage } from './e2e';
+import type { EventSoundsConfig } from './event-sounds';
 import type {
   PartyAck,
   WatchPartyActionName,
@@ -162,6 +163,8 @@ export interface SocketEvents {
    * connected simply missed it.
    */
   onPartyChat: (line: WatchPartyChatDto) => void;
+  /** An admin changed the server's join, leave or away sounds. */
+  onEventSoundsChanged: (config: EventSoundsConfig) => void;
   onStatus: (status: 'connected' | 'disconnected' | 'connecting') => void;
   onReconnected: () => void;
 }
@@ -219,6 +222,7 @@ export function connectSocket(events: SocketEvents): Socket {
   socket.on('presence:changed', events.onPresence);
   socket.on('typing:changed', events.onTyping);
   socket.on('voice:participants', events.onVoiceParticipants);
+  socket.on('eventsounds:changed', events.onEventSoundsChanged);
   socket.on('client:update-available', events.onUpdateAvailable);
   socket.on('party:started', (state) => events.onPartyState(state, true));
   socket.on('party:updated', (state) => events.onPartyState(state, false));
@@ -336,6 +340,7 @@ export function idleEvents(): SocketEvents {
     onPresence: ignore,
     onTyping: ignore,
     onVoiceParticipants: ignore,
+    onEventSoundsChanged: ignore,
     onUpdateAvailable: ignore,
     onDmMessage: ignore,
     onServerRestarting: ignore,

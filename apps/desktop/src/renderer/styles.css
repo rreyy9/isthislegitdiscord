@@ -2247,3 +2247,8 @@ button { font-family: inherit; cursor: pointer; }
   border: 0; border-radius: 6px; padding: 7px; font-weight: 700; font-size: 13px; cursor: pointer;
 }
 .mc-message:hover { filter: brightness(1.08); }
+
+/* --------------------------------------------------------- server sounds */
+.event-sound-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.settings .event-sound-row select { flex: 1; max-width: 300px; }
+.modal .hint.event-sound-error { color: var(--bad); }
